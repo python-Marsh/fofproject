@@ -1,17 +1,14 @@
 from __future__ import annotations
-
 import math
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Union
-
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from matplotlib.font_manager import FontProperties
 from pyfonts import load_google_font
-
 from fofproject.utils import hex_to_rgba, list_of_dicts_to_df, parse_month
 
 current_dir = Path(__file__).parent
@@ -38,6 +35,7 @@ def get_font2height():
         bbox = text.get_window_extent(renderer=fig.canvas.get_renderer())
         height_in_inches = bbox.height / fig.dpi
         font2height[font_size] = height_in_inches
+        plt.close(fig)
     return font2height
 
 
@@ -262,6 +260,8 @@ class Fund:
         end_month: str, optional
             The final month (inclusive) to consider in the calculation. If
             ``None`` (default), the calculation uses the end of the series.
+        ddof: int, optional
+            degree of freedom of the volatility
 
         Returns
         -------
@@ -292,6 +292,43 @@ class Fund:
 
         monthly_vol = float(s.std(ddof=ddof))
         return monthly_vol * math.sqrt(12.0)
+    
+    def rolling_volatility(self, window=12):
+        """
+        Calculate rolling volatility using the existing fund.volatility method.
+
+        Parameters
+        ----------
+        fund : object
+            Fund instance with a .volatility() method.
+        window : int
+            Rolling window length in months.
+
+        Returns
+        -------
+        pd.Series
+            Rolling volatility values indexed by month.
+        """
+        dates = [entry["datetime"] for entry in self.monthly_returns]
+        vols = []
+
+        for i in range(len(dates)):
+            if i + 1 < window:
+                vols.append(None)
+            else:
+                start_month = dates[i - window + 1].strftime("%Y-%m")
+                end_month   = dates[i].strftime("%Y-%m")
+                v = self.volatility(start_month=start_month, end_month=end_month)
+                vols.append(v)
+
+        return pd.Series(vols, index=pd.to_datetime(dates))
+    
+    def vol_of_vol(self, window=12):
+        rolling_vol = self.rolling_volatility(window=window)
+        vol_of_vol = rolling_vol.std()
+        return vol_of_vol
+    
+
 
     def sharpe_ratio(self, start_month=None, end_month=None, risk_free_rate=0.0):
         """Calculate the Sharpe ratio of returns.
@@ -376,9 +413,6 @@ class Fund:
 
         # convert annual risk-free rate to monthly
         monthly_rf = (1 + risk_free_rate) ** (1 / 12) - 1
-
-        # excess returns
-        excess_returns = s - monthly_rf
 
         # Downside returns (where returns < target)
         downside = np.minimum(0, s - monthly_rf)
@@ -627,9 +661,6 @@ class Fund:
         """
         from math import exp, pi, sqrt
 
-        import numpy as np
-        import plotly.graph_objects as go
-
         # --- small helper (in case it's not already defined) ---
         def hex_to_rgba(hx: str, alpha: float = 1.0) -> str:
             hx = hx.lstrip("#")
@@ -861,11 +892,142 @@ class Fund:
         fig.write_image(save_path, scale=2)
         return fig
 
+    def plot_rolling_vol_vs_benchmark(
+        self, benchmark=None, window=12, title="Rolling Volatility (monthly)"
+        ):
+        """
+        Plot rolling volatility for `fund` (and optionally `benchmark`), 
+        and annotate their vol-of-vol values.
+
+        Parameters
+        ----------
+        self : fund object
+            Fund-like object with .rolling_volatility(window) and .vol_of_vol(window)
+        benchmark : fund object or None
+            Optional benchmark object with same interface as fund
+        window : int
+            Rolling window size in months
+        title : str
+            Chart title
+        """
+        # Fund rolling vol & vol-of-vol
+        fund_rv = self.rolling_volatility(window=window)
+        fund_rv.index = pd.to_datetime(fund_rv.index)
+        fund_vov = self.vol_of_vol(window=window)
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=fund_rv.index, y=fund_rv.values,
+            mode="lines",
+            name=f"{self.name} (rolling vol)",
+            line=dict(color ="#C1AE94", width=2, dash="solid"),
+            hovertemplate="Date: %{x|%Y-%m}<br>Vol: %{y:.4f}<extra>Fund</extra>"
+        ))
+        fig.add_hline(
+            y=self.total_vol,
+            line_dash="dash",   # solid, dash, dot, etc.
+            line_color="#DACEBF",
+            annotation_text=f"{benchmark.name}'s Historical Vol",
+            annotation=dict(                                     # <-- styling only
+                font=dict(family="Roboto", size=8, color="rgba(193, 174, 148, 0.5)"),
+                align="left",
+                bgcolor="rgba(0,0,0,0)"                          # optional
+            ),
+            annotation_position="top right")
+
+
+        annotation_text = f"<b>Vol-of-Vol (std of rolling vol)</b><br>Fund: {fund_vov:.4f}"
+
+        # Benchmark if provided
+        if benchmark is not None:
+            bench_rv = benchmark.rolling_volatility(window=window)
+            bench_rv.index = pd.to_datetime(bench_rv.index)
+            bench_vov = benchmark.vol_of_vol(window=window)
+
+            # Align series for plotting
+            idx_union = fund_rv.index.union(bench_rv.index).sort_values()
+            fund_rv = fund_rv.reindex(idx_union)
+            bench_rv = bench_rv.reindex(idx_union)
+
+            fig.add_trace(go.Scatter(
+                x=bench_rv.index, y=bench_rv.values,
+                mode="lines",
+                name=f"{benchmark.name} (rolling vol)",
+                line=dict(color ="rgba(181,139,128,1)", width=2, dash="solid"),
+                hovertemplate="Date: %{x|%Y-%m}<br>Vol: %{y:.4f}<extra>Benchmark</extra>"
+            ))
+            fig.add_hline(
+                y=benchmark.total_vol,
+                line_dash="dash",   # solid, dash, dot, etc.
+                line_color="rgba(181,139,128,0.5)",
+                annotation_text=f"{self.name}'s Historical Vol",
+                annotation=dict(                                     # <-- styling only
+                    font=dict(family="Roboto", size=8, color="rgba(181,139,128,0.5)"),
+                    align="left",
+                    bgcolor="rgba(0,0,0,0)"                          # optional
+                ),
+                annotation_position="top right"
+            )       
+
+            annotation_text += f"<br>Benchmark: {bench_vov:.4f}"
+
+        # Layout
+        fig.update_layout(
+            title=dict(
+                text=title,   # Title text
+                x=0.0,             # Centered (0=left, 0.5=center, 1=right)
+                y=0.95,            # Vertical position
+                xanchor="left",  # Anchor position
+                yanchor="top",
+                font=dict(
+                    family="Roboto Bold",  # Font family
+                    size=22,                      # Font size
+                    color="black"                     # Font color
+                )),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.5),
+            margin=dict(l=60, r=40, t=60, b=50),
+            xaxis=dict(
+                title="Date",
+                tickfont=dict(family="Roboto", size=12, color="#53565A")
+            ),
+            yaxis=dict(
+                title="Rolling Volatility",
+                tickfont=dict(family="Roboto", size=12, color="#53565A")
+            ),
+            hovermode="x unified",
+            template="plotly_white"
+        )
+
+        # Annotate vol-of-vol in top right
+        fig.add_annotation(
+            x=1, y=1, xref="paper", yref="paper",
+            xanchor="right", yanchor="top",
+            text=annotation_text,
+            align="right",
+            showarrow=False,
+            bordercolor="rgba(0,0,0,0.08)",
+            borderwidth=1,
+            bgcolor="#DDDDDE",
+            font=dict(size=9)
+        )
+
+        fig.update_xaxes(rangeslider_visible=True)
+        file_name = f'{self.name} rolling vol plot.png'
+        save_path = f"{save_dir}/{file_name}"
+        fig.write_image(save_path, scale=2)
+        return fig
+
+
+
+
     def export_monthly_table(
-        self, language: str = "en", benchmark: Fund = None, benchmark_name: str = None
+        self, language: str = "en", 
+        benchmark: Fund = None, 
+        benchmark_name: str = None,
+        inception_column: bool = False
     ):
         """
-        Export a Plotly table of monthly + YTD returns to an interactive HTML file.
+        Export a Matplotlib table of monthly + YTD returns to an interactive HTML file.
         """
         # ---------------- configurations ----------------
         month_labels = {
@@ -902,10 +1064,12 @@ class Fund:
             "en": {
                 "ytd_label": "YTD",
                 "year": "Year",
+                "inc": "Since\nInceotion"
             },
             "cn": {
                 "ytd_label": "年初至今",
                 "year": "年分",
+                "inc": "成立至今"
             },
         }
 
@@ -913,22 +1077,14 @@ class Fund:
             table_labels = month_labels["en"]
             ytd_label = other_labels["en"]["ytd_label"]
             year_label = other_labels["en"]["year"]
+            inc_label = other_labels["en"]["inc"]
         elif language == "cn":
             table_labels = month_labels["cn"]
             ytd_label = other_labels["cn"]["ytd_label"]
             year_label = other_labels["cn"]["year"]
+            inc_label = other_labels["cn"]["inc"]
         # ---------------- prepare data ----------------
         df = self.monthly_returns
-        # processed_returns = []
-        # for entry in monthly_returns:
-        #     raw_date = entry['date']
-        #     # Try parsing date in 'DD/MM/YYYY' format
-        #     dt = datetime.strptime(str(raw_date), '%d/%m/%Y')
-        #     processed_returns.append({d
-        #         'datetime': dt,
-        #         'month': datetime(dt.year, dt.month, 1),
-        #         'value': entry['value']
-        #     })
         monthly_returns_list = [self.monthly_returns]
         if benchmark:
             benchmark_monthly_returns = [
@@ -938,7 +1094,7 @@ class Fund:
             ]
             monthly_returns_list.append(benchmark_monthly_returns)
         df_list = []
-        for monthly_returns in monthly_returns_list:
+        for i, monthly_returns in enumerate(monthly_returns_list):
             # rechieve monthly returns
             df = pd.DataFrame(monthly_returns)
             # add year and month_num columns
@@ -955,14 +1111,28 @@ class Fund:
             # calculate YTD
             ytd = df.add(1).prod(axis=1, skipna=True) - 1
             df["YTD"] = ytd
-
+            if inception_column == True:
+                # make sure only the first fund is calculated
+                if i == 0:
+                    df_sorted = df.sort_index(ascending=True)
+                    # Compound the YTD multipliers and subtract 1
+                    df_sorted['INC'] = (1.0 + df_sorted['YTD']).cumprod() - 1.0
+                    # Put the new column back on your original order (if you had it sorted desc)
+                    df['INC'] = df_sorted['INC'].reindex(df.index)
+                else:
+                    df['INC'] = np.nan
             def pct_str(x):
                 """Format a float as a percentage string."""
                 return f"{x*100:,.2f}%" if pd.notna(x) else ""
 
-            df = df.applymap(pct_str)
+            df = df.map(pct_str)
             # append to list
             df_list.append(df)
+        # 
+        if inception_column == True:
+            end_label = [ytd_label, inc_label]
+        else:
+            end_label = [ytd_label]
         if len(df_list) == 2:
             rows = []
             for year in df_list[0].index:
@@ -977,10 +1147,11 @@ class Fund:
                     + row_benchmark
                 )
             df = pd.DataFrame(rows, columns=["year"] + df_list[0].columns.to_list())
-            df.columns = [year_label] + table_labels + [ytd_label]
+            
+            df.columns = [year_label] + table_labels + end_label
         else:
             df = df_list[0]
-            df.columns = table_labels + [ytd_label]
+            df.columns = table_labels + end_label
             df.insert(0, year_label, df.index.astype(str))
 
         # ---------------- figure size calculations ----------------
@@ -999,7 +1170,7 @@ class Fund:
         elif height > max_height:
             cell_height = max_height / (num_rows + 1)
         # identify text font size that fits in the cell height
-        font_size = find_largest_font_size(cell_height * 0.8, FONT2HEIGHT)
+        font_size = find_largest_font_size(cell_height * 0.55, FONT2HEIGHT)
         # recalculate final height
         height = cell_height * (num_rows + 1)
         # ----------------draw table ----------------
@@ -1045,6 +1216,7 @@ class Fund:
         # file_name = self.name + ' key metrics table ' + self.latest_date + benchmark.name if benchmark else '' + '.png'
         save_path = f"{save_dir}/{file_name}"
         plt.savefig(save_path, bbox_inches="tight", pad_inches=0, dpi=200)
+        plt.close(fig)
 
     def export_key_metrics_table(
         self,
@@ -1054,7 +1226,6 @@ class Fund:
         metrics=None,
         horizontal: bool = False,
         fix_aspect: bool = False,
-        filename="key_metrics_table.png",
     ):
         header_fill = "#cbb69d"
         cell_fill = "#f0f0f0"
@@ -1072,7 +1243,7 @@ class Fund:
                 "mdd": "Max Drawdown",
                 "beta": f"Beta to {benchmark_fund.name}",
                 "corr": f"Correlation (vs. {benchmark_fund.name})",
-                "win": "Win Rate (Monthly)",
+                "win": "Percentage of Positive Return Months",
                 "best": "Best Month",
                 "worst": "Worst Month",
                 "aum": "AUM",
@@ -1222,6 +1393,7 @@ class Fund:
         plt.tight_layout()
         save_path = f'{save_dir}/{self.name} key metrics table {end_month.strftime("%Y-%m-%d")}.png'
         plt.savefig(save_path, bbox_inches="tight", pad_inches=0, dpi=200)
+        plt.close('fig')
 
     def summary_of_a_fund(self, benchmark_fund=None, language="en"):
         plot1 = self.export_monthly_table(language)
@@ -1233,4 +1405,5 @@ class Fund:
             horizontal=False,
         )
         plot3 = self.plot_monthly_return_distribution()
-        return plot1, plot2, plot3
+        plot4 = self.plot_rolling_vol_vs_benchmark(benchmark=benchmark_fund)
+        return plot1, plot2, plot3, plot4

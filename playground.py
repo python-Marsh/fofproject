@@ -11,10 +11,19 @@ funds_to_be_plot = subset_of_funds(funds, ['RDGFF', 'EUREKAHEDGE','MSCI CHINA', 
 start_month = "2019-12"
 end_month = "2020-7"
 
+    # Example usage:
+fig = funds['RDGFF'].plot_rolling_vol_vs_benchmark(benchmark=funds['MSCI CHINA'], window=12)
+# fig.show()
+
 # funds['RDGFF'].plot_monthly_return_distribution()
 
 # funds["LEXINGTON"].export_monthly_table(language ="cn")
-# funds['HAO'].summary_of_a_fund(funds['MSCI CHINA'],language="en")
+# funds['RDGFF'].summary_of_a_fund(funds['MSCI CHINA'],language="en")
+
+# funds['HAO'].export_monthly_table(benchmark = funds['S&P 500'],inception_column = False)
+# print(funds['HAO'].rolling_volatility())
+# print(funds['HAO'].vol_of_vol())
+# # funds['TAIREN'].export_monthly_table()
 
 
 # for name, fund in funds_to_be_plot.items():
@@ -57,17 +66,17 @@ end_month = "2020-7"
 
             # print(f"Generating cumulative return plot for {', '.join(names)} in {years_to_plot}...")
 
-plot = plot_cumulative_returns(
-    funds=subset_of_funds(funds, ['RDGFF', 'MSCI WORLD', 'MSCI CHINA']),   # subset based on this group
-    title="",
-    start_month=start_month,
-    end_month=end_month,
-    style="default",
-    language="en",
-    blur=True,
-    aspect_lock=False,
-    custom_ticks=False
-    )
+# plot = plot_cumulative_returns(
+#     funds=subset_of_funds(funds, ['RDGFF', 'MSCI WORLD', 'MSCI CHINA']),   # subset based on this group
+#     title="",
+#     start_month=start_month,
+#     end_month=end_month,
+#     style="default",
+#     language="en",
+#     blur=True,
+#     aspect_lock=False,
+#     custom_ticks=False
+#     )
 
 
 
@@ -85,21 +94,6 @@ plot = plot_cumulative_returns(
 #     min_common_months=36,
 #     title="GMV (Long-only, ≥36 common months)"
 # )
-
-# # Cumulative returns
-# fig = plot_cumulative_returns(
-#     funds=funds_to_be_plot,
-#     title=title,
-#     start_month=start_month,
-#     end_month=end_month,
-#     style="modern_dark",
-#     language="en",
-#     blur=True
-# )
-# for name, fund in funds.items():
-#     print(f"Running function for {name}")
-#     fund.annualized_return(start_month, end_month)
-
 
 # l = "plot_monthly_return_distribution()"
 # fig = eval(f"funds['LEXINGTON'].{l}")

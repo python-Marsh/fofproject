@@ -27,7 +27,7 @@ fund_name_map = {
 }
 
 STYLE_DICT = {
-    "default": {
+    "pptx": {
         "layout_config": {
             "font": {
                 "family": "Roboto, MontSerrat Semibold, sans-serif",
@@ -102,7 +102,7 @@ STYLE_DICT = {
             },
         },
     },
-    "modern_dark": {
+    "default": {
         "layout_config": {
             "font": {
                 "family": "Inter, Montserrat, system-ui, sans-serif",
@@ -126,16 +126,22 @@ STYLE_DICT = {
             },
             "legend": {
                 "orientation": "h",
-                "position": {"x": 1.0, "y": 1.15},
+                "position": {"x": 0.5, "y": 1.15},
                 "anchor": "right",
             },
         },
         "trace_config": {
-            "mark_size": {"lead": 10, "other": 6},
-            "line_width": {"lead": 2.5, "other": 1.8},
+            "mark_size": {"lead": 15, "other": 10},
+            "line_width": {"lead": 5, "other": 3},
             "color": {
-                "lead": "#0E7CFF",
-                "other": ["#8B5CF6", "#10B981", "#F59E0B", "#EF4444", "#14B8A6"],
+                "lead": "#2F2F2F",
+                "other": [
+                    "#53565A",  # light stone grey
+                    "#DACEBF",  # light teal green
+                    "#C1AE94",  # pale warm taup
+                    "#989A9C",  # off-white with warmth
+                    "#81B29A",  # pale oat
+                ],
             },
             "Y-axis": True,
         },
