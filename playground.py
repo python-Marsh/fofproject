@@ -12,6 +12,7 @@ start_month = "2019-12"
 end_month = "2020-7"
 
 # funds['RDGFF'].plot_monthly_return_distribution()
+
 # funds["LEXINGTON"].export_monthly_table(language ="cn")
 # funds['HAO'].summary_of_a_fund(funds['MSCI CHINA'],language="en")
 

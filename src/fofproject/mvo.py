@@ -10,14 +10,15 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
+
 def minimum_variance_analysis(
     funds: dict,
     *,
-    long_only: bool = True,                 # long-only (projected GD) or allow shorts (closed-form)
-    min_common_months: int = 12,            # require at least this many shared months across chosen funds
-    annualization: int = 12,                # 12 for monthly data
-    ridge: float = 1e-8,                    # small diagonal jitter for numerical stability
-    title: str | None = None
+    long_only: bool = True,  # long-only (projected GD) or allow shorts (closed-form)
+    min_common_months: int = 12,  # require at least this many shared months across chosen funds
+    annualization: int = 12,  # 12 for monthly data
+    ridge: float = 1e-8,  # small diagonal jitter for numerical stability
+    title: str | None = None,
 ):
     """
     Build the global minimum-variance (GMV) portfolio from monthly returns in `funds`.
@@ -44,7 +45,11 @@ def minimum_variance_analysis(
     for name in names:
         f = funds[name]
         s = pd.Series(
-            {e["month"]: float(e["value"]) for e in f.monthly_returns if e.get("value") is not None}
+            {
+                e["month"]: float(e["value"])
+                for e in f.monthly_returns
+                if e.get("value") is not None
+            }
         ).sort_index()
         data[name] = s
     wide = pd.DataFrame(data)
@@ -127,22 +132,22 @@ def minimum_variance_analysis(
             x=weights.index,
             y=weights.values,
             marker=dict(
-                color="rgba(193,174,148,0.75)",
-                line=dict(color=color, width=1.0)
+                color="rgba(193,174,148,0.75)", line=dict(color=color, width=1.0)
             ),
-            hovertemplate="<b>%{x}</b><br>weight = %{y:.2%}<extra></extra>"
+            hovertemplate="<b>%{x}</b><br>weight = %{y:.2%}<extra></extra>",
         )
     )
     fig.update_layout(
         title=dict(
             text=f"<b>{title or 'Global Minimum-Variance Portfolio'}</b>",
-            x=0.5, xanchor="center"
+            x=0.5,
+            xanchor="center",
         ),
         template="plotly_white",
         font=dict(family="Montserrat, Roboto", size=14, color="#53565A"),
         margin=dict(l=60, r=40, t=80, b=60),
         xaxis=dict(showgrid=False, tickangle=45),
-        yaxis=dict(title="Weight", tickformat=".0%")
+        yaxis=dict(title="Weight", tickformat=".0%"),
     )
 
     stats = {
@@ -151,7 +156,7 @@ def minimum_variance_analysis(
         "ann_ret": port_ret_ann,
         "cov": cov,
         "mu": mu,
-        "used_returns": used
+        "used_returns": used,
     }
     fig.show()
     return fig, weights, stats

@@ -1,12 +1,69 @@
-from datetime import datetime
-from typing import List, Dict, Union
-import plotly.graph_objects as go
-import pandas as pd
-import math
-import numpy as np
-from fofproject.utils import parse_month, list_of_dicts_to_df, hex_to_rgba
+from __future__ import annotations
 
-def input_monthly_returns(file_path, performance_fee = 0.2, management_fee = 0.01):
+import math
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Union
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+from matplotlib.font_manager import FontProperties
+from pyfonts import load_google_font
+
+from fofproject.utils import hex_to_rgba, list_of_dicts_to_df, parse_month
+
+current_dir = Path(__file__).parent
+save_dir = current_dir.parent.parent / "output"
+if not save_dir.exists():
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+
+def get_font2height():
+    font2height = {}
+    for font_size in range(1, 40):
+        fig, ax = plt.subplots()
+        text = ax.text(
+            0,
+            0,
+            "1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            fontsize=font_size,
+            fontname="Arial",
+        )
+        # Draw the figure to ensure renderer is available
+        fig.canvas.draw()
+        fig.set_dpi(200)  # Set a specific DPI for consistency
+        # Get the bounding box in display (pixel) coordinates
+        bbox = text.get_window_extent(renderer=fig.canvas.get_renderer())
+        height_in_inches = bbox.height / fig.dpi
+        font2height[font_size] = height_in_inches
+    return font2height
+
+
+FONT2HEIGHT = get_font2height()
+
+FONT_FNAME = {
+    "en": {
+        "bold": "src/fofproject/font/Roboto/static/Roboto-Bold.ttf",
+        "regular": "src/fofproject/font/Roboto/static/Roboto-Regular.ttf",
+    },
+    "cn": {
+        "bold": "src/fofproject/font/Roboto/static/Roboto-Bold.ttf",
+        "regular": "src/fofproject/font/Roboto/static/Roboto-Regular.ttf",
+    },
+}
+
+
+def find_largest_font_size(target_height, font2height):
+    """Find the largest font size that fits within the target height."""
+    for font_size, height in reversed(font2height.items()):
+        if height <= target_height:
+            return font_size
+    return None
+
+
+def input_monthly_returns(file_path, performance_fee=0.2, management_fee=0.01):
     """Read monthly returns from a CSV file and create Fund instances."""
     # Read CSV file
     df = pd.read_csv(file_path)
@@ -15,11 +72,8 @@ def input_monthly_returns(file_path, performance_fee = 0.2, management_fee = 0.0
         if col == "date":
             continue  # skip the date column
 
-
         returns = [
-            {"date": d, "value": v}
-            for d, v in zip(df["date"], df[col])
-            if pd.notna(v)
+            {"date": d, "value": v} for d, v in zip(df["date"], df[col]) if pd.notna(v)
         ]
 
         # Create a Fund instance
@@ -31,17 +85,25 @@ def input_monthly_returns(file_path, performance_fee = 0.2, management_fee = 0.0
         )
     return funds
 
-def subset_of_funds(funds,keys=None):
+
+def subset_of_funds(funds, keys=None):
     """funds: dict of Fund instances;
-       keys: list of fund names to extract"""
-    default = ['RDGFF', 'MSCI CHINA', 'MSCI GLOBAL']
+    keys: list of fund names to extract"""
+    default = ["RDGFF", "MSCI CHINA", "MSCI GLOBAL"]
     if keys is None:
         keys = default
-    funds_to_be_plot = {k: funds.get(k, None) for k in keys} # or a custom default
+    funds_to_be_plot = {k: funds.get(k, None) for k in keys}  # or a custom default
     return funds_to_be_plot
 
+
 class Fund:
-    def __init__(self, name:str, monthly_returns: List[Dict], performance_fee: float, management_fee: float):
+    def __init__(
+        self,
+        name: str,
+        monthly_returns: List[Dict],
+        performance_fee: float,
+        management_fee: float,
+    ):
         """Initialize a Fund object.
 
         Args:
@@ -52,14 +114,16 @@ class Fund:
         """
         processed_returns = []
         for entry in monthly_returns:
-            raw_date = entry['date']
+            raw_date = entry["date"]
             # Try parsing date in 'DD/MM/YYYY' format
-            dt = datetime.strptime(str(raw_date), '%d/%m/%Y')
-            processed_returns.append({
-                'datetime': dt, 
-                'month': datetime(dt.year, dt.month, 1), 
-                'value': entry['value']
-            })
+            dt = datetime.strptime(str(raw_date), "%d/%m/%Y")
+            processed_returns.append(
+                {
+                    "datetime": dt,
+                    "month": datetime(dt.year, dt.month, 1),
+                    "value": entry["value"],
+                }
+            )
         self.name = name
         self.monthly_returns = processed_returns
         self.performance_fee = performance_fee
@@ -67,33 +131,73 @@ class Fund:
         self.inception_date = self.compute_inception_date()
         self.latest_date = self.compute_latest_date()
         self.num_months = len(self.monthly_returns)
-        self.total_cum_rtn = self.cumulative_return(self.inception_date, self.latest_date) if self.monthly_returns else None
-        self.total_ann_rtn = self.annualized_return(self.inception_date, self.latest_date) if self.monthly_returns else None
-        self.total_vol = self.volatility(self.inception_date, self.latest_date) if self.monthly_returns else None
-        self.total_sharpe = self.sharpe_ratio(self.inception_date, self.latest_date) if self.monthly_returns else None
-        self.total_sortino = self.sortino_ratio(self.inception_date, self.latest_date) if self.monthly_returns else None
-        self.total_max_dd = self.max_drawdown(self.inception_date, self.latest_date) if self.monthly_returns else None
-        self.total_pos_months = self.positive_months(self.inception_date, self.latest_date) if self.monthly_returns else None
+        self.total_cum_rtn = (
+            self.cumulative_return(self.inception_date, self.latest_date)
+            if self.monthly_returns
+            else None
+        )
+        self.total_ann_rtn = (
+            self.annualized_return(self.inception_date, self.latest_date)
+            if self.monthly_returns
+            else None
+        )
+        self.total_vol = (
+            self.volatility(self.inception_date, self.latest_date)
+            if self.monthly_returns
+            else None
+        )
+        self.total_sharpe = (
+            self.sharpe_ratio(self.inception_date, self.latest_date)
+            if self.monthly_returns
+            else None
+        )
+        self.total_sortino = (
+            self.sortino_ratio(self.inception_date, self.latest_date)
+            if self.monthly_returns
+            else None
+        )
+        self.total_max_dd = (
+            self.max_drawdown(self.inception_date, self.latest_date)
+            if self.monthly_returns
+            else None
+        )
+        self.total_pos_months = (
+            self.positive_months(self.inception_date, self.latest_date)
+            if self.monthly_returns
+            else None
+        )
 
     def get_monthly_return(self, year: int, month: int):
         target = datetime(year, month, 1)
         for entry in self.monthly_returns:
-            if entry['month'] == target:
-                return entry['value']
+            if entry["month"] == target:
+                return entry["value"]
         return None
-    
+
     def compute_inception_date(self):
-        return min(entry['month'] for entry in self.monthly_returns) if self.monthly_returns else None
+        return (
+            min(entry["month"] for entry in self.monthly_returns)
+            if self.monthly_returns
+            else None
+        )
 
     def compute_latest_date(self):
-        return max(entry['month'] for entry in self.monthly_returns) if self.monthly_returns else None
+        return (
+            max(entry["month"] for entry in self.monthly_returns)
+            if self.monthly_returns
+            else None
+        )
 
     def __repr__(self):
-        return (f"Fund(performance_fee={self.performance_fee}, "
-                f"management_fee={self.management_fee}, "
-                f"monthly_returns={len(self.monthly_returns)} entries)")
+        return (
+            f"Fund(performance_fee={self.performance_fee}, "
+            f"management_fee={self.management_fee}, "
+            f"monthly_returns={len(self.monthly_returns)} entries)"
+        )
 
-    def cumulative_return(self, start_month: Union[str, datetime], end_month: Union[str, datetime]) -> float:
+    def cumulative_return(
+        self, start_month: Union[str, datetime], end_month: Union[str, datetime]
+    ) -> float:
         """
         Calculates cumulative value from start_month to end_month (inclusive).
 
@@ -110,15 +214,17 @@ class Fund:
             The cumulative return from start_month (exclusive) to end_month (inclusive).
         """
         # convert str to datetime
-        start_month = parse_month(start_month) if isinstance(start_month, str) else start_month
+        start_month = (
+            parse_month(start_month) if isinstance(start_month, str) else start_month
+        )
         end_month = parse_month(end_month) if isinstance(end_month, str) else end_month
 
         value = 1.0
         for entry in self.monthly_returns:
             if start_month <= entry["month"] <= end_month:
-                value *= (1 + float(entry["value"]))
+                value *= 1 + float(entry["value"])
         return value - 1.0
-    
+
     def annualized_return(self, start_month, end_month):
         """
         Calculates annualized return from start_month to end_month (inclusive).
@@ -128,18 +234,22 @@ class Fund:
         cumulative = self.cumulative_return(start_month, end_month)
 
         # Step 2: Parse dates
-        start_date =  parse_month(start_month)
+        start_date = parse_month(start_month)
         end_date = parse_month(end_month)
 
         # Step 3: Calculate number of months in the period
-        months = (end_date.year - start_date.year) * 12 + (end_date.month - start_date.month) +1
+        months = (
+            (end_date.year - start_date.year) * 12
+            + (end_date.month - start_date.month)
+            + 1
+        )
 
         # Step 4: Annualize (compound return adjusted to yearly scale)
-        annualized = (1+cumulative) ** (12 / months) - 1
+        annualized = (1 + cumulative) ** (12 / months) - 1
 
         return annualized
 
-    def volatility(self, start_month=None, end_month=None, ddof=1): 
+    def volatility(self, start_month=None, end_month=None, ddof=1):
         """Calculate the volatility of returns.
 
         Parameters
@@ -159,15 +269,14 @@ class Fund:
             The standard deviation of the selected series of monthly returns.
             If the range is empty, ``0.0`` is returned.
         """
-        start_month =  parse_month(start_month)
+        start_month = parse_month(start_month)
         start_ms = start_month.month + start_month.year * 12 if start_month else None
         end_month = parse_month(end_month)
         end_ms = end_month.month + end_month.year * 12 if end_month else None
         vals = []
         for entry in self.monthly_returns:
             m = entry["datetime"].month + entry["datetime"].year * 12
-            if ((start_ms is None or start_ms <= m)
-                and (end_ms is None or m <= end_ms)):
+            if (start_ms is None or start_ms <= m) and (end_ms is None or m <= end_ms):
                 try:
                     vals.append(float(entry["value"]))
                 except (TypeError, ValueError):
@@ -183,7 +292,7 @@ class Fund:
 
         monthly_vol = float(s.std(ddof=ddof))
         return monthly_vol * math.sqrt(12.0)
-    
+
     def sharpe_ratio(self, start_month=None, end_month=None, risk_free_rate=0.0):
         """Calculate the Sharpe ratio of returns.
 
@@ -228,7 +337,6 @@ class Fund:
         sharpe = (ann_return - risk_free_rate) / vol
 
         return sharpe
-    
 
     def sortino_ratio(self, start_month=None, end_month=None, risk_free_rate=0.0):
         """
@@ -249,35 +357,35 @@ class Fund:
             Annualized Sortino ratio. Returns 0.0 if no usable data.
         """
 
-        start_month =  parse_month(start_month)
+        start_month = parse_month(start_month)
         end_month = parse_month(end_month)
-
 
         # collect returns
         vals = [
             float(entry["value"])
             for entry in self.monthly_returns
-                if ((start_month is None or start_month <= entry["datetime"])
-                    and (end_month is None or entry["datetime"] <= end_month))
+            if (
+                (start_month is None or start_month <= entry["datetime"])
+                and (end_month is None or entry["datetime"] <= end_month)
+            )
         ]
         if not vals:
             return 0.0
 
         s = np.array(vals)
 
-
         # convert annual risk-free rate to monthly
-        monthly_rf = (1 + risk_free_rate) ** (1/12) - 1
+        monthly_rf = (1 + risk_free_rate) ** (1 / 12) - 1
 
         # excess returns
         excess_returns = s - monthly_rf
 
         # Downside returns (where returns < target)
         downside = np.minimum(0, s - monthly_rf)
-        
+
         # Downside deviation (like std dev but only for negative returns)
-        downside_deviation = np.sqrt((np.sum(downside**2)/(len(s)+1))) * np.sqrt(12)
-        
+        downside_deviation = np.sqrt((np.sum(downside**2) / (len(s) + 1))) * np.sqrt(12)
+
         if downside_deviation == 0:
             return np.nan  # Avoid division by zero
         ann_return = self.annualized_return(start_month, end_month)
@@ -312,7 +420,7 @@ class Fund:
         for entry in self.monthly_returns:
             entry_dt = parse_month(entry["month"])
             if start_dt <= entry_dt <= end_dt:
-                cum_value *= (1 + float(entry["value"]))
+                cum_value *= 1 + float(entry["value"])
                 values.append(cum_value - 1.0)  # cumulative return up to this month
 
         cumulative = np.array(values)
@@ -327,7 +435,7 @@ class Fund:
         max_drawdown = np.max(drawdowns)
 
         return max_drawdown
-    
+
     def positive_months(self, start_month=None, end_month=None):
         """
         Count the number of months with positive returns.
@@ -356,8 +464,7 @@ class Fund:
                 count += 1
             total += 1
 
-        return count/total if total > 0 else 0.0
-    
+        return count / total if total > 0 else 0.0
 
     def return_in_positive_months(self, start_month=None, end_month=None):
         """
@@ -383,11 +490,11 @@ class Fund:
         for entry in self.monthly_returns:
             entry_dt = parse_month(entry["month"])
             if start_dt <= entry_dt <= end_dt and float(entry["value"]) > 0:
-                total_rtn += float(entry["value"]) 
+                total_rtn += float(entry["value"])
                 count += 1
 
-        return total_rtn/count if count > 0 else 0.0
-    
+        return total_rtn / count if count > 0 else 0.0
+
     def return_in_negative_months(self, start_month=None, end_month=None):
         """
         Calculate cumulative return in months with negative returns.
@@ -412,45 +519,41 @@ class Fund:
         for entry in self.monthly_returns:
             entry_dt = parse_month(entry["month"])
             if start_dt <= entry_dt <= end_dt and float(entry["value"]) < 0:
-                total_rtn += float(entry["value"]) 
+                total_rtn += float(entry["value"])
                 count += 1
 
-        return total_rtn/count if count > 0 else 0.0
-    
+        return total_rtn / count if count > 0 else 0.0
+
     def join_two_funds(self, benchmark_fund, start_month=None, end_month=None):
 
-        fund1 = self.monthly_returns   # market returns
-        fund2 = benchmark_fund.monthly_returns   # stock returns
+        fund1 = self.monthly_returns  # market returns
+        fund2 = benchmark_fund.monthly_returns  # stock returns
 
         req_start = parse_month(start_month)
-        req_end   = parse_month(end_month)
+        req_end = parse_month(end_month)
 
         # gather available months
-        f1_months = [e['month'] for e in fund1]
-        f2_months = [e['month'] for e in fund2]
+        f1_months = [e["month"] for e in fund1]
+        f2_months = [e["month"] for e in fund2]
 
         earliest_common_start = max(min(f1_months), min(f2_months))
         latest_common_end = min(max(f1_months), max(f2_months))
         # final clamped range (also respect the user’s requested window)
         adj_start = max(req_start, earliest_common_start)
-        adj_end   = min(req_end,   latest_common_end)
+        adj_end = min(req_end, latest_common_end)
 
         if adj_start > adj_end:
             return [], [], (adj_start, adj_end)  # or raise, depending on your needs
 
         fund1_values = [
-            entry['value']
-            for entry in fund1
-            if adj_start <= entry['month'] <= adj_end
+            entry["value"] for entry in fund1 if adj_start <= entry["month"] <= adj_end
         ]
 
         fund2_values = [
-            entry['value']
-            for entry in fund2
-            if adj_start <= entry['month'] <= adj_end
+            entry["value"] for entry in fund2 if adj_start <= entry["month"] <= adj_end
         ]
         return fund1_values, fund2_values
-    
+
     def correlation_to(self, benchmark_fund, start_month=None, end_month=None):
         """_summary_
 
@@ -460,7 +563,9 @@ class Fund:
             end_month (_type_): _description_
         """
         # Example: list1 and list2 are your two lists
-        fund1_values, fund2_values = self.join_two_funds(benchmark_fund=benchmark_fund, start_month=start_month, end_month=end_month)
+        fund1_values, fund2_values = self.join_two_funds(
+            benchmark_fund=benchmark_fund, start_month=start_month, end_month=end_month
+        )
         arr1 = np.array(fund1_values)
         arr2 = np.array(fund2_values)
 
@@ -490,37 +595,40 @@ class Fund:
             Beta of this fund relative to the benchmark fund.
             Returns None if insufficient data.
         """
-               # Example: assume you already have two lists of dicts
-        fund1_values, fund2_values = self.join_two_funds(benchmark_fund=benchmark_fund, start_month=start_month, end_month=end_month)
+        # Example: assume you already have two lists of dicts
+        fund1_values, fund2_values = self.join_two_funds(
+            benchmark_fund=benchmark_fund, start_month=start_month, end_month=end_month
+        )
 
         # Combine into 2D numpy array (rows = months, columns = funds)
         np_array = np.column_stack([fund1_values, fund2_values])
 
         # Now you can access
-        m = np_array[:, 1]   # fund 1 (market returns)
-        s = np_array[:, 0]   # fund 2 (stock returns)
-        covariance = np.cov(s,m) # Calculate covariance between stock and market
-        beta = covariance[0,1]/covariance[1,1]
+        m = np_array[:, 1]  # fund 1 (market returns)
+        s = np_array[:, 0]  # fund 2 (stock returns)
+        covariance = np.cov(s, m)  # Calculate covariance between stock and market
+        beta = covariance[0, 1] / covariance[1, 1]
 
         return beta
 
     def plot_monthly_return_distribution(
         self,
         *,
-        start_month: str | None = None,   # "YYYY-MM"
-        end_month: str | None = None,     # "YYYY-MM"
+        start_month: str | None = None,  # "YYYY-MM"
+        end_month: str | None = None,  # "YYYY-MM"
         bins: int = 24,
-        value_key: str = "value",         # key in each monthly_returns entry
-        show_stats_lines: bool = True
+        value_key: str = "value",  # key in each monthly_returns entry
+        show_stats_lines: bool = True,
     ):
         """
         Plot a histogram (bar chart) of this fund's historical monthly returns.
         Style is defined directly inside the function (no external STYLE_DICT).
         Adds a smoothed KDE curve for a softer distribution edge.
         """
+        from math import exp, pi, sqrt
+
         import numpy as np
         import plotly.graph_objects as go
-        from math import sqrt, pi, exp
 
         # --- small helper (in case it's not already defined) ---
         def hex_to_rgba(hx: str, alpha: float = 1.0) -> str:
@@ -532,9 +640,9 @@ class Fund:
         layout_config = {
             "font": dict(family="Montserrat, Roboto", size=14, color="#53565A"),
             "margin": dict(l=54, r=42, t=84, b=72),
-            "grid_color": "#e9e9ea"
+            "grid_color": "#e9e9ea",
         }
-        color = "#C1AE94"   # keep your requested color
+        color = "#C1AE94"  # keep your requested color
         fund_name = self.name or "Fund"
 
         # ----- clamp date window to available history -----
@@ -566,7 +674,9 @@ class Fund:
                         break
 
         if not vals:
-            raise ValueError(f"No monthly return values found for {fund_name} in the requested window.")
+            raise ValueError(
+                f"No monthly return values found for {fund_name} in the requested window."
+            )
 
         vals = np.array(vals, dtype=float)
         n = len(vals)
@@ -582,7 +692,7 @@ class Fund:
         # ----- simple Gaussian KDE (no scipy) -----
         # Scott's rule-of-thumb bandwidth
         std = float(np.std(vals)) if n > 1 else 1e-6
-        h = 1.06 * std * (n ** (-1/5)) if n > 1 and std > 0 else (rng / 20.0 or 1e-3)
+        h = 1.06 * std * (n ** (-1 / 5)) if n > 1 and std > 0 else (rng / 20.0 or 1e-3)
 
         x_grid = np.linspace(vmin - bin_width, vmax + bin_width, 400)
 
@@ -609,7 +719,7 @@ class Fund:
                 histnorm="percent",
                 marker=dict(
                     color=hex_to_rgba(color, 0.55),
-                    line=dict(color=hex_to_rgba(color, 0.85), width=0.8)
+                    line=dict(color=hex_to_rgba(color, 0.85), width=0.8),
                 ),
                 opacity=0.95,
                 hovertemplate=(
@@ -618,7 +728,7 @@ class Fund:
                     "<extra></extra>"
                 ),
                 name=fund_name,
-                showlegend=False
+                showlegend=False,
             )
         )
 
@@ -631,7 +741,7 @@ class Fund:
                 line=dict(color=color, width=3),
                 name="KDE",
                 hovertemplate="<b>%{x:.2%}</b><br>%{y:.2f}% (smooth)<extra></extra>",
-                showlegend=False
+                showlegend=False,
             )
         )
 
@@ -639,24 +749,43 @@ class Fund:
         if show_stats_lines:
             # 0% vertical line
             fig.add_shape(
-                type="line", x0=0, x1=0, y0=0, y1=1,
-                xref="x", yref="paper",
-                line=dict(color="#2F2F2F", width=1, dash="dash")
+                type="line",
+                x0=0,
+                x1=0,
+                y0=0,
+                y1=1,
+                xref="x",
+                yref="paper",
+                line=dict(color="#2F2F2F", width=1, dash="dash"),
             )
             fig.add_annotation(
-                x=0, y=1.02, xref="x", yref="paper",
-                text="0%", showarrow=False, font=dict(size=12, color="#666")
+                x=0,
+                y=1.02,
+                xref="x",
+                yref="paper",
+                text="0%",
+                showarrow=False,
+                font=dict(size=12, color="#666"),
             )
             # mean line
             fig.add_shape(
-                type="line", x0=mean_r, x1=mean_r, y0=0, y1=1,
-                xref="x", yref="paper",
-                line=dict(color=color, width=2)
+                type="line",
+                x0=mean_r,
+                x1=mean_r,
+                y0=0,
+                y1=1,
+                xref="x",
+                yref="paper",
+                line=dict(color=color, width=2),
             )
             fig.add_annotation(
-                x=mean_r, y=1.02, xref="x", yref="paper",
-                text=f"Mean {mean_r:.2%}", showarrow=False,
-                font=dict(size=12, color=color)
+                x=mean_r,
+                y=1.02,
+                xref="x",
+                yref="paper",
+                text=f"Mean {mean_r:.2%}",
+                showarrow=False,
+                font=dict(size=12, color=color),
             )
 
         # ----- layout tweaks for a cleaner, smoother feel -----
@@ -664,7 +793,10 @@ class Fund:
             title=dict(
                 text=f"<b>{fund_name} — Monthly Return Distribution</b>",
                 font=dict(size=26),
-                x=0.5, xanchor="center", y=0.97, yanchor="middle"
+                x=0.5,
+                xanchor="center",
+                y=0.97,
+                yanchor="middle",
             ),
             template="plotly_white",
             font=layout_config["font"],
@@ -673,9 +805,11 @@ class Fund:
             plot_bgcolor="white",
             hovermode="x unified",
             hoverlabel=dict(
-                font=dict(family=layout_config["font"]["family"], size=13, color="#333"),
+                font=dict(
+                    family=layout_config["font"]["family"], size=13, color="#333"
+                ),
                 bgcolor="white",
-                bordercolor=hex_to_rgba(color, 0.6)
+                bordercolor=hex_to_rgba(color, 0.6),
             ),
             xaxis=dict(
                 title="Monthly Return",
@@ -685,7 +819,7 @@ class Fund:
                 zeroline=False,
                 ticks="outside",
                 ticklen=6,
-                tickcolor="#d7d7d9"
+                tickcolor="#d7d7d9",
             ),
             yaxis=dict(
                 title="Months (%)",
@@ -695,16 +829,21 @@ class Fund:
                 zeroline=False,
                 ticks="outside",
                 ticklen=6,
-                tickcolor="#d7d7d9"
+                tickcolor="#d7d7d9",
             ),
-            bargap=0.35
+            bargap=0.35,
         )
 
         # small stats box (subtle, right-top)
         fig.add_annotation(
-            xref="paper", yref="paper",
-            x=0.98, y=0.98, xanchor="right", yanchor="top",
-            align="right", showarrow=False,
+            xref="paper",
+            yref="paper",
+            x=0.98,
+            y=0.98,
+            xanchor="right",
+            yanchor="top",
+            align="right",
+            showarrow=False,
             text=(
                 f"<span style='color:{color};'><b>{fund_name}</b></span><br>"
                 f"n = {n}<br>"
@@ -714,148 +853,212 @@ class Fund:
             ),
             bgcolor="#F6F6F7",
             bordercolor=hex_to_rgba(color, 0.9),
-            borderwidth=1
+            borderwidth=1,
         )
 
-        fig.show()
+        file_name = f'{self.name} monthly return distribution plot {sm.strftime("%Y-%m-%d")} to {em.strftime("%Y-%m-%d")}.png'
+        save_path = f"{save_dir}/{file_name}"
+        fig.write_image(save_path, scale=2)
         return fig
 
-    def export_monthly_table(self, language="en"):
+    def export_monthly_table(
+        self, language: str = "en", benchmark: Fund = None, benchmark_name: str = None
+    ):
         """
         Export a Plotly table of monthly + YTD returns to an interactive HTML file.
         """
-        df = pd.DataFrame(self.monthly_returns)
-        date_col = "month" if "month" in df.columns else "datetime"
-        df["date"] = pd.to_datetime(df[date_col])
-        df["year"] = df["date"].dt.year
-        df["month_num"] = df["date"].dt.month
-
-        month_labels = {"en":["Jan","Feb","Mar","Apr","May","Jun",
-                        "Jul","Aug","Sep","Oct","Nov","Dec"],
-                        "cn": ["1月","2月","3月","4月","5月","6月",
-                        "7月","8月","9月","10月","11月","12月"]}
+        # ---------------- configurations ----------------
+        month_labels = {
+            "en": [
+                "Jan",
+                "Feb",
+                "Mar",
+                "Apr",
+                "May",
+                "Jun",
+                "Jul",
+                "Aug",
+                "Sep",
+                "Oct",
+                "Nov",
+                "Dec",
+            ],
+            "cn": [
+                "1月",
+                "2月",
+                "3月",
+                "4月",
+                "5月",
+                "6月",
+                "7月",
+                "8月",
+                "9月",
+                "10月",
+                "11月",
+                "12月",
+            ],
+        }
         other_labels = {
-                    "en": {
-                        'ytd_label': "YTD",
-                        'year': "Year",
-                    },
-                    "cn": {
-                        'ytd_label': "年初至今",
-                        'year': "年分",
-                    }
-                }
-        settings = {
-                "en": {
-                    'font': dict(family="Roboto", color="black", size=12),
-                },
-                "cn": {
-                    'font': dict(family="Roboto", color="black", size=12),  
-                }
-            }
+            "en": {
+                "ytd_label": "YTD",
+                "year": "Year",
+            },
+            "cn": {
+                "ytd_label": "年初至今",
+                "year": "年分",
+            },
+        }
 
         if language == "en":
-            table_labels = month_labels['en']
-            ytd_label = other_labels['en']['ytd_label']
-            year_label = other_labels['en']['year']
+            table_labels = month_labels["en"]
+            ytd_label = other_labels["en"]["ytd_label"]
+            year_label = other_labels["en"]["year"]
         elif language == "cn":
-            table_labels = month_labels['cn']
-            ytd_label = other_labels['cn']['ytd_label']
-            year_label = other_labels['cn']['year']
-
-        pivot = (
-            df.pivot_table(index="year", columns="month_num", values="value", aggfunc="last")
-              .reindex(columns=range(1, 13))
-              .sort_index(ascending=False)
-        )
-        ytd = (pivot.add(1).prod(axis=1, skipna=True) - 1)
-        pivot["YTD"] = ytd
-
-        # format values
-        def pct_str(x):
-            return f"{x*100:,.2f}%" if pd.notna(x) else ""
-
-        display_cols = table_labels + [ytd_label]
-        pivot.columns = table_labels + [ytd_label]
-        pivot = pivot[display_cols]
-        pivot_str = pivot.applymap(pct_str)
-        pivot_str.insert(0, year_label, pivot_str.index.astype(str))
-        header_values = [year_label] + display_cols
-        # ---------------
-        num_rows = pivot_str.shape[0]
-        num_cols = len(header_values)  # 14 (Year + 12 months + YTD)    
-        
-        px_per_char = 7.5
-        month_label_width = max(52, int(px_per_char * max(len(lbl) for lbl in display_cols)))
-        year_col_width   = max(64, int(px_per_char * len(year_label) + 10))
-
-        # Optional: if values are long (e.g., many digits), widen month cells slightly
-        # Look at a sample of formatted values to estimate content length
-        try:
-            sample_vals = pd.Series(
-                [v for col in display_cols for v in pivot_str[col].head(5)]
+            table_labels = month_labels["cn"]
+            ytd_label = other_labels["cn"]["ytd_label"]
+            year_label = other_labels["cn"]["year"]
+        # ---------------- prepare data ----------------
+        df = self.monthly_returns
+        # processed_returns = []
+        # for entry in monthly_returns:
+        #     raw_date = entry['date']
+        #     # Try parsing date in 'DD/MM/YYYY' format
+        #     dt = datetime.strptime(str(raw_date), '%d/%m/%Y')
+        #     processed_returns.append({d
+        #         'datetime': dt,
+        #         'month': datetime(dt.year, dt.month, 1),
+        #         'value': entry['value']
+        #     })
+        monthly_returns_list = [self.monthly_returns]
+        if benchmark:
+            benchmark_monthly_returns = [
+                entry
+                for entry in benchmark.monthly_returns
+                if (entry["month"] in [e["month"] for e in self.monthly_returns])
+            ]
+            monthly_returns_list.append(benchmark_monthly_returns)
+        df_list = []
+        for monthly_returns in monthly_returns_list:
+            # rechieve monthly returns
+            df = pd.DataFrame(monthly_returns)
+            # add year and month_num columns
+            df["year"] = df["month"].dt.year
+            df["month_num"] = df["month"].dt.month
+            # pivot table have years as rows and months as columns
+            df = (
+                df.pivot_table(
+                    index="year", columns="month_num", values="value", aggfunc="last"
+                )
+                .reindex(columns=range(1, 13))
+                .sort_index(ascending=False)
             )
-            max_val_chars = min(12, max((len(s) for s in sample_vals if isinstance(s, str)), default=6))
-            month_label_width = max(month_label_width, int(px_per_char * max_val_chars) + 20)
-        except Exception:
-            pass
+            # calculate YTD
+            ytd = df.add(1).prod(axis=1, skipna=True) - 1
+            df["YTD"] = ytd
 
-        # Compose column widths: first (year) + uniform month/YTD widths
-        columnwidths = [year_col_width] + [month_label_width] * (num_cols - 1)
+            def pct_str(x):
+                """Format a float as a percentage string."""
+                return f"{x*100:,.2f}%" if pd.notna(x) else ""
 
-        # Base heights (px). With more rows, reduce height so tables don't get huge.
-        base_cell_height = 28
-        base_header_height = 30
-        if num_rows > 10:
-            # Scale down height roughly inversely with row count (cap at 14px)
-            scale = 10 / num_rows
-            base_cell_height = max(14, int(base_cell_height * scale))
-            base_header_height = max(16, int(base_header_height * scale))
+            df = df.applymap(pct_str)
+            # append to list
+            df_list.append(df)
+        if len(df_list) == 2:
+            rows = []
+            for year in df_list[0].index:
+                row_value = df_list[0].loc[year].tolist()
+                row_benchmark = df_list[1].loc[year].tolist()
+                row_benchmark = [
+                    b if v else "" for v, b in zip(row_value, row_benchmark)
+                ]
+                rows.append([year] + row_value)
+                rows.append(
+                    [benchmark_name if benchmark_name else benchmark.name]
+                    + row_benchmark
+                )
+            df = pd.DataFrame(rows, columns=["year"] + df_list[0].columns.to_list())
+            df.columns = [year_label] + table_labels + [ytd_label]
+        else:
+            df = df_list[0]
+            df.columns = table_labels + [ytd_label]
+            df.insert(0, year_label, df.index.astype(str))
 
-        # Enforce height:width ratio <= 10:26 (≈0.3846) using the NARROWEST column
-        ratio_num, ratio_den = 10, 26
-        min_col_width = min(columnwidths)
-        max_allowed_height = int(min_col_width * ratio_num / ratio_den)
-
-        cells_height = min(base_cell_height, max_allowed_height)
-        header_height = min(base_header_height, max_allowed_height)
-
-        # Safety: ensure at least 12px for legibility
-        cells_height = max(12, cells_height)
-        header_height = max(14, header_height)
-
-        # ----------------------
-
-        fig = go.Figure(
-            data=[go.Table(
-                columnwidth=[50] + [55]*13,
-                header=dict(values=header_values,
-                            fill_color="#cbb69d",
-                            align="center",
-                            font=settings[language]['font'],
-                            height=30),
-                cells=dict(values=[pivot_str[col].tolist() for col in pivot_str.columns],
-                           fill_color="#f0f0f0",
-                           font=settings[language]['font'],
-                           align="center",
-                           height=28)
-            )]
+        # ---------------- figure size calculations ----------------
+        width = 26
+        min_height, max_height = 3, 10
+        num_rows, num_cols = df.shape  # 14 (Year + 12 months + YTD)
+        # width
+        cell_width = width / num_cols
+        # default cell height
+        cell_height = 1
+        # calculate table height using the default cell height
+        height = cell_height * (num_rows + 1)
+        # adjust cell height if the table is too tall or too short
+        if height < min_height:
+            cell_height = min_height / (num_rows + 1)
+        elif height > max_height:
+            cell_height = max_height / (num_rows + 1)
+        # identify text font size that fits in the cell height
+        font_size = find_largest_font_size(cell_height * 0.8, FONT2HEIGHT)
+        # recalculate final height
+        height = cell_height * (num_rows + 1)
+        # ----------------draw table ----------------
+        # initialize figure
+        fig, ax = plt.subplots(figsize=(width, height))
+        ax.axis("off")  # Hide axes
+        # create table
+        table = ax.table(
+            cellText=df.values,
+            colLabels=df.columns,
+            cellLoc="center",  # Center align text in cells
+            loc="center",
         )
-        fig.update_layout(
-            margin=dict(l=20, r=20, t=20, b=20),
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)"
-        )
-        fig.show()
-        return fig
-            
-    def export_key_metrics_table(self, end_month, benchmark_fund=None, language="en", metrics=None, horizontal: bool = False, fix_aspect: bool = False):
+        # style table
+        for (row, col), cell in table.get_celld().items():
+            if row == 0:
+                # use bold font for header row
+                fname = FONT_FNAME[language]["bold"]
+                cell.set_facecolor("#cbb69d")
+            else:
+                # use bold font for value rows if applicable
+                fname = (
+                    FONT_FNAME[language]["bold"]
+                    if benchmark and row % 2 == 1
+                    else FONT_FNAME[language]["regular"]
+                )
+                cell.set_facecolor("#f0f0f0")
+            cell.set_width(cell_width / width - 1e-9)
+            cell.set_height(cell_height / height - 1e-9)
+            cell.set_edgecolor("white")
+            font_prop = FontProperties(fname=fname, size=font_size)
+            cell.get_text().set_fontproperties(font_prop)
 
+        plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+        plt.margins(0)
+        plt.axis("off")
+        plt.tight_layout()
+        file_name = (
+            f'{self.name} monthly return table {self.latest_date.strftime("%Y-%m-%d")}'
+            + (f" {benchmark.name}" if benchmark else "")
+            + ".png"
+        )
+        # file_name = self.name + ' key metrics table ' + self.latest_date + benchmark.name if benchmark else '' + '.png'
+        save_path = f"{save_dir}/{file_name}"
+        plt.savefig(save_path, bbox_inches="tight", pad_inches=0, dpi=200)
+
+    def export_key_metrics_table(
+        self,
+        end_month,
+        benchmark_fund=None,
+        language="en",
+        metrics=None,
+        horizontal: bool = False,
+        fix_aspect: bool = False,
+        filename="key_metrics_table.png",
+    ):
         header_fill = "#cbb69d"
         cell_fill = "#f0f0f0"
-        settings = {
-            "en": {"font": dict(family="Roboto", color="black", size=12)},
-            "cn": {"font": dict(family="Roboto", color="black", size=12)},
-        }
+        text_color = "black"
 
         labels = {
             "en": {
@@ -867,7 +1070,7 @@ class Fund:
                 "sortino": "Sortino Ratio",
                 "cum": "Cumulative Return",
                 "mdd": "Max Drawdown",
-                "beta": f'Beta to {benchmark_fund.name}',
+                "beta": f"Beta to {benchmark_fund.name}",
                 "corr": f"Correlation (vs. {benchmark_fund.name})",
                 "win": "Win Rate (Monthly)",
                 "best": "Best Month",
@@ -884,7 +1087,7 @@ class Fund:
                 "vol": "波动率",
                 "sharpe": "夏普比率",
                 "sortino": "索提诺比率",
-                "cum": "累計增长率",
+                "cum": "累计增长率",
                 "mdd": "最大回撤",
                 "beta": f"贝塔({benchmark_fund.name})",
                 "corr": f"相关性（{benchmark_fund.name}）",
@@ -897,32 +1100,42 @@ class Fund:
                 "turnover": "平均月换手率",
             },
         }
-        L = labels["en"] if language not in labels else labels[language]
+        L = labels.get(language, labels["en"])
 
         placeholder_values = {
-            # Percentages
             "cagr": f"{100 * self.annualized_return(self.inception_date, end_month):.1f}%",
             "vol": f"{100 * self.volatility(self.inception_date, end_month):.1f}%",
             "mdd": f"{100 * self.max_drawdown(self.inception_date, end_month):.1f}%",
             "cum": f"{100 * self.cumulative_return(self.inception_date, end_month):.1f}%",
-            "win": f"{100 * self.positive_months(self.inception_date, end_month):.1f}%",
-            
-            # Ratios
+            "win": f"{self.positive_months(self.inception_date, end_month)*100:.2f}%",
             "sharpe": f"{self.sharpe_ratio(self.inception_date, end_month):.2f}",
             "sortino": f"{self.sortino_ratio(self.inception_date, end_month):.2f}",
             "beta": f"{self.beta_to(benchmark_fund, self.inception_date, end_month):.2f}",
             "corr": f"{self.correlation_to(benchmark_fund, self.inception_date, end_month):.2f}",
-            "win": f"{self.positive_months(self.inception_date, end_month)*100:.2f}%",
-            "best": "[placeholder]", 
-            "worst":"[placeholder]", 
-            "aum": "[placeholder]", 
+            "best": "[placeholder]",
+            "worst": "[placeholder]",
+            "aum": "[placeholder]",
             "skew": "[placeholder]",
-            "kurt": "[placeholder]", 
+            "kurt": "[placeholder]",
             "turnover": "[placeholder]",
         }
 
-        default_order = ["cagr","vol","sharpe","sortino","mdd","beta","corr",
-                        "win","best","worst","aum","skew","kurt","turnover"]
+        default_order = [
+            "cagr",
+            "vol",
+            "sharpe",
+            "sortino",
+            "mdd",
+            "beta",
+            "corr",
+            "win",
+            "best",
+            "worst",
+            "aum",
+            "skew",
+            "kurt",
+            "turnover",
+        ]
 
         if metrics is None:
             selected = default_order
@@ -934,88 +1147,90 @@ class Fund:
 
         metric_labels = [L[k] for k in selected]
         metric_values = [placeholder_values[k] for k in selected]
-
-        px_per_char = 7.5
-
-        metric_width = max(120, int(px_per_char * max(len(str(s)) for s in metric_labels)) + 20)
-        value_width  = max(100, int(px_per_char * max(len(str(s)) for s in metric_values)) + 20)
-        n_rows = len(metric_labels)
-        base_cell_h, base_header_h = 28, 32
-        if n_rows > 12:
-            scale = 12 / n_rows
-            base_cell_h = max(16, int(base_cell_h * scale))
-            base_header_h = max(18, int(base_header_h * scale))
-        ratio_num, ratio_den = 10, 26
-        min_col_width = min(metric_width, value_width)
-        max_h = int(min_col_width * ratio_num / ratio_den)
-        cell_h = max(14, min(base_cell_h, max_h))
-        header_h = max(16, min(base_header_h, max_h))
-
+        font_size = 30
+        font_width = FONT2HEIGHT[font_size]
+        font_height = FONT2HEIGHT[font_size]
 
         if not horizontal:
-            fig = go.Figure(data=[go.Table(
-                columnwidth=[metric_width, value_width],
-                header=dict(values=[L["metric"], L["value"]],
-                            fill_color=header_fill, align="left",
-                            font=settings[language]["font"], height=header_h),
-                cells=dict(values=[metric_labels, metric_values],
-                        fill_color=cell_fill, align="left",
-                        font=settings[language]["font"], height=cell_h),
-            )])
-            total_table_width = metric_width + value_width
-            n_rows_rendered = n_rows + 1  # header + rows
+            # Vertical table: two columns (Metric | Value)
+            cell_text = list(zip(metric_labels, metric_values))
+            col_labels = [L["metric"], L["value"]]
+            col_widths = [
+                font_width * max([len(row[i]) for row in cell_text]) * 1.2
+                for i in range(2)
+            ]
+            header_height = font_height * 2.5 * 1.2
+            cell_height = font_height * 2.5
+            table_width = sum(col_widths)
+            table_height = header_height + cell_height * len(cell_text)
+
         else:
-            # --- FIXED: one list per column (each with a single value) ---
-            col_widths = []
-            for lab, val in zip(metric_labels, metric_values):
-                w = max(len(lab), len(val))
-                col_widths.append(max(90, int(px_per_char * w) + 16))
-            total_table_width = sum(col_widths)
-            n_rows_rendered = 2  # header + one value row
+            # Horizontal table: one row of metrics, one row of values
+            cell_text = [metric_values]
+            col_labels = metric_labels
+            col_widths = [
+                font_width * max(len(lab), len(val)) * 1.2
+                for lab, val in zip(metric_labels, metric_values)
+            ]
+            table_width = sum(col_widths)
+            if fix_aspect:
+                table_height = table_width / 14
+                header_height = table_height / 2.2 * 1.2
+                cell_height = table_height / 2.2
+            else:
+                header_height = font_height * 2.5 * 1.2
+                cell_height = font_height * 2.5
+                table_height = header_height + cell_height
 
-            fig = go.Figure(data=[go.Table(
-                columnwidth=col_widths,
-                header=dict(
-                    values=metric_labels,
-                    # bold=True,
-                    fill_color=header_fill,
-                    align=["center"] * len(metric_labels),
-                    font=settings[language]["font"],
-                    height=header_h,
-                ),
-                cells=dict(
-                    # one column per metric, each column has a single row (the value)
-                    values=[[v] for v in metric_values],
-                    fill_color=cell_fill,
-                    align=["center"] * len(metric_values),
-                    font=settings[language]["font"],
-                    height=cell_h,
-                ),
-            )])
+        # Create figure sized to fit table
+        fig, ax = plt.subplots(figsize=(table_width, table_height))
+        ax.axis("off")
 
-        margins = dict(l=20, r=20, t=20, b=20)
-        fig.update_layout(
-            margin=margins,
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
+        table = ax.table(
+            cellText=cell_text,
+            colLabels=col_labels,
+            loc="center",
+            cellLoc="center",
         )
-        if fix_aspect:
-        # Height:Width = aspect_ratio (H:W)
-            ar_h, ar_w = (10, 50)
-            # Derive canvas width from table width plus margins
-            canvas_width = int(total_table_width + margins["l"] + margins["r"])
-            canvas_height = int(canvas_width * (ar_h / ar_w))
-            fig.update_layout(width=canvas_width, height=canvas_height)
-        else:
-            # Let Plotly auto-size width; set a sensible height from row count
-            auto_height = int(margins["t"] + margins["b"] + header_h + cell_h * (n_rows_rendered - 1) + 8)
-            fig.update_layout(height=auto_height)
 
-        fig.show()
-        return fig
+        # Style cells
+        for (row, col), cell in table.get_celld().items():
+            if row == 0:  # header
+                cell.set_facecolor(header_fill)
+                cell.set_text_props(color=text_color, weight="bold")
+                cell.set_height(header_height / table_height - 1e-9)
+                cell.set_width(col_widths[col] / table_width - 1e-9)
+            else:  # data rows
+                cell.set_facecolor(cell_fill)
+                cell.set_text_props(color=text_color)
+                cell.set_height(cell_height / table_height - 1e-9)
+                cell.set_width(col_widths[col] / table_width - 1e-9)
+            font_prop = FontProperties(
+                fname=(
+                    FONT_FNAME[language]["bold"]
+                    if row == 0
+                    else FONT_FNAME[language]["regular"]
+                ),
+                size=font_size,
+            )
+            cell.get_text().set_fontproperties(font_prop)
+            cell.set_edgecolor("white")
+
+        plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+        plt.margins(0)
+        plt.axis("off")
+        plt.tight_layout()
+        save_path = f'{save_dir}/{self.name} key metrics table {end_month.strftime("%Y-%m-%d")}.png'
+        plt.savefig(save_path, bbox_inches="tight", pad_inches=0, dpi=200)
 
     def summary_of_a_fund(self, benchmark_fund=None, language="en"):
         plot1 = self.export_monthly_table(language)
-        plot2 = self.export_key_metrics_table(benchmark_fund=benchmark_fund, end_month=self.latest_date, language=language,metrics=["cagr","vol","sharpe","sortino","mdd","beta","corr","win"],horizontal=False)
+        plot2 = self.export_key_metrics_table(
+            benchmark_fund=benchmark_fund,
+            end_month=self.latest_date,
+            language=language,
+            metrics=["cagr", "vol", "sharpe", "sortino", "mdd", "beta", "corr", "win"],
+            horizontal=False,
+        )
         plot3 = self.plot_monthly_return_distribution()
         return plot1, plot2, plot3

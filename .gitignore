@@ -1,5 +1,8 @@
 __pycache__/
+*.DS_Store
 *.pyc
 *.pyo
 *.pyd
+*.png
+output/
 RETURN DATA.csv
