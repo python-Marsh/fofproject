@@ -16,7 +16,6 @@ save_dir = current_dir.parent.parent / "output"
 if not save_dir.exists():
     save_dir.mkdir(parents=True, exist_ok=True)
 
-
 def get_font2height():
     font2height = {}
     for font_size in range(1, 40):
@@ -38,7 +37,6 @@ def get_font2height():
         plt.close(fig)
     return font2height
 
-
 FONT2HEIGHT = get_font2height()
 
 FONT_FNAME = {
@@ -52,14 +50,12 @@ FONT_FNAME = {
     },
 }
 
-
 def find_largest_font_size(target_height, font2height):
     """Find the largest font size that fits within the target height."""
     for font_size, height in reversed(font2height.items()):
         if height <= target_height:
             return font_size
     return None
-
 
 def input_monthly_returns(file_path, performance_fee=0.2, management_fee=0.01):
     """Read monthly returns from a CSV file and create Fund instances."""
@@ -83,7 +79,6 @@ def input_monthly_returns(file_path, performance_fee=0.2, management_fee=0.01):
         )
     return funds
 
-
 def subset_of_funds(funds, keys=None):
     """funds: dict of Fund instances;
     keys: list of fund names to extract"""
@@ -92,7 +87,6 @@ def subset_of_funds(funds, keys=None):
         keys = default
     funds_to_be_plot = {k: funds.get(k, None) for k in keys}  # or a custom default
     return funds_to_be_plot
-
 
 class Fund:
     def __init__(
@@ -328,8 +322,6 @@ class Fund:
         vol_of_vol = rolling_vol.std()
         return vol_of_vol
     
-
-
     def sharpe_ratio(self, start_month=None, end_month=None, risk_free_rate=0.0):
         """Calculate the Sharpe ratio of returns.
 
@@ -1231,6 +1223,7 @@ class Fund:
         # file_name = self.name + ' key metrics table ' + self.latest_date + benchmark.name if benchmark else '' + '.png'
         save_path = f"{save_dir}/{file_name}"
         plt.savefig(save_path, bbox_inches="tight", pad_inches=0, dpi=200)
+        plt.show()
         plt.close(fig)
 
     def export_key_metrics_table(
@@ -1408,6 +1401,7 @@ class Fund:
         plt.tight_layout()
         save_path = f'{save_dir}/{self.name} key metrics table {end_month.strftime("%Y-%m-%d")}.png'
         plt.savefig(save_path, bbox_inches="tight", pad_inches=0, dpi=200)
+        plt.show()
         plt.close('fig')
 
     def summary_of_a_fund(self, benchmark_fund=None, language="en"):
@@ -1421,4 +1415,7 @@ class Fund:
         )
         plot3 = self.plot_monthly_return_distribution()
         plot4 = self.plot_rolling_vol_vs_benchmark(benchmark=benchmark_fund)
+
+        plot3.show()
+        plot4.show()
         return plot1, plot2, plot3, plot4

@@ -31,7 +31,7 @@ STYLE_DICT = {
         "layout_config": {
             "font": {
                 "family": "Roboto, MontSerrat Semibold, sans-serif",
-                "size": 14,
+                "size": 20,
                 "color": "#2f2f2f",
             },
             "margin": {
@@ -61,6 +61,10 @@ STYLE_DICT = {
                     "y": -0.07 # scale to the entire plot area
                 }
             },
+            "fixed_aspect": {        
+                "aspect_w": 13.5, 
+                "aspect_h": 12
+            }
         },
         "trace_config": {
             "mark_size": {
@@ -116,23 +120,27 @@ STYLE_DICT = {
             "zero_color" :"#53565A",
             "date_ticks": {
                 "num": 8,
-                "format": "%b"
+                "format": "%b %Y"
             },
 
             "annotation": {
                 "add_annotation": False,
-                "position": {"x": 0.5, "y": 1.12},
-                "style": {"font_size": 14, "font_color": "#374151"},
+                "position": {"x": 0.5, "y": 0.1},
+                "style": {"font_size": 12, "font_color": "#374151"},
             },
             "legend": {
                 "orientation": "h",
                 "position": {"x": 0.5, "y": 1.15},
                 "anchor": "right",
             },
+            "fixed_aspect": {        
+                "aspect_w": 13.5, 
+                "aspect_h": 6
+            }
         },
         "trace_config": {
-            "mark_size": {"lead": 15, "other": 10},
-            "line_width": {"lead": 5, "other": 3},
+            "mark_size": {"lead": 10, "other": 8},
+            "line_width": {"lead":3, "other": 2},
             "color": {
                 "lead": "#2F2F2F",
                 "other": [
@@ -197,6 +205,10 @@ STYLE_DICT = {
                     "y": -0.17,  # scale to the entire plot area
                 },
             },
+            "fixed_aspect": {        
+                "aspect_w": 13.5, 
+                "aspect_h": 6
+            }
         },
         "trace_config": {
             "mark_size": {
@@ -242,7 +254,6 @@ STYLE_DICT = {
     },
 }
 
-
 def _add_value_boxes(fig, xs, ys, *, indices, color, fmt, boxcfg):
     for i in indices:
         fig.add_annotation(
@@ -261,7 +272,6 @@ def _add_value_boxes(fig, xs, ys, *, indices, color, fmt, boxcfg):
             yshift=boxcfg.get("yshift", 6),
             opacity=1.0,
         )
-
 
 def plot_cumulative_returns(
 
@@ -293,11 +303,11 @@ def plot_cumulative_returns(
     # Update start_month and end_month if the current months are not valid
     if not (
         start_month
-        and start_month > min(start_months)
-        and start_month < max(end_months)
+        and start_month > max(start_months)
+        and start_month < min(end_months)
     ):
         start_month = max(start_months)
-    if not (end_month and min(start_months) < end_month < max(end_months)):
+    if not (end_month and max(start_months) < end_month < min(end_months)):
         end_month = min(end_months)
     # Assert start month is before end month
     if start_month > end_month:
@@ -571,7 +581,9 @@ def plot_cumulative_returns(
         )
 
     if aspect_lock == True:
-        ASPECT_W, ASPECT_H = 13.5, 6
+        
+        ASPECT_W = layout_config['fixed_aspect']['aspect_w']
+        ASPECT_H = layout_config['fixed_aspect']['aspect_h']
         WIDTH = 1280
         HEIGHT = int(WIDTH * ASPECT_H / ASPECT_W)
         fig.update_layout(width=WIDTH, height=HEIGHT)
@@ -623,7 +635,6 @@ def plot_cumulative_returns(
     fig.show()
 
     return fig
-
 
 def plot_fund_correlation_heatmap(
     funds: dict,
@@ -697,9 +708,16 @@ def plot_fund_correlation_heatmap(
             hovertext=hover,
         )
     )
+    n_funds = len(funds_order)
 
+    # Scale each cell to, say, 40px in both directions
+    cell_size = 40
+    width  = cell_size * n_funds
+    height = cell_size * n_funds
     # 5) Layout polish
     fig.update_layout(
+        width=width,
+        height=height,  
         title=dict(text=f"<b>{title}</b>", x=0.5, xanchor="center"),
         template="plotly_white",
         font=dict(family="Montserrat, Roboto", size=13, color="#53565A"),
