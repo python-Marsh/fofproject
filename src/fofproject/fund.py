@@ -893,7 +893,7 @@ class Fund:
         return fig
 
     def plot_rolling_vol_vs_benchmark(
-        self, benchmark=None, window=12, title="Rolling Volatility (monthly)"
+        self, benchmark=None, window=12, title="Rolling Volatility (annually)"
         ):
         """
         Plot rolling volatility for `fund` (and optionally `benchmark`), 
@@ -910,14 +910,24 @@ class Fund:
         title : str
             Chart title
         """
+        def to_py_dt(idx):
+            if isinstance(idx, pd.PeriodIndex):
+                idx = idx.to_timestamp()
+            idx = pd.to_datetime(idx, errors='coerce')
+            idx = pd.DatetimeIndex(idx).tz_localize(None)
+            return [ts.to_pydatetime() for ts in idx] 
         # Fund rolling vol & vol-of-vol
         fund_rv = self.rolling_volatility(window=window)
         fund_rv.index = pd.to_datetime(fund_rv.index)
+        fund_rv = fund_rv.dropna()
+
+        x_fund  = to_py_dt(fund_rv.index)
+
         fund_vov = self.vol_of_vol(window=window)
 
         fig = go.Figure()
         fig.add_trace(go.Scatter(
-            x=fund_rv.index, y=fund_rv.values,
+            x=x_fund, y=fund_rv.values,
             mode="lines",
             name=f"{self.name} (rolling vol)",
             line=dict(color ="#C1AE94", width=2, dash="solid"),
@@ -926,66 +936,75 @@ class Fund:
         fig.add_hline(
             y=self.total_vol,
             line_dash="dash",   # solid, dash, dot, etc.
-            line_color="#DACEBF",
-            annotation_text=f"{benchmark.name}'s Historical Vol",
+            line_color="rgba(193, 174, 148, 0.5)",
+            annotation_text=f"{self.name}'s Historical Vol",
             annotation=dict(                                     # <-- styling only
-                font=dict(family="Roboto", size=8, color="rgba(193, 174, 148, 0.5)"),
+                font=dict(family="Roboto Bold", size=9, color="#C1AE94"),
                 align="left",
                 bgcolor="rgba(0,0,0,0)"                          # optional
             ),
             annotation_position="top right")
 
 
-        annotation_text = f"<b>Vol-of-Vol (std of rolling vol)</b><br>Fund: {fund_vov:.4f}"
+        annotation_text = f"<b>Vol-of-Vol (std of rolling vol)</b><br>{self.name}: {fund_vov:.4f}"
 
         # Benchmark if provided
         if benchmark is not None:
             bench_rv = benchmark.rolling_volatility(window=window)
             bench_rv.index = pd.to_datetime(bench_rv.index)
+            bench_rv = bench_rv.reindex(fund_rv.index) 
             bench_vov = benchmark.vol_of_vol(window=window)
+            
 
             # Align series for plotting
             idx_union = fund_rv.index.union(bench_rv.index).sort_values()
             fund_rv = fund_rv.reindex(idx_union)
             bench_rv = bench_rv.reindex(idx_union)
+            x_bench = to_py_dt(bench_rv.index)
 
             fig.add_trace(go.Scatter(
-                x=bench_rv.index, y=bench_rv.values,
+                x=x_bench, y=bench_rv.values,
                 mode="lines",
                 name=f"{benchmark.name} (rolling vol)",
-                line=dict(color ="rgba(181,139,128,1)", width=2, dash="solid"),
+                line=dict(color ="#989A9C", width=2, dash="solid"),
                 hovertemplate="Date: %{x|%Y-%m}<br>Vol: %{y:.4f}<extra>Benchmark</extra>"
             ))
             fig.add_hline(
                 y=benchmark.total_vol,
                 line_dash="dash",   # solid, dash, dot, etc.
-                line_color="rgba(181,139,128,0.5)",
-                annotation_text=f"{self.name}'s Historical Vol",
+                line_color="rgba(152,154,156,0.5)",
+                annotation_text=f"{benchmark.name}'s Historical Vol",
                 annotation=dict(                                     # <-- styling only
-                    font=dict(family="Roboto", size=8, color="rgba(181,139,128,0.5)"),
+                    font=dict(family="Roboto Bold", size=9, color="#989A9C"),
                     align="left",
                     bgcolor="rgba(0,0,0,0)"                          # optional
                 ),
                 annotation_position="top right"
             )       
 
-            annotation_text += f"<br>Benchmark: {bench_vov:.4f}"
+            annotation_text += f"<br>{benchmark.name}: {bench_vov:.4f}"
 
         # Layout
         fig.update_layout(
             title=dict(
-                text=title,   # Title text
-                x=0.0,             # Centered (0=left, 0.5=center, 1=right)
+                text=f"<b>{self.name} -- {title}<b>",   # Title text
+                x=0.1,             # Centered (0=left, 0.5=center, 1=right)
                 y=0.95,            # Vertical position
                 xanchor="left",  # Anchor position
                 yanchor="top",
                 font=dict(
                     family="Roboto Bold",  # Font family
-                    size=22,                      # Font size
-                    color="black"                     # Font color
+                    size=18,                      # Font size
+                    color="#53565A"                     # Font color
                 )),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.5),
-            margin=dict(l=60, r=40, t=60, b=50),
+            legend=dict(
+                orientation="v", 
+                font = dict(size =9),
+                yanchor="bottom", 
+                y=-0.25, 
+                xanchor="right", 
+                x=1),
+            margin=dict(l=60, r=40, t=60, b=100),
             xaxis=dict(
                 title="Date",
                 tickfont=dict(family="Roboto", size=12, color="#53565A")
@@ -1003,22 +1022,18 @@ class Fund:
             x=1, y=1, xref="paper", yref="paper",
             xanchor="right", yanchor="top",
             text=annotation_text,
-            align="right",
+            font=dict(family="Roboto Bold", size=9, color="rgba(83,86,90,1)"),
+            align="left",
+            bgcolor="rgba(218, 206, 191,0.35)",                          # optional
             showarrow=False,
-            bordercolor="rgba(0,0,0,0.08)",
-            borderwidth=1,
-            bgcolor="#DDDDDE",
-            font=dict(size=9)
+            bordercolor="rgba(193,174,148,0.9)",
+            borderwidth=1.5,
         )
 
-        fig.update_xaxes(rangeslider_visible=True)
         file_name = f'{self.name} rolling vol plot.png'
         save_path = f"{save_dir}/{file_name}"
         fig.write_image(save_path, scale=2)
         return fig
-
-
-
 
     def export_monthly_table(
         self, language: str = "en", 
