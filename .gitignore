@@ -6,4 +6,6 @@ __pycache__/
 *.png
 output/
 input/
+*.env
 RETURN DATA.csv
+QUALITATIVE DATA.csv
