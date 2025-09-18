@@ -79,13 +79,10 @@ def input_monthly_returns(file_path, performance_fee=0.2, management_fee=0.01):
         )
     return funds
 
-def subset_of_funds(funds, keys=None):
+def subset_of_funds(funds, keys=["RDGFF", "MSCI CHINA", "MSCI GLOBAL"]):
     """funds: dict of Fund instances;
     keys: list of fund names to extract"""
-    default = ["RDGFF", "MSCI CHINA", "MSCI GLOBAL"]
-    if keys is None:
-        keys = default
-    funds_to_be_plot = {k: funds.get(k, None) for k in keys}  # or a custom default
+    funds_to_be_plot = {k: funds.get(k, None) for k in keys} 
     return funds_to_be_plot
 
 class Fund:

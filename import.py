@@ -41,7 +41,7 @@ Goal: Categorize geographical focus. Allowed values: ["latin_america","north_ame
 Goal: Identify strategy type(s). Allowed values: ["equity_ls","event_driven","multi-strat","special_situation","quantitative","market_neutral","convertible_arbitrage","global_macro","vol_arb","stat_arb","cta","activists","commodities","fixed_income"]. Fallback: If unclear, return "NaN" (a single string, not an array). 
 
 5) investment_sector 
-Goal: Identify sector focus. Allowed values: ["equity_diversified","equity_healthcare","equity_TMT","equity_finance","equity_consumer","commodities","fixed_income"]. Fallback: If unclear, return "NaN" (a single string, not an array). 
+Goal: Identify sector focus. Allowed values: ["equity_diversified","equity_energy","equity_industrials","equity_healthcare","equity_TMT","equity_finance","equity_consumer","commodities","fixed_income"]. Fallback: If unclear, return "NaN" (a single string, not an array). Rule: If ≥ 4 sectors are mentioned, return ["equity_diversified"].
 
 6) aum_size 
 Goal: Extract fund-level AUM in USD millions (number). Rules: Convert values such as "US$ 1,969.00mn" → 1969.00. 
@@ -174,22 +174,29 @@ def process_performance(data):
         ]
         """
         results = []
-        
+        year_counter = 2025
         for data in data_lists:
             year = None
             values = []
             
             for item in data:
                 value = item.strip()
+                # skip the empty value, and do not append it to the results
+                if not value:
+                    continue
+                # find the year and add it as key later
                 if value.isdigit() and 1900 <= int(value) <= 2100:
                     year = int(value)
                     years.append(year)
+                # find the value and add it as values
                 else:
                     values.append(value)
             
             if year is None:
-                raise ValueError(f"No valid year found in {data}")
-            
+              year = year_counter
+              years.append(year)
+              year_counter -= 1
+              print(f"No valid year found in {data}, appending {year}")
             results.append({year: values})
         
         return results
@@ -250,7 +257,8 @@ def process_pdf(file_path: str):
     """
     text = extract_text_from_pdf(file_path)
     response = client.responses.create(
-        model="gpt-5-nano",
+        model="gpt-4.1-mini",
+        temperature=0,
         input=[
             {
                 "role": "system",
@@ -265,16 +273,15 @@ def process_pdf(file_path: str):
     output_text = response.output_text.strip()
     print(output_text)
     data = json.loads(output_text)
-
     data["performance"] = process_performance(data)
+    print(data)
     return data
 
-def process_pdfs_in_current_folder():
+def process_pdfs_in_current_folder(folder_path = "input"):
     """
     Iterates through all PDFs in the same folder as this script (relative path).
     Returns a list of JSON results.
     """
-    folder_path = "."   # relative path to current directory
     results = []
 
     for file_name in os.listdir(folder_path):
@@ -285,9 +292,12 @@ def process_pdfs_in_current_folder():
             results.append(result)
     return results
 
-file_path = r"input\BASSWOOD_US_EquityLS_6.99% rtn.pdf"
-jj_sonson = process_pdf(file_path)
-print(jj_sonson)
+test = process_pdfs_in_current_folder()
+print(test)
+
+# file_path = r"input\BASSWOOD_US_EquityLS_6.99% rtn.pdf"
+# jj_sonson = process_pdf(file_path)
+# print(jj_sonson)
 
 # sample_fund_data = {
 #     "fund_name": "ASIAN TECHNOLOGY",
