@@ -2,7 +2,7 @@ from __future__ import annotations
 import math
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Union
+from typing import Dict, List, Union, Optional
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -10,6 +10,7 @@ import plotly.graph_objects as go
 from matplotlib.font_manager import FontProperties
 from pyfonts import load_google_font
 from fofproject.utils import hex_to_rgba, list_of_dicts_to_df, parse_month
+from dateutil.relativedelta import relativedelta
 
 current_dir = Path(__file__).parent
 save_dir = current_dir.parent.parent / "output"
@@ -90,9 +91,20 @@ class Fund:
         self,
         name: str,
         monthly_returns: List[Dict],
-        performance_fee: float,
-        management_fee: float,
+        fund_des: Optional[str] = None,
+        investment_location: Optional[List[str]] = None,
+        investment_strategy: Optional[List[str]] = None,
+        investment_sector: Optional[List[str]] = None,
+        manager_names: Optional[List[str]] = None,
+        manager_profiles: Optional[Dict[str, Dict]] = None,
+        contact: Optional[Dict[str, str]] = None,
+        aum_size: Optional[float] = None,
+        net_exposure: Optional[List[float]] = None,
+        net_return: Optional[bool] = None,
+        management_fee: Optional[float] = None,
+        performance_fee: Optional[float] = None,
     ):
+
         """Initialize a Fund object.
 
         Args:
@@ -101,6 +113,9 @@ class Fund:
             performance_fee (float): Performance fee as a decimal (e.g., 0.2 for 20%)
             management_fee (float): Management fee as a decimal (e.g., 0.01 for 1%)
         """
+        if not all(isinstance(x, dict) for x in monthly_returns):
+            raise ValueError(f"{name}: No valid monthly returns")
+        
         processed_returns = []
         for entry in monthly_returns:
             raw_date = entry["date"]
@@ -113,10 +128,28 @@ class Fund:
                     "value": entry["value"],
                 }
             )
+        for i in range(1, len(processed_returns)):
+            prev = processed_returns[i - 1]["month"]
+            curr = processed_returns[i]["month"]
+            expected = prev + relativedelta(months=1)
+            if curr != expected:
+                raise ValueError(
+                    f"{name}: Monthly returns not continuous — expected {expected.date()}, found {curr.date()}"
+                )
         self.name = name
-        self.monthly_returns = processed_returns
-        self.performance_fee = performance_fee
+        self.fund_des = fund_des
+        self.investment_location = investment_location or []
+        self.investment_strategy = investment_strategy or []
+        self.investment_sector = investment_sector or []
+        self.manager_names = manager_names or []
+        self.manager_profiles = manager_profiles or {}
+        self.contact = contact or {}
+        self.aum_size = aum_size
+        self.net_exposure = net_exposure or []
+        self.net_return = net_return
         self.management_fee = management_fee
+        self.performance_fee = performance_fee
+        self.monthly_returns = processed_returns
         self.inception_date = self.compute_inception_date()
         self.latest_date = self.compute_latest_date()
         self.num_months = len(self.monthly_returns)
