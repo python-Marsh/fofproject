@@ -3,6 +3,8 @@ import plotly.graph_objects as go
 from src.fofproject.fund import Fund, input_monthly_returns, subset_of_funds
 from src.fofproject.plot import plot_cumulative_returns, plot_fund_correlation_heatmap
 from src.fofproject.mvo import minimum_variance_analysis
+from src.fofproject.load import load_saved_json, init_funds, process_pdfs_in_folder
+
 
 # Initialize and load data
 funds = input_monthly_returns(r"RETURN DATA.csv", performance_fee=0.2, management_fee=0.01)

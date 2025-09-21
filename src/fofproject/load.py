@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()
 from typing import List, Dict
-from src.fofproject.fund import Fund
+from fofproject.fund import Fund
 from openai import OpenAI
 from datetime import datetime
 import pandas as pd
@@ -387,6 +387,7 @@ def gpt_process_pdf(file_path: str):
         print(output_text)
         data = json.loads(output_text)
         data["performance"] = process_performance(data)
+    data['performance'].sort(key=lambda x:datetime.strptime(x["date"], "%d/%m/%Y"))
     print(data)
     return data
 
@@ -475,34 +476,52 @@ def results_to_csv(results, folder_path="input"):
                 data[date] = {}
             data[date][fund_name] = perf["value"]
 
-    # Convert to DataFrame
-    df = pd.DataFrame.from_dict(data, orient="index").sort_index()
+    df_new = pd.DataFrame.from_dict(data, orient="index").sort_index()
+    df_new.index.name = "date"
+    df_new.reset_index(inplace=True)
+    df_new["date"] = pd.to_datetime(df_new["date"], dayfirst=True).dt.strftime("%d/%m/%Y")
 
-    # Reset index so 'date' is the first column
-    df.index.name = "date"
-    df.reset_index(inplace=True)
+    if os.path.exists(output_path):
+        # Load the old CSV
+        df_old = pd.read_csv(output_path)
+
+        # Merge: keep latest values for overlapping dates
+        df_combined = pd.concat([df_old, df_new], ignore_index=True)
+        # Normalize old dates as well
+        df_old["date"] = pd.to_datetime(df_old["date"], dayfirst=True).dt.strftime("%d/%m/%Y")
+        # Drop duplicates on 'date', keeping the last occurrence (from df_new)
+        df_combined = df_combined.drop_duplicates(subset="date", keep="last")
+
+        # Sort by date if needed
+        df_combined = df_combined.sort_values(by="date")
+
+        print(f"🔄 Existing CSV found. Updated with new data and saved to {output_path}")
+    else:
+        # If no CSV exists, just use the new data
+        df_combined = df_new
+        print(f"✅ No existing CSV found. Created new CSV at {output_path}")
 
     # Save to CSV
-    df.to_csv(output_path, index=False)
+    df_combined["date"] = pd.to_datetime(df_combined["date"], dayfirst=True).dt.strftime("%d/%m/%Y")
+    df_combined.to_csv(output_path, index=False)
 
-    print(f"✅ Fund performance CSV saved to {output_path}")
-    return df
+    return df_combined
 
-def init_funds(funds_data: List[Dict]) -> List[Fund]:
+def init_funds(funds_data: List[Dict]) -> Dict[str, Fund]:
     """Initialize Fund objects from a list of dicts.
 
     Args:
         funds_data (List[Dict]): List of fund-like dicts
 
     Returns:
-        List[Fund]: Successfully initialized Fund objects
+        Dict{Fund_name: fund}: Successfully initialized Fund objects
     """
-    initialized_funds = []
+    initialized_funds = {}
     for data in funds_data:
         try:
             fund = Fund(
                 name=data["fund_name"],
-                monthly_returns=data.get("monthly_returns", []),
+                monthly_returns=data.get("performance"),
                 fund_des=data.get("fund_des"),
                 investment_location=data.get("investment_location"),
                 investment_strategy=data.get("investment_strategy"),
@@ -516,12 +535,69 @@ def init_funds(funds_data: List[Dict]) -> List[Fund]:
                 management_fee=data.get("management_fee"),
                 performance_fee=data.get("performance_fee"),
             )
-            initialized_funds.append(fund)
+            initialized_funds[f'{fund.name}'] = fund
         except ValueError as e:
             # Skip invalid funds and log the issue
             print(f"Skipping fund {data.get('fund_name', 'UNKNOWN')}: {e}")
     return initialized_funds
 
-# test = load_saved_json(folder_path=r"input\test")
-# Funds = init_funds(test)
-# print([f.name for f in Funds])
+def offload_funds(funds: Dict[str, Fund]) -> List[Dict]:
+    """Convert a dict of Fund objects back into a list of dicts.
+
+    Args:
+        funds (Dict[str, Fund]): Dict of Fund objects, keyed by fund name
+
+    Returns:
+        List[Dict]: List of fund-like dicts (same structure as input to init_funds)
+    """
+    results = []
+    for fund in funds.values():
+        string_returns = []
+        for entry in fund.monthly_returns:
+            string_returns.append(
+                {
+                    "date": entry["datetime"].strftime("%d/%m/%Y"),
+                    "value": entry["value"],
+                }
+            )
+        fund.monthly_returns = string_returns
+        results.append({
+            "fund_name": fund.name,
+            "fund_des": getattr(fund, "fund_des", None),
+            "performance": getattr(fund, "monthly_returns"),
+            "investment_location": getattr(fund, "investment_location", None),
+            "investment_strategy": getattr(fund, "investment_strategy", None),
+            "investment_sector": getattr(fund, "investment_sector", None),
+            "manager_names": getattr(fund, "manager_names", None),
+            "manager_profiles": getattr(fund, "manager_profiles", None),
+            "contact": getattr(fund, "contact", None),
+            "aum_size": getattr(fund, "aum_size", None),
+            "net_exposure": getattr(fund, "net_exposure", None),
+            "net_return": getattr(fund, "net_return", None),
+            "management_fee": getattr(fund, "management_fee", None),
+            "performance_fee": getattr(fund, "performance_fee", None),
+        })
+    return results
+
+def results_to_json(results, folder_path="input"):
+    for result in results:
+      # Create "json" folder inside folder_path if it doesn't exist
+      json_folder = os.path.join(folder_path, "json")
+      os.makedirs(json_folder, exist_ok=True)
+
+      # Save """decide on result or results""" to a JSON file inside the "json" folder
+      output_path = os.path.join(json_folder, f"{result['fund_name']}.json")
+      with open(output_path, "w", encoding="utf-8") as f:
+          json.dump(result, f, ensure_ascii=False, indent=2)
+
+def save_changes_in_fund(funds: Dict[str, Fund], folder_path = "input"):
+    results = offload_funds(funds)
+    results_to_csv(results=results, folder_path=folder_path)
+    results_to_json(results=results, folder_path=folder_path)
+
+# test = load_saved_json(folder_path=r"input")   
+
+# p = init_funds(test)
+# k = offload_funds(p)
+# results_to_csv(k)
+# 1. Save a json per fund that collects all quant & qual info. 2. Csv is for better checking perf info and manual update. 3. Dict {funds.name; funds} should be transform to results 4. Always keep only one file of csv 

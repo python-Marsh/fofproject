@@ -128,6 +128,7 @@ class Fund:
                     "value": entry["value"],
                 }
             )
+        processed_returns.sort(key=lambda x: x["datetime"])
         for i in range(1, len(processed_returns)):
             prev = processed_returns[i - 1]["month"]
             curr = processed_returns[i]["month"]
