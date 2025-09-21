@@ -274,7 +274,6 @@ def _add_value_boxes(fig, xs, ys, *, indices, color, fmt, boxcfg):
         )
 
 def plot_cumulative_returns(
-
         funds: Dict[str, Fund], 
         title: str, 
         start_month: str = None, # YYYY-MM
@@ -728,3 +727,10 @@ def plot_fund_correlation_heatmap(
 
     fig.show()
     return fig, corr, overlap
+
+# def batch_compare (
+#                 funds: Dict[str, Fund],
+#                 ):
+#     df = pd.DataFrame(columns=["Fund Name", "fund", "value"])
+#     for entry in funds.values():
+#         entry

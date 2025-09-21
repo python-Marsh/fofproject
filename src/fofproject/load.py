@@ -206,6 +206,8 @@ RESPONSE_SCHEMA = """
 }
 """
 
+ignored_funds = []
+
 def process_performance(data):
     
     # GPT's own screening

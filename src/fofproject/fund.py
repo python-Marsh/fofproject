@@ -139,14 +139,14 @@ class Fund:
                 )
         self.name = name
         self.fund_des = fund_des
-        self.investment_location = investment_location or []
-        self.investment_strategy = investment_strategy or []
-        self.investment_sector = investment_sector or []
-        self.manager_names = manager_names or []
-        self.manager_profiles = manager_profiles or {}
-        self.contact = contact or {}
+        self.investment_location = investment_location 
+        self.investment_strategy = investment_strategy 
+        self.investment_sector = investment_sector 
+        self.manager_names = manager_names 
+        self.manager_profiles = manager_profiles
+        self.contact = f"{contact['name']} - Based in {contact['location']}, try reachout via email '{contact['email']}' or phone '{contact['number']}'" if contact else "No contact info"
         self.aum_size = aum_size
-        self.net_exposure = net_exposure or []
+        self.net_exposure = net_exposure 
         self.net_return = net_return
         self.management_fee = management_fee
         self.performance_fee = performance_fee
@@ -975,15 +975,16 @@ class Fund:
         if benchmark is not None:
             bench_rv = benchmark.rolling_volatility(window=window)
             bench_rv.index = pd.to_datetime(bench_rv.index)
-            bench_rv = bench_rv.reindex(fund_rv.index) 
             bench_vov = benchmark.vol_of_vol(window=window)
+            bench_rv = bench_rv.dropna()
             
 
             # Align series for plotting
-            idx_union = fund_rv.index.union(bench_rv.index).sort_values()
-            fund_rv = fund_rv.reindex(idx_union)
-            bench_rv = bench_rv.reindex(idx_union)
+
             x_bench = to_py_dt(bench_rv.index)
+            start_date = max (min(x_bench), min(x_fund))
+            end_date = min(max(x_bench), max(x_fund))
+            fig.update_xaxes(range=[start_date, end_date])
 
             fig.add_trace(go.Scatter(
                 x=x_bench, y=bench_rv.values,
@@ -1006,7 +1007,6 @@ class Fund:
             )       
 
             annotation_text += f"<br>{benchmark.name}: {bench_vov:.4f}"
-
         # Layout
         fig.update_layout(
             title=dict(
@@ -1436,6 +1436,10 @@ class Fund:
         plt.close('fig')
 
     def summary_of_a_fund(self, benchmark_fund=None, language="en"):
+        print(self.fund_des)
+        print(f"Net Exposure = {min(self.net_exposure)*100}% to {max(self.net_exposure)*100}%")
+        print(self.contact)
+
         plot1 = self.export_monthly_table(language)
         plot2 = self.export_key_metrics_table(
             benchmark_fund=benchmark_fund,
@@ -1450,3 +1454,38 @@ class Fund:
         plot3.show()
         plot4.show()
         return plot1, plot2, plot3, plot4
+
+def compare_funds(fund_dict):
+    """
+    Given a dict with {fund_name: fund_object}, return a DataFrame comparing key metrics.
+    """
+    data = []
+    for fund_name, fund in fund_dict.items():
+        data.append({
+            "Name": fund.name,
+            "Description": fund.fund_des,
+            "Location": fund.investment_location,
+            "Strategy": fund.investment_strategy,
+            "Sector": fund.investment_sector,
+            "Managers": ", ".join(fund.manager_names) if fund.manager_names else None,
+            "Contact": fund.contact,
+            "AUM": fund.aum_size,
+            "Net Exposure": fund.net_exposure,
+            "Net Return": fund.net_return,
+            "Mgmt Fee": fund.management_fee,
+            "Perf Fee": fund.performance_fee,
+            "Inception Date": fund.inception_date,
+            "Latest Date": fund.latest_date,
+            "# Months": fund.num_months,
+            "Cumulative Return": fund.total_cum_rtn,
+            "Annualized Return": fund.total_ann_rtn,
+            "Volatility": fund.total_vol,
+            "Sharpe Ratio": fund.total_sharpe,
+            "Sortino Ratio": fund.total_sortino,
+            "Max Drawdown": fund.total_max_dd,
+            "Positive Months": fund.total_pos_months,
+        })
+
+    df = pd.DataFrame(data)
+    return df
+

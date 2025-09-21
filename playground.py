@@ -1,10 +1,18 @@
 import pandas as pd
 import plotly.graph_objects as go
 from src.fofproject.fund import Fund, input_monthly_returns, subset_of_funds
-from src.fofproject.plot import plot_cumulative_returns, plot_fund_correlation_heatmap
+from fofproject.batch import plot_cumulative_returns, plot_fund_correlation_heatmap
 from src.fofproject.mvo import minimum_variance_analysis
-from src.fofproject.load import load_saved_json, init_funds, process_pdfs_in_folder
+from src.fofproject.load import load_saved_json, init_funds, process_pdfs_in_folder, save_changes_in_fund
 
+# Names of our portfolio & benchmark indices
+our_portfolio = ['TAIREN','HAO','LEXINGTON','LIM','FOREST','WT LS','E20','3W GLOBAL','3W CHINA','3W HEALTHCARE','TIMEFOLIO','MONOLITH','PERSEVERANCE','NEO IVY','JH BIOTECH']
+our_index = ['MSCI CHINA','TOPIX','S&P 500','MSCI WORLD', 'EUREKAHEDGE']
+
+test = load_saved_json(folder_path=r"input")
+print(type(test))
+Funds = init_funds(test)
+print(Funds)
 
 # Initialize and load data
 funds = input_monthly_returns(r"RETURN DATA.csv", performance_fee=0.2, management_fee=0.01)
@@ -13,8 +21,11 @@ funds_to_be_plot = subset_of_funds(funds, ['RDGFF', 'EUREKAHEDGE','MSCI CHINA', 
 start_month = "2019-12"
 end_month = "2020-7"
 
+fig = Funds['CRABEL MULTI'].plot_rolling_vol_vs_benchmark(benchmark = funds['MSCI CHINA'])
+fig.show()
+
     # Example usage:
-fig = funds['RDGFF'].plot_rolling_vol_vs_benchmark(benchmark=funds['MSCI CHINA'], window=12)
+# fig = funds['RDGFF'].plot_rolling_vol_vs_benchmark(benchmark=funds['MSCI CHINA'], window=12)
 # fig.show()
 
 # funds['RDGFF'].plot_monthly_return_distribution()

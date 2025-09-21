@@ -1,4 +1,4 @@
-from src.fofproject.plot import plot_cumulative_returns
+from fofproject.batch import plot_cumulative_returns
 from src.fofproject.fund import input_monthly_returns, subset_of_funds
 from src.fofproject.utils import parse_month
 from datetime import datetime
