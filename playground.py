@@ -22,7 +22,9 @@ funds_to_be_plot = subset_of_funds(funds, ['RDGFF', 'EUREKAHEDGE','MSCI CHINA', 
 start_month = "2019-12"
 end_month = "2025-7"
 
-funds['HAO'].export_monthly_table(language = "en")
+# funds['HAO'].export_monthly_table(language = "en")
+funds['RDGFF'].export_monthly_table(benchmark = funds['MSCI CHINA'], benchmark_name = "MSCI\nChina" ,language = "en", inception_column = True)
+
 # for lan in ["en", "cn"]:
 #     plot = plot_cumulative_returns(
 #     funds=subset_of_funds(funds, ['RDGFF', 'EUREKAHEDGE','MSCI CHINA']),   # subset based on this group

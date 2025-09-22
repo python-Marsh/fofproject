@@ -623,6 +623,5 @@ def merge_funds(dict1: dict, dict2: dict) -> dict:
     
     return merged
 
-# test = load_saved_json(folder_path=r"input")   
 
-gpt_fund = process_pdfs_in_folder(folder_path=r"input\portfolio",save=True)
+

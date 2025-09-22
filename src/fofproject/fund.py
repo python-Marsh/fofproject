@@ -1218,7 +1218,9 @@ class Fund:
         elif height > max_height:
             cell_height = max_height / (num_rows + 1)
         # identify text font size that fits in the cell height
-        font_size = find_largest_font_size(cell_height * 0.55, FONT2HEIGHT)
+        double_line = ("\n" in benchmark_name) or inception_column 
+        scaler = 0.75 if double_line else 1
+        font_size = find_largest_font_size(cell_height * 0.55 * scaler, FONT2HEIGHT)
         # recalculate final height
         height = cell_height * (num_rows + 1)
         # ----------------draw table ----------------

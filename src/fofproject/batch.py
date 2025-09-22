@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 from dateutil.relativedelta import relativedelta
 
 from fofproject.fund import Fund
-from fofproject.utils import hex_to_rgba, in_notebook, safe_show_plotly
+from fofproject.utils import hex_to_rgba
 
 DEFAULT_COLOR = "#D8C3A5"
 
