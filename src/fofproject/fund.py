@@ -1062,7 +1062,8 @@ class Fund:
         self, language: str = "en", 
         benchmark: Fund = None, 
         benchmark_name: str = None,
-        inception_column: bool = False
+        inception_column: bool = False,
+        end_month = None
     ):
         """
         Export a Matplotlib table of monthly + YTD returns to an interactive HTML file.
@@ -1102,7 +1103,7 @@ class Fund:
             "en": {
                 "ytd_label": "YTD",
                 "year": "Year",
-                "inc": "Since\nInceotion"
+                "inc": "Since\nInception"
             },
             "cn": {
                 "ytd_label": "年初至今",
@@ -1122,8 +1123,17 @@ class Fund:
             year_label = other_labels["cn"]["year"]
             inc_label = other_labels["cn"]["inc"]
         # ---------------- prepare data ----------------
-        df = self.monthly_returns
-        monthly_returns_list = [self.monthly_returns]
+        if end_month is None:
+            end_month_dt = self.latest_date 
+        else:
+            end_month_dt = pd.to_datetime(end_month + "-01")
+
+        df = [
+            entry for entry in self.monthly_returns
+            if entry["month"] <= end_month_dt
+        ]
+
+        monthly_returns_list = [df]
         if benchmark:
             benchmark_monthly_returns = [
                 entry
@@ -1247,19 +1257,18 @@ class Fund:
         plt.axis("off")
         plt.tight_layout()
         file_name = (
-            f'{self.name} monthly return table {self.latest_date.strftime("%Y-%m-%d")}'
+            f'{self.name} monthly return table {end_month_dt.strftime("%Y-%m-%d")}'
             + (f" {benchmark.name}" if benchmark else "")
             + ".png"
         )
-        # file_name = self.name + ' key metrics table ' + self.latest_date + benchmark.name if benchmark else '' + '.png'
+        # file_name = self.name + ' key metrics table ' + end_month_dt + benchmark.name if benchmark else '' + '.png'
         save_path = f"{save_dir}/{file_name}"
         plt.savefig(save_path, bbox_inches="tight", pad_inches=0, dpi=200)
-        plt.show()
-        plt.close(fig)
+        return plt
 
     def export_key_metrics_table(
         self,
-        end_month,
+        end_month: str,
         benchmark_fund=None,
         language="en",
         metrics=None,
@@ -1311,7 +1320,7 @@ class Fund:
             },
         }
         L = labels.get(language, labels["en"])
-
+        end_month = parse_month(end_month)
         placeholder_values = {
             "cagr": f"{100 * self.annualized_return(self.inception_date, end_month):.1f}%",
             "vol": f"{100 * self.volatility(self.inception_date, end_month):.1f}%",
@@ -1432,18 +1441,17 @@ class Fund:
         plt.tight_layout()
         save_path = f'{save_dir}/{self.name} key metrics table {end_month.strftime("%Y-%m-%d")}.png'
         plt.savefig(save_path, bbox_inches="tight", pad_inches=0, dpi=200)
-        plt.show()
-        plt.close('fig')
+        return fig
 
     def summary_of_a_fund(self, benchmark_fund=None, language="en"):
         print(self.fund_des)
-        print(f"Net Exposure = {min(self.net_exposure)*100}% to {max(self.net_exposure)*100}%")
+        print(f"Net Exposure = {min(self.net_exposure)*100}% to {max(self.net_exposure)*100}%") if self.net_exposure else None
         print(self.contact)
-
+        endmonth_str = datetime.strftime(self.latest_date, format='%Y-%m')
         plot1 = self.export_monthly_table(language)
         plot2 = self.export_key_metrics_table(
             benchmark_fund=benchmark_fund,
-            end_month=self.latest_date,
+            end_month=endmonth_str,
             language=language,
             metrics=["cagr", "vol", "sharpe", "sortino", "mdd", "beta", "corr", "win"],
             horizontal=False,
@@ -1451,16 +1459,17 @@ class Fund:
         plot3 = self.plot_monthly_return_distribution()
         plot4 = self.plot_rolling_vol_vs_benchmark(benchmark=benchmark_fund)
 
+        plot1.show()
+        plot2.show()
         plot3.show()
         plot4.show()
-        return plot1, plot2, plot3, plot4
 
 def compare_funds(fund_dict):
     """
     Given a dict with {fund_name: fund_object}, return a DataFrame comparing key metrics.
     """
     data = []
-    for fund_name, fund in fund_dict.items():
+    for fund in fund_dict.items():
         data.append({
             "Name": fund.name,
             "Description": fund.fund_des,

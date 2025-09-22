@@ -2,8 +2,11 @@ from fofproject.batch import plot_cumulative_returns
 from src.fofproject.fund import input_monthly_returns, subset_of_funds
 from src.fofproject.utils import parse_month
 from datetime import datetime
+import matplotlib
+import plotly.io as pio
 
-
+# For VS Code / plain Python scripts
+pio.renderers.default = "browser"
 def presentation_data_update(month:str):
 
     print(f"Updating presentation data to {month}...")
@@ -49,11 +52,23 @@ def presentation_data_update(month:str):
         print(f"Sortino ratio of {name}: {funds[name].sortino_ratio(funds[name].inception_date, end_month):.1f}")
         print(f"YTD return of {name}: {funds[name].cumulative_return(january, end_month)*100:.1f}%")
         funds[name].export_key_metrics_table(language ="en", end_month=end_month, benchmark_fund = funds[benchmark_map[name]], metrics = ["cagr","vol","sharpe","sortino","beta"],horizontal = True,fix_aspect=True)
-        funds[name].export_monthly_table(language ="en")
+        funds[name].export_monthly_table(language ="en", end_month=month)
+
+    for lan in ["en", "cn"]:
+        plot = plot_cumulative_returns(
+        funds=subset_of_funds(funds, ['RDGFF', 'EUREKAHEDGE','MSCI CHINA']),   # subset based on this group
+        title="Performance Since Inception",
+        start_month=None,
+        end_month=month,
+        style="excel",
+        language= lan,
+        blur=True,
+        aspect_lock=True,
+        save=True
+        )
 
     # Define the sets to plot (first item is the primary fund)
     list_of_plots = [
-        ['RDGFF', 'EUREKAHEDGE', 'MSCI CHINA'],
         ['HAO', 'MSCI CHINA'],
         ['TAIREN', 'MSCI CHINA', 'MSCI WORLD'],
         ['LEXINGTON', 'MSCI WORLD', 'S&P 500'],
@@ -78,7 +93,8 @@ def presentation_data_update(month:str):
             style="excel",
             language="en",
             blur=True,
-            aspect_lock=True
+            aspect_lock=False,
+            save=True
         )
 
 

@@ -2,16 +2,21 @@ import datetime as dt
 from collections import defaultdict
 from itertools import cycle
 from typing import Dict
-
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from dateutil.relativedelta import relativedelta
 
 from fofproject.fund import Fund
-from fofproject.utils import hex_to_rgba
+from fofproject.utils import hex_to_rgba, in_notebook, safe_show_plotly
 
 DEFAULT_COLOR = "#D8C3A5"
+
+current_dir = Path(__file__).parent
+save_dir = current_dir.parent.parent / "output"
+if not save_dir.exists():
+    save_dir.mkdir(parents=True, exist_ok=True)
 
 fund_name_map = {
     "LEAD": {"en": "Fund", "cn": "基金"},
@@ -35,10 +40,10 @@ STYLE_DICT = {
                 "color": "#2f2f2f",
             },
             "margin": {
-                "l": 70,  # left margin
-                "r": 20,  # right margin
-                "t": 70,  # top margin
-                "b": 110,  # bottom margin
+                "l": 50,  # left margin
+                "r": 30,  # right margin
+                "t": 60,  # top margin
+                "b": 60,  # bottom margin
             },
             "grid_color": "#DDDDDE",
             "zero_color" :"#989A9C",
@@ -94,6 +99,7 @@ STYLE_DICT = {
             "format": "+.2%",
             "box": {
                 "bgcolor": "rgba(255,255,255,0.9)",
+                "family": "Roboto Bold",
                 "borderwidth": 1,
                 "font_size": 12,
                 "xshift": 6,
@@ -180,10 +186,10 @@ STYLE_DICT = {
                 "color": "#2f2f2f",
             },
             "margin": {
-                "l": 70,  # left margin
-                "r": 20,  # right margin
-                "t": 70,  # top margin
-                "b": 110,  # bottom margin
+                "l": 50,  # left margin
+                "r": 30,  # right margin
+                "t": 60,  # top margin
+                "b": 60,  # bottom margin
             },
             "grid_color": "#DACEBF",
             "zero_color" :"#53565A",
@@ -264,7 +270,7 @@ def _add_value_boxes(fig, xs, ys, *, indices, color, fmt, boxcfg):
             bgcolor=hex_to_rgba(color, 0.15),  # transparent fill based on trace color
             bordercolor=color,
             borderwidth=boxcfg.get("borderwidth", 1),
-            font=dict(size=boxcfg.get("font_size", 12), color=color),
+            font=dict(size=boxcfg.get("font_size", 12), color="black"),
             xanchor="left",
             yanchor="bottom",
             align="center",
@@ -282,7 +288,9 @@ def plot_cumulative_returns(
         language: str = "en",  # "en" or "cn"
         blur: bool = False,
         aspect_lock = False,
-        custom_ticks = False
+        custom_ticks = False,
+        save = False,
+        toggle = False
     ):
 
 
@@ -423,7 +431,7 @@ def plot_cumulative_returns(
 
         step = max(1, int(len(months) / 12))
         marker_indices = list(range(0, len(months), step))
-        box_indices = list(range(0, len(months), step))
+        box_indices = list(range(0, len(months), step*2))
 
         # Add markers for every ~10% of the data points
         if (
@@ -510,8 +518,9 @@ def plot_cumulative_returns(
                     # build a per-index boxcfg that inherits the style, but adds a vertical offset
                     per_index_boxcfg = dict(value_box_cfg.get("box", {}))
                     # Prefer yshift (pixel space). You can also add small xshift if labels are wide.
-                    per_index_boxcfg.setdefault("yshift", 0)
-                    per_index_boxcfg["yshift"] += tier * STACK_STEP_PX
+                    if toggle: 
+                        per_index_boxcfg.setdefault("yshift", 0)
+                        per_index_boxcfg["yshift"] += tier * STACK_STEP_PX
 
                     _add_value_boxes(
                         fig,
@@ -545,10 +554,10 @@ def plot_cumulative_returns(
             showgrid=True,
             gridcolor=layout_config["grid_color"],
             tickformat=layout_config["date_ticks"]["format"],
-            tickvals=[months[i] for i in box_indices],
+            tickvals=[months[i] for i in marker_indices],
             ticktext=[
                 months[i].strftime(layout_config["date_ticks"]["format"])
-                for i in box_indices
+                for i in marker_indices
             ],
         ),
         yaxis=dict(
@@ -631,7 +640,18 @@ def plot_cumulative_returns(
                 text="<br>".join(summary_lines),
             )
     # --------------------------- Show figure ---------------------------
-    fig.show()
+    
+    if save:
+        file_name =  f'{"_".join(funds.keys())} cumulative return plot - {language}.png'
+        save_path = f"{save_dir}/{file_name}"
+        fig.write_image(
+            save_path,
+            width=WIDTH if aspect_lock else None,
+            height=HEIGHT if aspect_lock else None,
+            scale=2  # controls DPI
+        )
+    else:
+        fig.show()
 
     return fig
 
@@ -641,6 +661,7 @@ def plot_fund_correlation_heatmap(
     method: str = "pearson",  # "pearson" | "spearman" | "kendall"
     min_overlap: int = 6,  # require at least this many overlapping months for a correlation
     title: str = "Fund Return Correlations",
+    save = False,
 ):
     """
     Build pairwise correlations of monthly returns using pairwise-complete data (max overlap)
@@ -725,7 +746,12 @@ def plot_fund_correlation_heatmap(
         yaxis=dict(showgrid=False, autorange="reversed"),  # matrix-style orientation
     )
 
-    fig.show()
+    if save:
+        file_name = f'{"_".join(funds.keys())} correlation plot.png'    
+        save_path = f"{save_dir}/{file_name}"
+        fig.write_image(save_path, scale=2)
+    else:
+        fig.show()
     return fig, corr, overlap
 
 # def batch_compare (

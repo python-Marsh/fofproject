@@ -26,7 +26,7 @@ OUTPUT CONTRACT (IMPORTANT):
 SECTION-WISE INSTRUCTIONS 
 
 1) fund_name 
-Goal: Extract the most specific fund name from the file. Rules: • Convert to ALL CAPS. • Limit to ≤ 2 words (drop “Finance/Capital/Fund/LP/Partners/Ltd” etc). • If only a company name fits, use the company name. Examples: "3W CHINA", "HAO", "TAIREN". If you do not find anything similar to fund name, and think this might not be a fund sheet - add "ERROR" in the fund name.
+Goal: Extract the most specific fund name from the file. Rules: • Convert to ALL CAPS. • Limit to ≤ 2 words (drop “Finance/Capital/Fund/LP/Partners/Ltd” etc). • If only a company name fits, use the company name. Examples: "3W CHINA", "HAO", "TAIREN". If you do not find anything similar to fund name, and think this might not be a fund sheet - add "ERROR" in the fund name. If the name happens to be in the existing list, use the existing name instead: ['TAIREN','HAO','LEXINGTON','LIM','FOREST','WT LS','E20','3W GLOBAL','3W CHINA','3W HEALTHCARE','TIMEFOLIO','MONOLITH','PERSEVERANCE','NEO IVY','JH BIOTECH']
 
 2) fund_des
 Goal: Summarize the fund in ≤5 lines. Try include style, edge, manager, and key metrics. End with your rating (a scale of 1 to 5) and overall view of the fund.
@@ -309,7 +309,11 @@ def process_performance(data):
                 last_day = calendar.monthrange(year, month)[1]  # last day of month
                 date_str = f"{last_day:02d}/{month:02d}/{year}"
                 # convert string → float safely
-                num = float(val.strip("%")) / 100 if "%" in val else float(val)
+                try:
+                    num = float(val.strip("%")) / 100 if "%" in val else float(val)
+                except Exception:
+                    print(f"No standard table found in {data['fund_name']}, returned empty list")
+                    return []
                 cleaned_rows.append({"date": date_str, "value": num})
                 month -= 1
         else:
@@ -317,7 +321,11 @@ def process_performance(data):
             for month, val in enumerate(values, start=1):
                 last_day = calendar.monthrange(year, month)[1]
                 date_str = f"{last_day:02d}/{month:02d}/{year}"
-                num = float(val.strip("%")) / 100 if "%" in val else float(val)
+                try:
+                    num = float(val.strip("%")) / 100 if "%" in val else float(val)
+                except Exception:
+                    print(f"No standard table found in {data['fund_name']}, returned empty list")
+                    return []
                 cleaned_rows.append({"date": date_str, "value": num})
                 if year != latest_year and len(values) != 12:
                     print(f"Parsing error: Year {year} has {len(values)} values (expected 12).")
@@ -597,9 +605,24 @@ def save_changes_in_fund(funds: Dict[str, Fund], folder_path = "input"):
     results_to_csv(results=results, folder_path=folder_path)
     results_to_json(results=results, folder_path=folder_path)
 
+def merge_funds(dict1: dict, dict2: dict) -> dict:
+    """
+    Merge two dictionaries of {fund_name: fund_object}.
+    Keep dict2's fund objects, but if a fund_name exists in both,
+    overwrite only the 'monthly_returns' attribute from dict1.
+    """
+    merged = dict2.copy()
+    
+    for fund_name, fund_obj in dict1.items():
+        if fund_name in merged:
+            # Only update monthly_returns
+            merged[fund_name].monthly_returns = fund_obj.monthly_returns
+        else:
+            # If fund not in dict2, add it fully
+            merged[fund_name] = fund_obj
+    
+    return merged
+
 # test = load_saved_json(folder_path=r"input")   
 
-# p = init_funds(test)
-# k = offload_funds(p)
-# results_to_csv(k)
-# 1. Save a json per fund that collects all quant & qual info. 2. Csv is for better checking perf info and manual update. 3. Dict {funds.name; funds} should be transform to results 4. Always keep only one file of csv 
+gpt_fund = process_pdfs_in_folder(folder_path=r"input\portfolio",save=True)
