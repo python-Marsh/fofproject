@@ -6,6 +6,10 @@ from fofproject.batch import plot_cumulative_returns, plot_fund_correlation_heat
 from src.fofproject.mvo import minimum_variance_analysis
 from src.fofproject.load import load_saved_json, init_funds, process_pdfs_in_folder, save_changes_in_fund
 
+# # Names of our portfolio & benchmark indices
+# our_portfolio = ['TAIREN','HAO','LEXINGTON','LIM','FOREST','WT LS','E20','3W GLOBAL','3W CHINA','3W HEALTHCARE','TIMEFOLIO','MONOLITH','PERSEVERANCE','NEO IVY','JH BIOTECH']
+# our_index = ['MSCI CHINA','TOPIX','S&P 500','MSCI WORLD', 'EUREKAHEDGE']
+
 # Names of our portfolio & benchmark indices
 our_portfolio = ['TAIREN','HAO','LEXINGTON','LIM','FOREST','WT LS','E20','3W GLOBAL','3W CHINA','3W HEALTHCARE','TIMEFOLIO','MONOLITH','PERSEVERANCE','NEO IVY','JH BIOTECH']
 our_index = ['MSCI CHINA','TOPIX','S&P 500','MSCI WORLD', 'EUREKAHEDGE']
@@ -15,15 +19,21 @@ our_index = ['MSCI CHINA','TOPIX','S&P 500','MSCI WORLD', 'EUREKAHEDGE']
 # Funds = init_funds(test)
 # print(Funds)
 
-# Initialize and load data
-funds = input_monthly_returns(r"RETURN DATA.csv", performance_fee=0.2, management_fee=0.01)
-# funds_to_be_plot = subset_of_funds(funds, ['RDGFF', 'EUREKAHEDGE','MSCI CHINA'])
-funds_to_be_plot = subset_of_funds(funds, ['RDGFF', 'EUREKAHEDGE','MSCI CHINA', 'HAO','TAIREN', 'LEXINGTON', 'LIM','FOREST'])
-start_month = "2019-12"
-end_month = "2025-7"
 
-# funds['HAO'].export_monthly_table(language = "en")
-funds['RDGFF'].export_monthly_table(benchmark = funds['MSCI CHINA'], benchmark_name = "MSCI\nChina" ,language = "en", inception_column = True)
+test = load_saved_json(folder_path=r"input")
+print(type(test))
+json_fund = init_funds(test)
+print(json_fund)
+
+# # Initialize and load data
+# funds = input_monthly_returns(r"RETURN DATA.csv", performance_fee=0.2, management_fee=0.01)
+# # funds_to_be_plot = subset_of_funds(funds, ['RDGFF', 'EUREKAHEDGE','MSCI CHINA'])
+# funds_to_be_plot = subset_of_funds(funds, ['RDGFF', 'EUREKAHEDGE','MSCI CHINA', 'HAO','TAIREN', 'LEXINGTON', 'LIM','FOREST'])
+# start_month = "2019-12"
+# end_month = "2025-7"
+
+# # funds['HAO'].export_monthly_table(language = "en")
+# funds['RDGFF'].export_monthly_table(benchmark = funds['MSCI CHINA'], benchmark_name = "MSCI\nChina" ,language = "en", inception_column = True)
 
 # for lan in ["en", "cn"]:
 #     plot = plot_cumulative_returns(

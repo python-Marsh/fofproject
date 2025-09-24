@@ -407,12 +407,16 @@ def process_pdfs_in_folder(folder_path="input", save=False):
     Returns a list of JSON results.
     """
     results = []
-
+    no_perf_list =[]
     for file_name in os.listdir(folder_path):
         if file_name.lower().endswith(".pdf"):
             file_path = os.path.join(folder_path, file_name)
             print(f"Processing: {file_path}")
             result = gpt_process_pdf(file_path)
+            # Checking if there's performance recorded
+            val = result['performance']
+            if not (isinstance(val, list) and all(isinstance(item, dict) for item in val)) or (isinstance(val, list) and not val)  :
+                no_perf_list = no_perf_list + [result['fund_name']]
             results.append(result)
             if save:
               # Create "json" folder inside folder_path if it doesn't exist
@@ -423,6 +427,9 @@ def process_pdfs_in_folder(folder_path="input", save=False):
               output_path = os.path.join(json_folder, f"{result['fund_name']}.json")
               with open(output_path, "w", encoding="utf-8") as f:
                   json.dump(result, f, ensure_ascii=False, indent=2)
+    no_perf_path = os.path.join(folder_path, "No Performance Found.txt")
+    with open(no_perf_path, "w") as f:
+      f.write("\n".join(no_perf_list))
     return results
 
 def load_saved_json(folder_path="input"):
@@ -570,11 +577,10 @@ def offload_funds(funds: Dict[str, Fund]) -> List[Dict]:
                     "value": entry["value"],
                 }
             )
-        fund.monthly_returns = string_returns
         results.append({
             "fund_name": fund.name,
             "fund_des": getattr(fund, "fund_des", None),
-            "performance": getattr(fund, "monthly_returns"),
+            "performance": string_returns,
             "investment_location": getattr(fund, "investment_location", None),
             "investment_strategy": getattr(fund, "investment_strategy", None),
             "investment_sector": getattr(fund, "investment_sector", None),
