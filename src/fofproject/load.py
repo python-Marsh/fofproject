@@ -411,13 +411,11 @@ def gpt_process_pdf(file_path: str):
             ]
         )
         output_text = response.output_text.strip()
-        print(f"text parsing - the result is {output_text}")
         data = json.loads(output_text)
         data["performance"] = process_performance(data)
     if isinstance(data.get('performance'), list) and data['performance']:
     # Check if performance is a non-empty list and sort it
       data['performance'].sort(key=lambda x:datetime.strptime(x["date"], "%d/%m/%Y"))
-    print(data)
     return data
 
 def process_pdfs_in_folder(folder_path="input", save=False):
@@ -461,6 +459,64 @@ def process_pdfs_in_folder(folder_path="input", save=False):
     with open(no_perf_path, "w") as f:
       f.write("\n".join(no_perf_list))
     return results
+
+def rerun_no_perf_files(folder_path="input", save=False):
+    """
+    Reads 'No Performance Found.txt' in folder_path.
+    Re-runs gpt_process_pdf for files that match the prefixes listed.
+    Returns updated results.
+    """
+    no_perf_path = os.path.join(folder_path, "No Performance Found.txt")
+    if not os.path.exists(no_perf_path):
+        print("No Performance Found.txt not found.")
+        return []
+
+    # Read fund_name prefixes from the file
+    with open(no_perf_path, "r") as f:
+        fund_prefixes = [line.strip() for line in f if line.strip()]
+
+    if not fund_prefixes:  # file is empty or only blank lines
+        print("No entries found in No Performance Found.txt.")
+        return []
+
+    results = []
+    still_no_perf = []
+
+    for file_name in os.listdir(folder_path):
+        if not file_name.lower().endswith(".pdf"):
+            continue
+
+        base, ext = os.path.splitext(file_name)
+
+        # Check if this PDF matches any prefix in the list
+        for prefix in fund_prefixes:
+            if base.startswith(prefix):
+                file_path = os.path.join(folder_path, file_name)
+                print(f"Re-processing (no performance before): {file_path}")
+                result = gpt_process_pdf(file_path)
+
+                # Check performance again
+                val = result['performance']
+                if not (isinstance(val, list) and all(isinstance(item, dict) for item in val)) or (isinstance(val, list) and not val):
+                    still_no_perf.append(result['fund_name'])
+
+                # Save JSON if required
+                if save:
+                    json_folder = os.path.join(folder_path, "json")
+                    os.makedirs(json_folder, exist_ok=True)
+                    output_path = os.path.join(json_folder, f"{result['fund_name']}.json")
+                    with open(output_path, "w", encoding="utf-8") as f_out:
+                        json.dump(result, f_out, ensure_ascii=False, indent=2)
+
+                results.append(result)
+                break  # stop after matching one prefix
+
+    # Update the No Performance file with those still missing performance
+    with open(no_perf_path, "w") as f:
+        f.write("\n".join(still_no_perf))
+
+    return results
+
 
 def load_saved_json(folder_path="input"):
     """
@@ -640,6 +696,8 @@ def save_changes_in_fund(funds: Dict[str, Fund], folder_path = "input"):
     results = offload_funds(funds)
     results_to_csv(results=results, folder_path=folder_path)
     results_to_json(results=results, folder_path=folder_path)
+    funds = init_funds(results)
+    return funds
 
 def merge_funds(dict1: dict, dict2: dict) -> dict:
     """

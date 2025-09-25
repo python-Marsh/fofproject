@@ -175,6 +175,11 @@ class Fund:
             if self.monthly_returns
             else None
         )
+        self.total_max_dd = (
+            self.max_drawdown(self.inception_date, self.latest_date)
+            if self.monthly_returns
+            else None
+        )
         self.total_sortino = (
             self.sortino_ratio(self.inception_date, self.latest_date)
             if self.monthly_returns
