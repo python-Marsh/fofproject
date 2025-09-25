@@ -180,11 +180,6 @@ class Fund:
             if self.monthly_returns
             else None
         )
-        self.total_max_dd = (
-            self.max_drawdown(self.inception_date, self.latest_date)
-            if self.monthly_returns
-            else None
-        )
         self.total_pos_months = (
             self.positive_months(self.inception_date, self.latest_date)
             if self.monthly_returns
@@ -1467,7 +1462,7 @@ def compare_funds(fund_dict):
             "Sector": fund.investment_sector,
             "Managers": ", ".join(fund.manager_names) if fund.manager_names else None,
             "Contact": fund.contact,
-            "AUM": fund.aum_size,
+            "AUM (in Mn USD)": fund.aum_size,
             "Net Exposure": fund.net_exposure,
             "Net Return": fund.net_return,
             "Mgmt Fee": fund.management_fee,

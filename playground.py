@@ -20,10 +20,12 @@ our_index = ['MSCI CHINA','TOPIX','S&P 500','MSCI WORLD', 'EUREKAHEDGE']
 # print(Funds)
 
 
-test = load_saved_json(folder_path=r"input")
-print(type(test))
-json_fund = init_funds(test)
-print(json_fund)
+# test = load_saved_json(folder_path=r"input")
+# print(type(test))
+# json_fund = init_funds(test)
+# print(json_fund)
+
+gpt_fund = process_pdfs_in_folder(folder_path=r"input\test",save=True)
 
 # # Initialize and load data
 # funds = input_monthly_returns(r"RETURN DATA.csv", performance_fee=0.2, management_fee=0.01)

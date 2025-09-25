@@ -26,7 +26,12 @@ OUTPUT CONTRACT (IMPORTANT):
 SECTION-WISE INSTRUCTIONS 
 
 1) fund_name 
-Goal: Extract the most specific fund name from the file. Rules: • Convert to ALL CAPS. • Limit to ≤ 2 words (drop “Finance/Capital/Fund/LP/Partners/Ltd” etc). • If only a company name fits, use the company name. Examples: "3W CHINA", "HAO", "TAIREN". If you do not find anything similar to fund name, and think this might not be a fund sheet - add "ERROR" in the fund name. If the name happens to be in the existing list, use the existing name instead: ['TAIREN','HAO','LEXINGTON','LIM','FOREST','WT LS','E20','3W GLOBAL','3W CHINA','3W HEALTHCARE','TIMEFOLIO','MONOLITH','PERSEVERANCE','NEO IVY','JH BIOTECH']
+Goal: Extract the most specific fund name from the file. Rules: • Convert to ALL CAPS. • Limit to ≤ 2 words (drop “Finance/Capital/Fund/LP/Partners/Ltd” etc). 
+Rules -
+a. If only a company name fits, use the company name. Examples: "3W CHINA", "HAO", "TAIREN". 
+b. If you do not find anything similar to fund name, and think this might not be a fund sheet - add "ERROR" in the fund name. 
+c. If the name happens to be similar the following list, use the existing name instead: ['TAIREN','HAO','LEXINGTON','LIM','FOREST','WT CHINA','E20','3W GLOBAL','3W CHINA','3W HEALTHCARE','TIMEFOLIO','MONOLITH','PERSEVERANCE','NEO IVY','JH BIOTECH']. Some specific change are listed here: "Lim Japan Event Fund" → "LIM" - e.g. "水木清风特殊机会基金" → "FOREST",  "Janus Henderson Biotechnology" → "JH BIOTECH".
+
 
 2) fund_des
 Goal: Summarize the fund in ≤5 lines. Try include style, edge, manager, and key metrics. End with your rating (a scale of 1 to 5) and overall view of the fund.
@@ -35,7 +40,11 @@ Goal: Summarize the fund in ≤5 lines. Try include style, edge, manager, and ke
 Goal: Extract monthly performance as a time series. 
 Instruction strictly follows step-by-step: 
 a. Copy the monthly return table into a list of lists with the headers included as the first list item. If there's benchmark row in the table, only copy the row of the fund itself into a list of lists. 
-b. identify the first item as header, and the rest as value rows. Within the header, identify non-month header and the month header. If the header seems like one cell, then it should be one item. identify if the non-month header should be one continuous header value. For example - "since inception", "since formation" etc. 
+b. identify the first item as header, and the rest as value rows. Within the header, identify non-month header and the month header. - Identify month headers: these are strictly 12 values that represent months (January–December) in any form similar to the following:
+  • Numeric: 1–12
+  • English: Jan–Dec
+  • Chinese: 一月–十二月
+- Everything else in the header that is not a month should be categorized as a **non-month header** (e.g., "Year", "Fund", "YTD", "Inception", etc.). If the non-month header seems like one cell, then it should be one continous item. For example - "since inception", "since formation" etc. 
 c. Clean the value rows by removing empty values. 
 Rule: Retain all column headers (e.g., Jan–Dec, YTD), even if data is missing for some months in the value rows. In value rows, remove empty values that are similar to "NaN", "-", "", "ꟷ", or None.
 d. Change the monthly header to the format of "%d/%m" and the % value to number like "1.23%" -> "0.0123". 
@@ -43,13 +52,13 @@ The final output should be 3 list: a list of lists that includes the table, and 
 Final output: three lists — (a) full table, (b) month headers, and (c) non-month headers. If you do not identify a monthly return performance table with timeseries data, then simply put the value as "[]". Do not treat the following as valid monthly performance tables: key metrics summary, annual return table that has no monthly timeseries performance.
 
 4) investment_location 
-Goal: Categorize geographical focus. Allowed values: ["latin_america","north_america","europe","middle_east_africa","south_asia","apac"]. Rule: If ≥ 3 regions are mentioned, return ["global"]. Otherwise, return 1–2 relevant tags. 
+Goal: Categorize geographical focus. Allowed values, strictly a list with one or more of the following values: ["latin_america","north_america","europe","middle_east_africa","south_asia","apac"]. Rule: If ≥ 3 regions are mentioned, return ["global"]. Otherwise, return 1–2 relevant tags. 
 
 5) investment_strategy 
-Goal: Identify strategy type(s). Allowed values: ["equity_ls","event_driven","multi-strat","special_situation","quantitative","market_neutral","convertible_arbitrage","global_macro","vol_arb","stat_arb","cta","activists","commodities","fixed_income"]. Fallback: If unclear, return "NaN" (a single string, not an array). 
+Goal: Identify strategy type(s). Allowed values, strictly a list with one or more of the following values: ["equity_ls","event_driven","multi-strat","special_situation","quantitative","market_neutral","convertible_arbitrage","global_macro","vol_arb","stat_arb","cta","activists","commodities","fixed_income"]. Fallback: If unclear, return "NaN" (a single string, not an array). 
 
 6) investment_sector 
-Goal: Identify sector focus. Allowed values: ["equity_diversified","equity_energy","equity_industrials","equity_healthcare","equity_TMT","equity_finance","equity_consumer","commodities","fixed_income"]. Fallback: If unclear, return "NaN" (a single string, not an array). Rule: If ≥ 4 sectors are mentioned, return ["equity_diversified"].
+Goal: Identify sector focus. Allowed values, strictly a list with one or more of the following values: ["equity_diversified","equity_energy","equity_industrials","equity_healthcare","equity_TMT","equity_finance","equity_consumer","commodities","fixed_income"]. Fallback: If unclear, return "NaN" (a single string, not an array). Rule: If ≥ 4 sectors are mentioned, return ["equity_diversified"].
 
 7) manager_names
 Goal: Collect an array of unique fund manager names mentioned in the file. Keep names clean and consistent (full names, no duplicates).
@@ -212,16 +221,19 @@ def process_performance(data):
     
     # GPT's own screening
     if data['fund_name'] == "ERROR":
-        print(f"No performance table found in {data["fund_name"]}")
-        return "No Performance Found"
+        print(f"No performance table found by GPT in {data["fund_name"]}")
+        return []
 
     table = data["performance"]["table"]
     month_header = data["performance"]["month_header"]
     non_month_header = set(data["performance"]["non_month_header"])
     
+    if len(month_header) != 12:
+        print(f"Wrongly assigned a month header of {len(month_header)} from {data["fund_name"]}, would result in extra values in earliest and latest months")
+
     if not table:
-        print(f"No performance table found in {data["fund_name"]}")
-        return "No Performance Found"
+        print(f"Empty values in performance table of {data["fund_name"]}")
+        return []
 
     # Extract header
     header = table[0]
@@ -237,9 +249,9 @@ def process_performance(data):
             break
     years = []
     # Identify year column position
-    def parse_yearly_performance(data_lists):
+    def parse_yearly_performance(data_lists, year_counter = 2025):
         """
-        Takes a list of lists, where each sub-list starts with a year followed by performance values.
+        Takes the raw list of lists collected from GPT (idealy one list per year), where each sub-list starts with a year followed by performance values.
         Returns a list of dicts mapping {year: [values]}.
         
         Example:
@@ -254,7 +266,6 @@ def process_performance(data):
         ]
         """
         results = []
-        year_counter = 2025
         for data in data_lists:
             year = None
             values = []
@@ -302,6 +313,9 @@ def process_performance(data):
         if year not in (earliest_year, latest_year):
             if len(values) > 12:
                 values = values[:12] # drop last elements till 12, assume there are no values appended in the front
+            elif len(values) < 12:
+                print(f"Less than 12 months found in table of {data['fund_name']}, returned empty list")
+                return []
         if year == earliest_year:
             # Assign backward from December
             month = 12
@@ -312,7 +326,7 @@ def process_performance(data):
                 try:
                     num = float(val.strip("%")) / 100 if "%" in val else float(val)
                 except Exception:
-                    print(f"No standard table found in {data['fund_name']}, returned empty list")
+                    print(f"Non-number found in {data['fund_name']}'s latest month, returned empty list")
                     return []
                 cleaned_rows.append({"date": date_str, "value": num})
                 month -= 1
@@ -324,11 +338,12 @@ def process_performance(data):
                 try:
                     num = float(val.strip("%")) / 100 if "%" in val else float(val)
                 except Exception:
-                    print(f"No standard table found in {data['fund_name']}, returned empty list")
+                    print(f"Non-number found in {data['fund_name']}'s earliest month, returned empty list")
                     return []
                 cleaned_rows.append({"date": date_str, "value": num})
                 if year != latest_year and len(values) != 12:
                     print(f"Parsing error: Year {year} has {len(values)} values (expected 12).")
+                    return []
     return cleaned_rows  
 
 def extract_text_from_pdf(file_path):
@@ -336,6 +351,7 @@ def extract_text_from_pdf(file_path):
     text = ""
     for page in doc:
         text += page.get_text()
+    doc.close()
     return text
 
 def gpt_process_pdf(file_path: str):
@@ -349,10 +365,11 @@ def gpt_process_pdf(file_path: str):
     text = extract_text_from_pdf(file_path)
     # Cannot parse pdf into text, try uploading pdf directly
     if not text:
-        uploaded_file = client.files.create(
-          file=open(file_path, "rb"),  
-          purpose="assistants"
-        )
+        with open(file_path, "rb") as f:
+            uploaded_file = client.files.create(
+                file=f,
+                purpose="assistants"
+            )
 
         response = client.responses.create(
           model="gpt-4.1-mini",
@@ -394,10 +411,12 @@ def gpt_process_pdf(file_path: str):
             ]
         )
         output_text = response.output_text.strip()
-        print(output_text)
+        print(f"text parsing - the result is {output_text}")
         data = json.loads(output_text)
         data["performance"] = process_performance(data)
-    data['performance'].sort(key=lambda x:datetime.strptime(x["date"], "%d/%m/%Y"))
+    if isinstance(data.get('performance'), list) and data['performance']:
+    # Check if performance is a non-empty list and sort it
+      data['performance'].sort(key=lambda x:datetime.strptime(x["date"], "%d/%m/%Y"))
     print(data)
     return data
 
@@ -417,6 +436,16 @@ def process_pdfs_in_folder(folder_path="input", save=False):
             val = result['performance']
             if not (isinstance(val, list) and all(isinstance(item, dict) for item in val)) or (isinstance(val, list) and not val)  :
                 no_perf_list = no_perf_list + [result['fund_name']]
+            # Renaming of the pdf. file
+            base, ext = os.path.splitext(file_name)
+            identifier = "_parsed from_"
+            if identifier in base:
+                # keep only the part after "identifier" to make sure the file name will not stack up & Re-run with the same fund_name stored
+                prefix, base = base.split(identifier, 1)
+                result['fund_name'] = prefix
+            new_file_name = f"{result['fund_name']}{identifier}{base}{ext}"
+            new_path = os.path.join(folder_path, new_file_name)
+            os.rename(file_path, new_path)
             results.append(result)
             if save:
               # Create "json" folder inside folder_path if it doesn't exist
@@ -427,6 +456,7 @@ def process_pdfs_in_folder(folder_path="input", save=False):
               output_path = os.path.join(json_folder, f"{result['fund_name']}.json")
               with open(output_path, "w", encoding="utf-8") as f:
                   json.dump(result, f, ensure_ascii=False, indent=2)
+    # Record the files without performance for future re-run
     no_perf_path = os.path.join(folder_path, "No Performance Found.txt")
     with open(no_perf_path, "w") as f:
       f.write("\n".join(no_perf_list))
@@ -477,7 +507,7 @@ def results_to_csv(results, folder_path="input"):
 
         perf_data = result.get("performance", [])
         # Skip if 'performance' is missing or is not a list
-        if not isinstance(perf_data, list):
+        if not isinstance(perf_data, list) or not perf_data:
             print(f"⚠️ Skipping {fund_name} (no performance data).")
             continue
 
@@ -486,7 +516,7 @@ def results_to_csv(results, folder_path="input"):
             try:
                 date = datetime.strptime(perf["date"], "%d/%m/%Y").date()
             except Exception as e:
-                print(f"⚠️ Skipping bad date '{perf.get('date')}' for {fund_name}: {e}")
+                print(f"⚠️ Skipping due to wrong date format '{perf.get('date')}' for {fund_name}: {e}")
                 continue
             
             if date not in data:
@@ -626,7 +656,9 @@ def merge_funds(dict1: dict, dict2: dict) -> dict:
         else:
             # If fund not in dict2, add it fully
             merged[fund_name] = fund_obj
-    
+    # Reload so there is no stale computation of key metrics
+    results = offload_funds(merged)
+    merged = init_funds(results)
     return merged
 
 

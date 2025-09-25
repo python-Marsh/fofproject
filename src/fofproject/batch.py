@@ -708,7 +708,7 @@ def plot_fund_correlation_heatmap(
                 text[i, j] = "–"
                 hover[i, j] = f"{rname} × {cname}<br>n = {n}<br>not enough overlap"
             else:
-                text[i, j] = f"{r:.2f}\n(n={n})"
+                text[i, j] = f"{r:.2f}"
                 hover[i, j] = f"{rname} × {cname}<br>ρ = {r:.3f}<br>n = {n}"
 
     # 4) Plotly heatmap (diverging scale, centered at 0)
