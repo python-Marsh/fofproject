@@ -120,7 +120,7 @@ def minimum_variance_analysis(funds: dict, mode="Minimum Variance", target_retur
         title=dict(
             text=f"<b>{title}</b>" if title else f"<b>Efficient Frontier - {mode}</b>",
             font=dict(size=22),
-            x=1.05,
+            x=0.98,
             xanchor="center",
             y=0.98,
             yanchor="middle",
