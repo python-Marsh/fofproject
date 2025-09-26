@@ -18,7 +18,8 @@ test = load_saved_json(folder_path=r"input\portfolio")
 print(type(test))
 Funds = init_funds(test)
 # print(Funds)
-minimum_variance_analysis(funds=Funds)
+funds_to_be_plot = subset_of_funds(Funds, ['RDGFF', 'EUREKAHEDGE','MSCI CHINA', 'HAO','TAIREN', 'LEXINGTON', 'LIM','FOREST'])
+minimum_variance_analysis(funds=funds_to_be_plot)
 
 # test = load_saved_json(folder_path=r"input")
 # print(type(test))
@@ -30,7 +31,7 @@ minimum_variance_analysis(funds=Funds)
 # # Initialize and load data
 # funds = input_monthly_returns(r"RETURN DATA.csv", performance_fee=0.2, management_fee=0.01)
 # # funds_to_be_plot = subset_of_funds(funds, ['RDGFF', 'EUREKAHEDGE','MSCI CHINA'])
-# funds_to_be_plot = subset_of_funds(funds, ['RDGFF', 'EUREKAHEDGE','MSCI CHINA', 'HAO','TAIREN', 'LEXINGTON', 'LIM','FOREST'])
+
 # start_month = "2019-12"
 # end_month = "2025-7"
 

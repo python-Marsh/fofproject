@@ -10,8 +10,9 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from pypfopt import EfficientFrontier, expected_returns, risk_models
+from fofproject.utils import hex_to_rgba
 
-def minimum_variance_analysis(funds: dict):
+def minimum_variance_analysis(funds: dict, mode="Minimum Variance", target_return=0.14, title=None):
     """
     Perform minimum variance analysis on the given funds.
 
@@ -19,6 +20,11 @@ def minimum_variance_analysis(funds: dict):
     ----------
     funds : dict
         A dictionary where keys are fund names and values are Fund objects with monthly returns.
+    mode : str
+        Should be one of "Minimum Variance", "Maximum Sharpe", or "Target Return".
+    target_return : float
+    title : str | None
+        Title for the plot. If None, a default title based on mode is used.
 
     Returns
     -------
@@ -27,6 +33,9 @@ def minimum_variance_analysis(funds: dict):
     """
     # Step 1: Prepare the returns DataFrame
     series = {}
+    start_dates = []
+    end_dates = []
+
     for name, f in funds.items():
         s = pd.Series(
             {
@@ -35,43 +44,117 @@ def minimum_variance_analysis(funds: dict):
                 if e.get("value") is not None
             }
         ).sort_index()
-        series[name] = s
 
-    returns_df = pd.DataFrame(
-        series
-    )
+        series[name] = s
+        start_dates.append(s.index.min())
+        end_dates.append(s.index.max())
+
+    # Combine into a DataFrame
+    returns_df = pd.DataFrame(series)
+
+    # Find common overlapping range
+    common_start = max(start_dates)  # latest start date
+    common_end = min(end_dates)      # earliest end date
+    n_months = (common_end.year - common_start.year) * 12 + (common_end.month - common_start.month) + 1
+    print("Common range:", common_start, "to", common_end)
     print(returns_df.head())
+
+    # Filter to common range
+    filtered = returns_df.loc[common_start:common_end]
+    print(filtered.head())
+
     # Looks like:
     # month         FundA   FundB   FundC
     # 2020-01-01    0.01    0.015   0.012
     # 2020-02-01   -0.02   -0.010   0.005
     # ...
+    ann_rtn = {}
+    for col in filtered.columns:
+        key = col
+        value=funds[col].annualized_return(common_start, common_end)
+        ann_rtn[key] = value
+    
+    mu = pd.Series(ann_rtn)
+    mask = filtered.notna().astype(int)
+    overlap = mask.T @ mask  # n_ij = count of months present in both i and j
+    corr = filtered.corr(method="pearson")
 
-    # Step 2: Estimate expected returns and covariance
-    mu = expected_returns.mean_historical_return(returns_df)
-    S = risk_models.sample_cov(returns_df)
+    # Ensure diagonals look tidy
+    for c in corr.columns:
+        corr.loc[c, c] = 1.0
+        overlap.loc[c, c] = mask[c].sum()
 
+    S = corr
+    
     # Step 3: Optimize portfolios
-    ef = EfficientFrontier(mu, S)
-
     # Minimum Variance
-    w_minvar = ef.min_volatility()
-    perf_minvar = ef.portfolio_performance(verbose=True)
+    ef = EfficientFrontier(mu, S)
+    if mode == "Minimum Variance":
+        weights = ef.min_volatility()
+        annual_rtn, annual_vol, annual_sharpe = ef.portfolio_performance(verbose=True)
 
     # Reset EF for max Sharpe
-    ef = EfficientFrontier(mu, S)
-    w_maxsharpe = ef.max_sharpe()
-    perf_maxsharpe = ef.portfolio_performance(verbose=True)
+    elif mode == "Maximum Sharpe":
+        weights = ef.max_sharpe()
+        annual_rtn, annual_vol, annual_sharpe = ef.portfolio_performance(verbose=True)
 
     # Target return
-    ef = EfficientFrontier(mu, S)
-    w_target = ef.efficient_return(target_return=0.12)
-    perf_target = ef.portfolio_performance(verbose=True)
+    elif mode == "Target Return":
+        weights = ef.efficient_return(target_return=target_return)
+        annual_rtn, annual_vol, annual_sharpe = ef.portfolio_performance(verbose=True)
 
-    # Step 4: Display results
-    print("\nMinimum Variance Portfolio:", w_minvar)
-    print("Max Sharpe Portfolio:", w_maxsharpe)
-    print("Target Return Portfolio:", w_target)
+    # ---------- simple bar chart of weights ----------
+    color = "#C1AE94"  # keep your house style
+    fig = go.Figure(
+        data=go.Bar(
+            x=list(weights.keys()),
+            y=list(weights.values()),
+            marker=dict(
+                color="rgba(193,174,148,0.75)", line=dict(color=color, width=1.0)
+            ),
+            hovertemplate="<b>%{x}</b><br>weight = %{y:.2%}<extra></extra>",
+            width=0.5,
+        )
+    )
+    fig.update_layout(
+        title=dict(
+            text=f"<b>{title}</b>" if title else f"<b>Efficient Frontier - {mode}</b>",
+            font=dict(size=22),
+            x=1.05,
+            xanchor="center",
+            y=0.98,
+            yanchor="middle",
+        ),
+        template="plotly_white",
+        margin=dict(l=60, r=80, t=100, b=60),
+        xaxis=dict(showgrid=False, tickangle=45),
+        yaxis=dict(title="Weight", tickformat=".0%"),
+    )
+
+    stats = {
+        "n_months": n_months,
+        "Volatility": annual_vol,
+        "Expected Return": annual_rtn,
+        "Sharpe": annual_sharpe,
+    }
+    text = "<br>".join([f"{k}: {v:.4f}" if isinstance(v, float) else f"{k}: {v}" 
+                    for k, v in stats.items()])
+    
+    fig.add_annotation(
+        text=text,
+        xref="paper", yref="paper",
+        x=0.98,
+        y=0.98,
+        xanchor="right",
+        yanchor="top",
+        showarrow=False,
+        align="left",
+        bgcolor="#F6F6F7",
+        bordercolor=hex_to_rgba(color, 0.9),
+        borderwidth=1,
+    )
+    fig.show()
+    return fig, weights, stats
 
 # def minimum_variance_analysis(
 #     funds: dict,
