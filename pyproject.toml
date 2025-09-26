@@ -18,7 +18,8 @@ dependencies = [
     "jupyterlab (>=4.4.7,<5.0.0)",
     "openai (>=1.107.3,<2.0.0)",
     "python-dotenv (>=1.1.1,<2.0.0)",
-    "pymupdf (>=1.26.4,<2.0.0)"
+    "pymupdf (>=1.26.4,<2.0.0)",
+    "yfinance (>=0.2.66,<0.3.0)",
 ]
 
 [tool.poetry]
