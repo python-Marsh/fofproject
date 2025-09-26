@@ -717,7 +717,7 @@ def plot_fund_correlation_heatmap(
             z=z,
             x=funds_order,
             y=funds_order,
-            colorscale="RdBu",
+            colorscale="RdBu_r",
             zmin=-1,
             zmax=1,
             zmid=0,

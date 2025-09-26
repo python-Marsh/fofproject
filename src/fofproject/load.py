@@ -294,6 +294,9 @@ def process_performance(data):
     rows = parse_yearly_performance(rows)
     earliest_year = min(years)
     latest_year = max(years)
+    if earliest_year == latest_year:
+        print(f"Only one year {earliest_year} found in table of {data['fund_name']}, returned empty list")
+        return []
 
     # Clean non_month_header
     cleaned_rows = []
@@ -418,7 +421,7 @@ def gpt_process_pdf(file_path: str):
       data['performance'].sort(key=lambda x:datetime.strptime(x["date"], "%d/%m/%Y"))
     return data
 
-def process_pdfs_in_folder(folder_path="input", save=False):
+def process_pdfs_in_folder(folder_path="input", save=False, identifier = "_parsed from_"):
     """
     Iterates through all PDFs in the same folder as this script (relative path).
     Returns a list of JSON results.
@@ -436,7 +439,6 @@ def process_pdfs_in_folder(folder_path="input", save=False):
                 no_perf_list = no_perf_list + [result['fund_name']]
             # Renaming of the pdf. file
             base, ext = os.path.splitext(file_name)
-            identifier = "_parsed from_"
             if identifier in base:
                 # keep only the part after "identifier" to make sure the file name will not stack up & Re-run with the same fund_name stored
                 prefix, base = base.split(identifier, 1)
@@ -517,6 +519,55 @@ def rerun_no_perf_files(folder_path="input", save=False):
 
     return results
 
+
+def continue_running(folder_path="input", save=False, identifier = "_parsed from_"):
+    """
+    Processes only PDFs in the folder that do NOT already contain the identifier in their name.
+    Returns a list of JSON results.
+    """
+    results = []
+    no_perf_list = []
+
+    for file_name in os.listdir(folder_path):
+        if file_name.lower().endswith(".pdf"):
+            base, ext = os.path.splitext(file_name)
+
+            # Skip files that already have the identifier in the name
+            if identifier in base:
+                continue
+
+            file_path = os.path.join(folder_path, file_name)
+            print(f"Processing: {file_path}")
+            result = gpt_process_pdf(file_path)
+
+            # Checking if there's performance recorded
+            val = result['performance']
+            if not (isinstance(val, list) and all(isinstance(item, dict) for item in val)) or (isinstance(val, list) and not val):
+                no_perf_list.append(result['fund_name'])
+
+            # Renaming the file with identifier
+            new_file_name = f"{result['fund_name']}{identifier}{base}{ext}"
+            new_path = os.path.join(folder_path, new_file_name)
+            os.rename(file_path, new_path)
+
+            results.append(result)
+
+            if save:
+                # Create "json" folder inside folder_path if it doesn't exist
+                json_folder = os.path.join(folder_path, "json")
+                os.makedirs(json_folder, exist_ok=True)
+
+                # Save results to a JSON file inside the "json" folder
+                output_path = os.path.join(json_folder, f"{result['fund_name']}.json")
+                with open(output_path, "w", encoding="utf-8") as f:
+                    json.dump(result, f, ensure_ascii=False, indent=2)
+
+    # Record the files without performance for future re-run
+    no_perf_path = os.path.join(folder_path, "No Performance Found.txt")
+    with open(no_perf_path, "w") as f:
+        f.write("\n".join(no_perf_list))
+
+    return results
 
 def load_saved_json(folder_path="input"):
     """
