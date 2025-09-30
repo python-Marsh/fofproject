@@ -10,7 +10,6 @@ requires-python = ">=3.12"
 dependencies = [
     "pandas (>=2.3.2,<3.0.0)",
     "plotly (>=5.18.0,<6.0.0)",
-    "kaleido (>=1.1.0,<2.0.0)",
     "matplotlib (>=3.10.6,<4.0.0)",
     "pyfonts (>=1.1.1,<2.0.0)",
     "notebook (>=7.4.5,<8.0.0)",
@@ -21,6 +20,7 @@ dependencies = [
     "pymupdf (>=1.26.4,<2.0.0)",
     "yfinance (>=0.2.66,<0.3.0)",
     "pyportfolioopt (>=1.5.6,<2.0.0)",
+    "kaleido (==0.2.1)",
 ]
 
 [tool.poetry]
