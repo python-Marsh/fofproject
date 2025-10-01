@@ -56,12 +56,8 @@ def minimum_variance_analysis(funds: dict, mode="Minimum Variance", target_retur
     common_start = max(start_dates)  # latest start date
     common_end = min(end_dates)      # earliest end date
     n_months = (common_end.year - common_start.year) * 12 + (common_end.month - common_start.month) + 1
-    print("Common range:", common_start, "to", common_end)
-    print(returns_df.head())
-
     # Filter to common range
     filtered = returns_df.loc[common_start:common_end]
-    print(filtered.head())
 
     # Looks like:
     # month         FundA   FundB   FundC
@@ -120,9 +116,9 @@ def minimum_variance_analysis(funds: dict, mode="Minimum Variance", target_retur
         title=dict(
             text=f"<b>{title}</b>" if title else f"<b>Efficient Frontier - {mode}</b>",
             font=dict(size=22),
-            x=0.98,
+            x=0.5,
             xanchor="center",
-            y=0.98,
+            y=0.925,
             yanchor="middle",
         ),
         template="plotly_white",
@@ -148,7 +144,7 @@ def minimum_variance_analysis(funds: dict, mode="Minimum Variance", target_retur
         xanchor="right",
         yanchor="top",
         showarrow=False,
-        align="left",
+        align="right",
         bgcolor="#F6F6F7",
         bordercolor=hex_to_rgba(color, 0.9),
         borderwidth=1,

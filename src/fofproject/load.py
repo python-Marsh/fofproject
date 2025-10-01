@@ -519,7 +519,6 @@ def rerun_no_perf_files(folder_path="input", save=False):
 
     return results
 
-
 def continue_running(folder_path="input", save=False, identifier = "_parsed from_"):
     """
     Processes only PDFs in the folder that do NOT already contain the identifier in their name.

@@ -650,8 +650,7 @@ def plot_cumulative_returns(
             height=HEIGHT if aspect_lock else None,
             scale=2  # controls DPI
         )
-    else:
-        fig.show()
+    fig.show()
 
     return fig
 

@@ -51,8 +51,8 @@ def presentation_data_update(month:str):
         print(f"Sharpe ratio of {name}: {funds[name].sharpe_ratio(funds[name].inception_date, end_month):.1f}")
         print(f"Sortino ratio of {name}: {funds[name].sortino_ratio(funds[name].inception_date, end_month):.1f}")
         print(f"YTD return of {name}: {funds[name].cumulative_return(january, end_month)*100:.1f}%")
-        funds[name].export_key_metrics_table(language ="en", end_month=end_month, benchmark_fund = funds[benchmark_map[name]], metrics = ["cagr","vol","sharpe","sortino","beta"],horizontal = True,fix_aspect=True)
-        funds[name].export_monthly_table(language ="en", end_month=month)
+        funds[name].export_key_metrics_table(language ="en", end_month=end_month, benchmark_fund = funds[benchmark_map[name]], metrics = ["cagr","vol","sharpe","sortino","beta"],horizontal = True,fix_aspect=True, save=True)
+        funds[name].export_monthly_table(language ="en", end_month=month,save = True)
 
     for lan in ["en", "cn"]:
         plot = plot_cumulative_returns(
@@ -94,7 +94,7 @@ def presentation_data_update(month:str):
             language="en",
             blur=True,
             aspect_lock=False,
-            save=True
+            save=False
         )
 
 

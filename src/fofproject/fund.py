@@ -677,6 +677,7 @@ class Fund:
         end_month: str | None = None,  # "YYYY-MM"
         bins: int = 24,
         show_stats_lines: bool = True,
+        save = False,
     ):
         """
         Plot a histogram (bar chart) of this fund's historical monthly returns.
@@ -895,10 +896,10 @@ class Fund:
             bordercolor=hex_to_rgba(color, 0.9),
             borderwidth=1,
         )
-
-        file_name = f'{self.name} monthly return distribution plot {sm.strftime("%Y-%m-%d")} to {em.strftime("%Y-%m-%d")}.png'
-        save_path = f"{save_dir}/{file_name}"
-        fig.write_image(save_path, scale=2)
+        if save:
+            file_name = f'{self.name} monthly return distribution plot {sm.strftime("%Y-%m-%d")} to {em.strftime("%Y-%m-%d")}.png'
+            save_path = f"{save_dir}/{file_name}"
+            fig.write_image(save_path, scale=2)
         return fig
 
     def plot_rolling_vol_vs_benchmark(
@@ -1049,7 +1050,8 @@ class Fund:
         benchmark_fund: Fund = None, 
         benchmark_name: str = None,
         inception_column: bool = False,
-        end_month = None
+        end_month = None,
+        save = False,
     ):
         """
         Export a Matplotlib table of monthly + YTD returns to an interactive HTML file.
@@ -1246,14 +1248,15 @@ class Fund:
         plt.margins(0)
         plt.axis("off")
         plt.tight_layout()
-        file_name = (
-            f'{self.name} monthly return table {end_month_dt.strftime("%Y-%m-%d")}'
-            + (f" {benchmark_fund.name}" if benchmark_fund else "")
-            + ".png"
-        )
-        # file_name = self.name + ' key metrics table ' + end_month_dt + benchmark.name if benchmark else '' + '.png'
-        save_path = f"{save_dir}/{file_name}"
-        plt.savefig(save_path, bbox_inches="tight", pad_inches=0, dpi=200)
+        if save:
+            file_name = (
+                f'{self.name} monthly return table {end_month_dt.strftime("%Y-%m-%d")}'
+                + (f" {benchmark_fund.name}" if benchmark_fund else "")
+                + ".png"
+            )
+            # file_name = self.name + ' key metrics table ' + end_month_dt + benchmark.name if benchmark else '' + '.png'
+            save_path = f"{save_dir}/{file_name}"
+            plt.savefig(save_path, bbox_inches="tight", pad_inches=0, dpi=200)
         return plt
 
     def export_key_metrics_table(
@@ -1264,6 +1267,7 @@ class Fund:
         metrics=None,
         horizontal: bool = False,
         fix_aspect: bool = False,
+        save = False,
     ):
         header_fill = "#cbb69d"
         cell_fill = "#f0f0f0"
@@ -1429,25 +1433,27 @@ class Fund:
         plt.margins(0)
         plt.axis("off")
         plt.tight_layout()
-        save_path = f'{save_dir}/{self.name} key metrics table {end_month.strftime("%Y-%m-%d")}.png'
-        plt.savefig(save_path, bbox_inches="tight", pad_inches=0, dpi=200)
+        if save:
+            save_path = f'{save_dir}/{self.name} key metrics table {end_month.strftime("%Y-%m-%d")}.png'
+            plt.savefig(save_path, bbox_inches="tight", pad_inches=0, dpi=200)
         return fig
 
-    def summary_of_a_fund(self, benchmark_fund=None, language="en"):
+    def summary_of_a_fund(self, benchmark_fund=None, language="en", save = False):
         print(self.fund_des)
         print(f"Net Exposure = {min(self.net_exposure)*100}% to {max(self.net_exposure)*100}%") if self.net_exposure else None
         print(self.contact_info)
         endmonth_str = datetime.strftime(self.latest_date, format='%Y-%m')
-        plot1 = self.export_monthly_table(language, benchmark_fund=benchmark_fund)
+        plot1 = self.export_monthly_table(language, benchmark_fund=benchmark_fund, save=save)
         plot2 = self.export_key_metrics_table(
             benchmark_fund=benchmark_fund,
             end_month=endmonth_str,
             language=language,
             metrics=["cagr", "vol", "sharpe", "sortino", "mdd", "beta", "corr", "win"],
             horizontal=False,
+            save = save,
         )
-        plot3 = self.plot_monthly_return_distribution()
-        plot4 = self.plot_rolling_vol_vs_benchmark(benchmark_fund=benchmark_fund)
+        plot3 = self.plot_monthly_return_distribution(save=save)
+        plot4 = self.plot_rolling_vol_vs_benchmark(benchmark_fund=benchmark_fund, save=save)
 
         plot1.show()
         plot2.show()
