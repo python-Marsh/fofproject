@@ -769,5 +769,130 @@ def merge_funds(dict1: dict, dict2: dict) -> dict:
     merged = init_funds(results)
     return merged
 
+def parse_from_marquee(url: str):
+    """
+    Access a webpage that loads content via JavaScript and extract the full HTML after rendering.
+    """
+    from selenium import webdriver
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from webdriver_manager.chrome import ChromeDriverManager
+    import time
 
+    # Configure WebDriver (make sure you have the right ChromeDriver installed)
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service)
+    wait = WebDriverWait(driver, 20)
+    Mq_username=os.getenv("MQ_USERNAME")
+    Mq_password=os.getenv("MQ_PASSWORD")
+    try:
+        driver.get(url)
+        time.sleep(5)  # Initial wait for page to start loading
+        # Check if the page requires login by title
+        if "signin" in driver.title.lower() or "login" in driver.title.lower():
+            print("Login required — proceeding with login automation...")
+            time.sleep(3)
+            # Fill username fields
+            username_field = driver.find_element(By.NAME, "username")
+            username_field.send_keys(Mq_username)
+            button = driver.find_element(By.CSS_SELECTOR, "button[data-cy='gs-uitk-button__button']")
+            button.click()
+            # Wait for password field to appear
+            password_field = wait.until(
+                EC.presence_of_element_located((By.NAME, "password"))
+            )
+            # Enter your password
+            password_field.send_keys(Mq_password)
+            button = driver.find_element(By.CSS_SELECTOR, "button[data-cy='gs-uitk-button__button']")
+            button.click()
+            print("Login successful!")
+        else:
+            print("Already logged in — continuing...")
 
+        # Wait until the table (or a specific element inside it) is present
+        # Adjust the locator (By.XPATH / By.CSS_SELECTOR) to match your table
+        time.sleep(20)  # Additional wait to ensure all JS has loaded
+        # First: look for "Request Full Access" span
+        try:
+            buttons = wait.until(
+                EC.presence_of_all_elements_located((By.XPATH,"//span[text()='Request Full Access' or text()='Full Access Requested']"))
+            )
+        except:
+            buttons = []   # no buttons found in time
+            print("No Request Full Access button found.")
+        
+        if buttons:  # Found request buttons
+            for span in buttons:
+                # Check if inside a clickable parent (button or link)
+                try:
+                    parent = span.find_element(By.XPATH, "./ancestor::*[self::button or self::a]")
+                    if parent.is_enabled() and parent.get_attribute("disabled") is None:
+                        parent.click()
+                        print("Clicked: Request Full Access")
+                    else:
+                        print("Full Access Requested")
+                except:
+                    print("Error finding clickable parent for Request Full Access")
+
+        else:
+            # Second: if no button, look for table
+            tbody = wait.until(EC.presence_of_element_located((By.XPATH, "//tbody")))
+            if tbody:
+                print("Table found.")
+                page_html = driver.execute_script("return document.body.innerText;")
+                # Save table HTML to file
+                with open("page_output.html", "w", encoding="utf-8") as f:
+                    f.write(page_html)
+                print("Table outerHTML copied to table_output.html")
+            else:
+                print("No table found.")
+
+        # Give JavaScript a bit more time if necessary
+        time.sleep(2)
+        print("Page HTML has been saved to page_output.html")
+
+    finally:
+        driver.quit()
+
+# def get_link_from_list(file_path="Links.html"):
+#     """
+#     Reads a text file containing URLs (one per line) and returns them as a list.
+#     """
+#     links = []
+#     from bs4 import BeautifulSoup
+
+#     # Load your saved email HTML
+#     with open("email_output.html", "r", encoding="utf-8") as f:
+#         html = f.read()
+
+#     soup = BeautifulSoup(html, "html.parser")
+
+#     # Locate the <tr> that contains the specific link
+#     target_tr = soup.find("tr", style=lambda s: s and "mso-yfti-irow:1" in s)
+
+#     if target_tr:
+#         print("Full <tr> block:\n", target_tr.prettify())
+
+#         # Get the <a> tag inside it
+#         link_tag = target_tr.find("a")
+#         if link_tag:
+#             name = link_tag.get_text(strip=True)
+#             href = link_tag.get("href")
+#             print("Name:", name)
+#             print("Link:", href)
+#     else:
+#         print("Target row not found")
+
+#     if not os.path.exists(file_path):
+#         print(f"{file_path} not found.")
+#         return links
+
+#     with open(file_path, "r") as f:
+#         for line in f:
+#             url = line.strip()
+#             if url:
+#                 links.append(url)
+#     return links
+parse_from_marquee("https://marquee.gs.com/s/funds/MABSQMAJXS1VSVCQ")
