@@ -769,7 +769,7 @@ def merge_funds(dict1: dict, dict2: dict) -> dict:
     merged = init_funds(results)
     return merged
 
-def parse_from_marquee(url: str):
+def parse_from_marquee(url: str, fund_name: str = ""):
     """
     Access a webpage that loads content via JavaScript and extract the full HTML after rendering.
     """
@@ -787,6 +787,7 @@ def parse_from_marquee(url: str):
     wait = WebDriverWait(driver, 20)
     Mq_username=os.getenv("MQ_USERNAME")
     Mq_password=os.getenv("MQ_PASSWORD")
+    requested_list = []
     try:
         driver.get(url)
         time.sleep(5)  # Initial wait for page to start loading
@@ -822,7 +823,7 @@ def parse_from_marquee(url: str):
         except:
             buttons = []   # no buttons found in time
             print("No Request Full Access button found.")
-        
+            requested_list = requested_list + [fund_name]
         if buttons:  # Found request buttons
             for span in buttons:
                 # Check if inside a clickable parent (button or link)
@@ -833,6 +834,7 @@ def parse_from_marquee(url: str):
                         print("Clicked: Request Full Access")
                     else:
                         print("Full Access Requested")
+                        requested_list = requested_list + [fund_name]
                 except:
                     print("Error finding clickable parent for Request Full Access")
 
@@ -842,8 +844,8 @@ def parse_from_marquee(url: str):
             if tbody:
                 print("Table found.")
                 page_html = driver.execute_script("return document.body.innerText;")
-                # Save table HTML to file
-                with open("page_output.html", "w", encoding="utf-8") as f:
+                # Save text to file
+                with open("page_output.txt", "w", encoding="utf-8") as f:
                     f.write(page_html)
                 print("Table outerHTML copied to table_output.html")
             else:
@@ -855,44 +857,45 @@ def parse_from_marquee(url: str):
 
     finally:
         driver.quit()
+        return page_html, requested_list
 
-# def get_link_from_list(file_path="Links.html"):
-#     """
-#     Reads a text file containing URLs (one per line) and returns them as a list.
-#     """
-#     links = []
-#     from bs4 import BeautifulSoup
+def get_link_from_html(folder_path="input"):
+    """
+    Reads a text file containing URLs (one per line) and returns them as a list.
+    """
+    links = []
+    from bs4 import BeautifulSoup
+    for file_name in os.listdir(folder_path):
+        if file_name.lower().endswith(".html"):
+            file_path = os.path.join(folder_path, file_name)
+    # Load your saved email HTML
+    with open(file_path, "r", encoding="utf-8") as f:
+        html = f.read()
+    soup = BeautifulSoup(html, "html.parser")
+    # Locate the <tr> that contains the specific link
+    target_tr = soup.find("tr", style=lambda s: s and "mso-yfti-irow:1" in s)
 
-#     # Load your saved email HTML
-#     with open("email_output.html", "r", encoding="utf-8") as f:
-#         html = f.read()
+    # if target_tr:
+    #     print("Full <tr> block:\n", target_tr.prettify())
 
-#     soup = BeautifulSoup(html, "html.parser")
+    #     # Get the <a> tag inside it
+    #     link_tag = target_tr.find("a")
+    #     if link_tag:
+    #         name = link_tag.get_text(strip=True)
+    #         href = link_tag.get("href")
+    #         print("Name:", name)
+    #         print("Link:", href)
+    # else:
+    #     print("Target row not found")
 
-#     # Locate the <tr> that contains the specific link
-#     target_tr = soup.find("tr", style=lambda s: s and "mso-yfti-irow:1" in s)
+    # if not os.path.exists(file_path):
+    #     print(f"{file_path} not found.")
+    #     return links
 
-#     if target_tr:
-#         print("Full <tr> block:\n", target_tr.prettify())
-
-#         # Get the <a> tag inside it
-#         link_tag = target_tr.find("a")
-#         if link_tag:
-#             name = link_tag.get_text(strip=True)
-#             href = link_tag.get("href")
-#             print("Name:", name)
-#             print("Link:", href)
-#     else:
-#         print("Target row not found")
-
-#     if not os.path.exists(file_path):
-#         print(f"{file_path} not found.")
-#         return links
-
-#     with open(file_path, "r") as f:
-#         for line in f:
-#             url = line.strip()
-#             if url:
-#                 links.append(url)
-#     return links
+    # with open(file_path, "r") as f:
+    #     for line in f:
+    #         url = line.strip()
+    #         if url:
+    #             links.append(url)
+    # return links
 parse_from_marquee("https://marquee.gs.com/s/funds/MABSQMAJXS1VSVCQ")
