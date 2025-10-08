@@ -20,6 +20,7 @@ if not save_dir.exists():
 
 fund_name_map = {
     "LEAD": {"en": "Fund", "cn": "基金"},
+    "RDGFF": {"en": "River Delta Global Frontier Fund", "cn": "RDGFF 基金"},
     "MSCI CHINA": {"en": "MSCI China Index", "cn": "MSCI 中国指数"},
     "MSCI WORLD": {"en": "MSCI World Index", "cn": "MSCI 世界指数"},
     "S&P 500": {"en": "S&P 500 Index", "cn": "标普500指数"},
@@ -270,7 +271,7 @@ def _add_value_boxes(fig, xs, ys, *, indices, color, fmt, boxcfg):
             bgcolor=hex_to_rgba(color, 0.15),  # transparent fill based on trace color
             bordercolor=color,
             borderwidth=boxcfg.get("borderwidth", 1),
-            font=dict(size=boxcfg.get("font_size", 12), color="black"),
+            font=dict(size=boxcfg.get("font_size", 12), color="black", weight="bold"),
             xanchor="left",
             yanchor="bottom",
             align="center",

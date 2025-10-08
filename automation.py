@@ -17,9 +17,9 @@ def presentation_data_update(month:str):
     specific_month = end_month.month
     january = datetime(year, 1, 1)
 
-    print(f"Annualized return of RDGFF: {funds['RDGFF'].annualized_return(funds['RDGFF'].inception_date, end_month)*100:.0f}%")
-    print(f"Sharpe ratio of RDGFF: {funds['RDGFF'].sharpe_ratio(funds['RDGFF'].inception_date, end_month):.1f}")
-    print(f"Sortino ratio of RDGFF: {funds['RDGFF'].sortino_ratio(funds['RDGFF'].inception_date, end_month):.1f}")
+    print(f"Annualized return of RDGFF: {funds['RDGFF'].annualized_return(funds['RDGFF'].inception_date, end_month)*100:.2f}%")
+    print(f"Sharpe ratio of RDGFF: {funds['RDGFF'].sharpe_ratio(funds['RDGFF'].inception_date, end_month):.2f}")
+    print(f"Sortino ratio of RDGFF: {funds['RDGFF'].sortino_ratio(funds['RDGFF'].inception_date, end_month):.2f}")
     print(f"Cumulative return of RDGFF: {funds['RDGFF'].cumulative_return(funds['RDGFF'].inception_date, end_month)*100:.2f}%")
     print(f"{month} return of RDGFF: {funds['RDGFF'].get_monthly_return(year, specific_month)*100:.2f}%")    
     print(f"{month} return of MSCI China: {funds['MSCI CHINA'].get_monthly_return(year, specific_month)*100:.2f}%")    
@@ -31,10 +31,11 @@ def presentation_data_update(month:str):
     print(f"Return in negative months of RDGFF: {funds['RDGFF'].return_in_negative_months(funds['RDGFF'].inception_date, end_month)*100:.2f}%")
     print(f"Beta to MSCI China of RDGFF: {funds['RDGFF'].beta_to(funds['MSCI CHINA'], funds['RDGFF'].inception_date, end_month):.3f}")
     print(f"Beta to MSCI World of RDGFF: {funds['RDGFF'].beta_to(funds['MSCI WORLD'], funds['RDGFF'].inception_date, end_month):.3f}")
-    print(f"YTD return of RDGFF: {funds['RDGFF'].cumulative_return(january, end_month)*100:.1f}%")
-    print(f"YTD return of HFRI: {funds['EUREKAHEDGE'].cumulative_return(january, end_month)*100:.1f}%")    
-    print(f"YTD return of S&P 500: {funds['S&P 500'].cumulative_return(january, end_month)*100:.1f}%")
-    print(f"YTD return of MSCI China: {funds['MSCI CHINA'].cumulative_return(january, end_month)*100:.1f}%")
+    print(f"YTD return of RDGFF: {funds['RDGFF'].cumulative_return(january, end_month)*100:.2f}%")
+    print(f"YTD return of HFRI: {funds['EUREKAHEDGE'].cumulative_return(january, end_month)*100:.2f}%")    
+    print(f"YTD return of S&P 500: {funds['S&P 500'].cumulative_return(january, end_month)*100:.2f}%")
+    print(f"YTD return of MSCI China: {funds['MSCI CHINA'].cumulative_return(january, end_month)*100:.2f}%")
+    print(f"YTD return of MSCI World: {funds['MSCI WORLD'].cumulative_return(january, end_month)*100:.2f}%")
     print("========== Portfolio holdings =============")
     print("Appendix of our portfolio performance:")
     benchmark_map = {
@@ -62,7 +63,7 @@ def presentation_data_update(month:str):
         end_month=month,
         style="excel",
         language= lan,
-        blur=True,
+        blur=False,
         aspect_lock=True,
         save=True
         )
@@ -99,4 +100,4 @@ def presentation_data_update(month:str):
 
 
 
-presentation_data_update("2025-07")
+presentation_data_update("2025-08")

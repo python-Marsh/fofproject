@@ -421,6 +421,36 @@ def gpt_process_pdf(file_path: str):
       data['performance'].sort(key=lambda x:datetime.strptime(x["date"], "%d/%m/%Y"))
     return data
 
+def gpt_process_text(text: str):
+    """
+    From text and run GPT extraction according to the schema.
+    Returns the parsed JSON or raw text if parsing fails.
+    """
+    client = OpenAI(
+      api_key=os.getenv("OPENAI_API_KEY")
+    )
+    response = client.responses.create(
+        model="gpt-4.1-mini",
+        temperature=0,
+        input=[
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT + "\n\nJSON Schema:\n" + RESPONSE_SCHEMA
+            },
+            {
+                "role": "user",
+                "content": f"Extract the required data from this file:\n{text}"
+            }
+        ]
+    )
+    output_text = response.output_text.strip()
+    data = json.loads(output_text)
+    data["performance"] = process_performance(data)
+    if isinstance(data.get('performance'), list) and data['performance']:
+    # Check if performance is a non-empty list and sort it
+      data['performance'].sort(key=lambda x:datetime.strptime(x["date"], "%d/%m/%Y"))
+    return data
+
 def process_pdfs_in_folder(folder_path="input", save=False, identifier = "_parsed from_"):
     """
     Iterates through all PDFs in the same folder as this script (relative path).
@@ -769,18 +799,25 @@ def merge_funds(dict1: dict, dict2: dict) -> dict:
     merged = init_funds(results)
     return merged
 
-def parse_from_marquee(url: str, fund_name: str = ""):
+def parse_from_marquee(url: str, fund_name: str = "", show=False):
     """
     Access a webpage that loads content via JavaScript and extract the full HTML after rendering.
     """
     from selenium import webdriver
     from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.chrome.options import Options
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
     from webdriver_manager.chrome import ChromeDriverManager
+    from selenium.common.exceptions import TimeoutException
     import time
-
+    
+    if not show:
+        chrome_options = Options()
+        chrome_options.add_argument("--headless=new")  # Run in headless mode
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
     # Configure WebDriver (make sure you have the right ChromeDriver installed)
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service)
@@ -823,8 +860,10 @@ def parse_from_marquee(url: str, fund_name: str = ""):
         except:
             buttons = []   # no buttons found in time
             print("No Request Full Access button found.")
-            requested_list = requested_list + [fund_name]
+
         if buttons:  # Found request buttons
+            page_html = False
+            requested_list = [fund_name]
             for span in buttons:
                 # Check if inside a clickable parent (button or link)
                 try:
@@ -834,23 +873,31 @@ def parse_from_marquee(url: str, fund_name: str = ""):
                         print("Clicked: Request Full Access")
                     else:
                         print("Full Access Requested")
-                        requested_list = requested_list + [fund_name]
                 except:
                     print("Error finding clickable parent for Request Full Access")
 
         else:
             # Second: if no button, look for table
-            tbody = wait.until(EC.presence_of_element_located((By.XPATH, "//tbody")))
-            if tbody:
-                print("Table found.")
-                page_html = driver.execute_script("return document.body.innerText;")
-                # Save text to file
-                with open("page_output.txt", "w", encoding="utf-8") as f:
-                    f.write(page_html)
-                print("Table outerHTML copied to table_output.html")
-            else:
-                print("No table found.")
+            try:
+                tbody = wait.until(EC.presence_of_element_located((By.XPATH, "//tbody")))
+                if tbody:
+                    print("Table found.")
+                    page_html = driver.execute_script("return document.body.innerText;")
+                else:
+                    print("No table found.")
+                    page_html = False
+                    requested_list = [fund_name]
 
+            except TimeoutException:
+                print(f"No table found or access requested for {fund_name} at {url}")
+                page_html = False
+                requested_list = [fund_name]
+
+            except Exception as e:
+                print(f"Error loading {fund_name} from {url}: {e}")
+                page_html = False
+                requested_list = [fund_name]
+            
         # Give JavaScript a bit more time if necessary
         time.sleep(2)
         print("Page HTML has been saved to page_output.html")
@@ -859,43 +906,125 @@ def parse_from_marquee(url: str, fund_name: str = ""):
         driver.quit()
         return page_html, requested_list
 
-def get_link_from_html(folder_path="input"):
+def get_link_from_html(folder_path=r"input\marquee",  save=False, show=False):
     """
     Reads a text file containing URLs (one per line) and returns them as a list.
     """
     links = []
+    empty_list = []
+    no_perf_list = []
+    results = []
     from bs4 import BeautifulSoup
+    # Read fund_name prefixes from the file
     for file_name in os.listdir(folder_path):
-        if file_name.lower().endswith(".html"):
+        if file_name.lower().endswith((".html", ".htm")):
             file_path = os.path.join(folder_path, file_name)
-    # Load your saved email HTML
-    with open(file_path, "r", encoding="utf-8") as f:
-        html = f.read()
-    soup = BeautifulSoup(html, "html.parser")
-    # Locate the <tr> that contains the specific link
-    target_tr = soup.find("tr", style=lambda s: s and "mso-yfti-irow:1" in s)
+            # Load your saved email HTML
+            with open(file_path, "rb") as f:
+                html = f.read()
+            soup = BeautifulSoup(html, "html.parser")
+            # Locate the <tr> that contains the specific link
+            for row in soup.find_all("tr", style=lambda s: s and "mso-yfti-irow:" in s):
+                td = row.find("td")  # first td of the row
+                if td:
+                    link_tag = td.find("a")
+                    if link_tag:
+                        fund_name = link_tag.get_text(separator = "", strip=True).replace("\r", "").replace("\n", "")
+                        fund_name = " ".join(fund_name.split()).upper()
+                        fund_link = link_tag["href"]
+                        if "marquee.gs.com" in fund_link.lower():
+                            links.append((fund_name, fund_link))
+            print(f"Found {len(links)} links in the HTML.")
+            print(links)
+            links_path = os.path.join(folder_path, "Links & Names.txt")
+            with open(links_path, "w") as f:
+                for url, name in links:
+                    f.write(f"{url}\t{name}\n")
+    # Parsing information from the links
+    for fund_name, fund_link in links:
+        page_html, requested_list = parse_from_marquee(url=fund_link, fund_name=fund_name, show=show)
+        if not page_html:
+            print(f"No table found or access requested for {fund_name} at {fund_link}")
+            empty_list = empty_list + requested_list
+        else:
+            result = gpt_process_text(page_html)
+            # Checking if there's performance recorded
+            val = result['performance']
+            if not (isinstance(val, list) and all(isinstance(item, dict) for item in val)) or (isinstance(val, list) and not val)  :
+                no_perf_list = no_perf_list + [result['fund_name']]
+            results.append(result)
+            if save:
+              # Create "json" folder inside folder_path if it doesn't exist
+              json_folder = os.path.join(folder_path, "json")
+              os.makedirs(json_folder, exist_ok=True)
+              # Save result to a JSON file inside the "json" folder
+              output_path = os.path.join(json_folder, f"{result['fund_name']}.json")
+              with open(output_path, "w", encoding="utf-8") as f:
+                  json.dump(result, f, ensure_ascii=False, indent=2)
+    # Record the files without performance for future re-run
+    no_perf_path = os.path.join(folder_path, "No Performance Found.txt")
+    with open(no_perf_path, "w") as f:
+      f.write("\n".join(no_perf_list))
+    no_table_path = os.path.join(folder_path, "Requested & No Table.txt")
+    with open(no_table_path, "w") as f:
+      f.write("\n".join(empty_list))
+    return results
 
-    # if target_tr:
-    #     print("Full <tr> block:\n", target_tr.prettify())
+def rerun_no_table_list (folder_path=r"input\marquee", save=False):
+    """
+    Reads 'Requested & No Table.txt' in folder_path.
+    Re-runs parse_from_marquee for files that match the prefixes listed.
+    Returns updated results.
+    """
+    filter_list = []
+    links = []
+    results = []
+    empty_list = []
+    no_perf_path = os.path.join(folder_path, "No Performance Found.txt")
+    filter_list_path = os.path.join(folder_path, "Requested & No Table.txt")
+    links_path = os.path.join(folder_path, "Links & Names.txt")
+    if not (os.path.exists(filter_list_path) and os.path.exists(links_path)):
+        print("One or both lists are missing.")
+        return []
+    with open(no_perf_path, "r") as f:
+        no_perf_list = [line.strip() for line in f if line.strip()]
+    with open(links_path, "rb") as f:
+        for line in f:
+            url, name = line.strip().split("\t", 1)  # split into 2 parts only
+            links.append((url, name))
+    with open(filter_list_path, "rb") as f:
+        filter_list = [line.strip() for line in f if line.strip()]
+    
+    for fund_name, fund_link in links:
+        if fund_name not in filter_list:
+            continue  # skip anything not in the second list
+        page_html, requested_list = parse_from_marquee(url=fund_link, fund_name=fund_name)
+        if not page_html:
+            print(f"No table found or access requested for {fund_name} at {fund_link}")
+        else:
+            result = gpt_process_text(page_html)
+            # Checking if there's performance recorded
+            val = result['performance']
+            if not (isinstance(val, list) and all(isinstance(item, dict) for item in val)) or (isinstance(val, list) and not val)  :
+                no_perf_list = no_perf_list + [result['fund_name']]
+            empty_list = empty_list + requested_list
+            results.append(result)
+            if save:
+                # Create "json" folder inside folder_path if it doesn't exist
+                json_folder = os.path.join(folder_path, "json")
+                os.makedirs(json_folder, exist_ok=True)
+                # Save result to a JSON file inside the "json" folder
+                output_path = os.path.join(json_folder, f"{result['fund_name']}.json")
+                with open(output_path, "w", encoding="utf-8") as f:
+                    json.dump(result, f, ensure_ascii=False, indent=2)
+        # Record the files without performance for future re-run
+    no_perf_path = os.path.join(folder_path, "No Performance Found.txt")
+    with open(no_perf_path, "w") as f:
+        f.write("\n".join(no_perf_list))
+    no_table_path = os.path.join(folder_path, "Requested & No Table.txt")
+    with open(no_table_path, "w") as f:
+        f.write("\n".join(empty_list))
+    return results
 
-    #     # Get the <a> tag inside it
-    #     link_tag = target_tr.find("a")
-    #     if link_tag:
-    #         name = link_tag.get_text(strip=True)
-    #         href = link_tag.get("href")
-    #         print("Name:", name)
-    #         print("Link:", href)
-    # else:
-    #     print("Target row not found")
 
-    # if not os.path.exists(file_path):
-    #     print(f"{file_path} not found.")
-    #     return links
-
-    # with open(file_path, "r") as f:
-    #     for line in f:
-    #         url = line.strip()
-    #         if url:
-    #             links.append(url)
-    # return links
-parse_from_marquee("https://marquee.gs.com/s/funds/MABSQMAJXS1VSVCQ")
+get_link_from_html(save = True, show=True)
