@@ -799,7 +799,7 @@ def merge_funds(dict1: dict, dict2: dict) -> dict:
     merged = init_funds(results)
     return merged
 
-def parse_from_marquee(url: str, fund_name: str = "", show=False):
+def parse_from_marquee(url: str, fund_name: str = "", manager_name:str = "", show=False):
     """
     Access a webpage that loads content via JavaScript and extract the full HTML after rendering.
     """
@@ -851,7 +851,7 @@ def parse_from_marquee(url: str, fund_name: str = "", show=False):
 
         # Wait until the table (or a specific element inside it) is present
         # Adjust the locator (By.XPATH / By.CSS_SELECTOR) to match your table
-        time.sleep(20)  # Additional wait to ensure all JS has loaded
+        time.sleep(30)  # Additional wait to ensure all JS has loaded
         # First: look for "Request Full Access" span
         try:
             buttons = wait.until(
@@ -882,14 +882,95 @@ def parse_from_marquee(url: str, fund_name: str = "", show=False):
                 tbody = wait.until(EC.presence_of_element_located((By.XPATH, "//tbody")))
                 if tbody:
                     print("Table found.")
-                    page_html = driver.execute_script("return document.body.innerText;")
-                else:
-                    print("No table found.")
-                    page_html = False
-                    requested_list = [fund_name]
+                    try:  # wait a bit more for full table load
+                        card = driver.find_element(
+                            By.XPATH,
+                            "//div[contains(@class,'aurora-card')][.//div[@class='aurora-card-head-title' and contains(normalize-space(.), 'Fund(s)')]]"
+                        )
+                        # Then find the body inside that card
+                        card_body = card.find_element(By.XPATH, ".//div[@class='aurora-card-body']")
+                        # Within that body, find all <a> tags
+                        links = card_body.find_elements(By.XPATH, ".//a")
 
+                        # Loop through all the links and collect href + displayed text
+                        fund_options = []
+                        for link in links:
+                            href = link.get_attribute("href")
+                            text = link.text.strip()
+                            fund_options.append((href, text))
+                        # Now, find the link that matches the manager_name (case-insensitive)
+                        selected_link = None    
+                        for href, text in fund_options:
+                            if manager_name.lower() in text.lower():
+                                selected_link = href
+                                print(f"Navigated to fund page for manager: {manager_name}")
+                                break
+                            elif fund_name.lower() in text.lower():
+                                selected_link = href
+                                print(f"Navigated to fund page for fund: {fund_name}")
+                                break
+                            else:
+                                selected_link = fund_options[0][0]  # default to first option if no match
+                                print(f"No exact match found; defaulting to first fund option: {fund_options[0][0]}")
+                        if selected_link:
+                            driver.get(selected_link)
+                            time.sleep(25)  # wait for the new page to load
+                            try:
+                                buttons = wait.until(
+                                    EC.presence_of_all_elements_located((By.XPATH,"//span[text()='Request Full Access' or text()='Full Access Requested']"))
+                                )
+                            except:
+                                buttons = []   # no buttons found in time
+                                print("No Request Full Access button found.")
+
+                            if buttons:  # Found request buttons
+                                page_html = False
+                                requested_list = [fund_name]
+                                for span in buttons:
+                                    # Check if inside a clickable parent (button or link)
+                                    try:
+                                        parent = span.find_element(By.XPATH, "./ancestor::*[self::button or self::a]")
+                                        if parent.is_enabled() and parent.get_attribute("disabled") is None:
+                                            parent.click()
+                                            print("Clicked: Request Full Access")
+                                        else:
+                                            print("Full Access Requested")
+                                    except:
+                                        print("Error finding clickable parent for Request Full Access")
+                            else:
+                            # Second: if no button, look for table
+                                try:
+                                    tbody = wait.until(EC.presence_of_element_located((By.XPATH, "//tbody")))
+                                    if tbody:
+                                        try:
+                                            table = driver.find_element(
+                                                By.XPATH,
+                                                "//div[@class='aurora-card-head-title' and contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'return')]"
+                                            )
+                                            print("Performance table found after selection page.")
+                                            page_html = driver.execute_script("return document.body.innerText;")
+                                        except Exception as e:
+                                            print("Performance table not found after selection but there is a table", e)
+                                            page_html = False
+                                            requested_list = [fund_name]
+                                except:
+                                    print("Not Standard Table.")
+                                    page_html = False
+                                    requested_list = [fund_name]
+                    except:
+                        try:
+                            table = driver.find_element(
+                                By.XPATH,
+                                "//div[@class='aurora-card-head-title' and contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'return')]"
+                            )
+                            print("Performance table found.")
+                            page_html = driver.execute_script("return document.body.innerText;")
+                        except Exception as e:
+                            print("Performance table not found but there is a table", e)
+                            page_html = False
+                            requested_list = [fund_name]
             except TimeoutException:
-                print(f"No table found or access requested for {fund_name} at {url}")
+                print(f"No table found or access requested for {fund_name} at {url} under given time.")
                 page_html = False
                 requested_list = [fund_name]
 
@@ -914,6 +995,7 @@ def get_link_from_html(folder_path=r"input\marquee",  save=False, show=False):
     empty_list = []
     no_perf_list = []
     results = []
+    found_link = False
     from bs4 import BeautifulSoup
     # Read fund_name prefixes from the file
     for file_name in os.listdir(folder_path):
@@ -923,35 +1005,67 @@ def get_link_from_html(folder_path=r"input\marquee",  save=False, show=False):
             with open(file_path, "rb") as f:
                 html = f.read()
             soup = BeautifulSoup(html, "html.parser")
-            # Locate the <tr> that contains the specific link
             for row in soup.find_all("tr", style=lambda s: s and "mso-yfti-irow:" in s):
                 td = row.find("td")  # first td of the row
-                if td:
-                    link_tag = td.find("a")
-                    if link_tag:
-                        fund_name = link_tag.get_text(separator = "", strip=True).replace("\r", "").replace("\n", "")
-                        fund_name = " ".join(fund_name.split()).upper()
-                        fund_link = link_tag["href"]
-                        if "marquee.gs.com" in fund_link.lower():
-                            links.append((fund_name, fund_link))
-            print(f"Found {len(links)} links in the HTML.")
-            print(links)
+                td_cells = row.find_all("td")
+                if not td:
+                    continue
+
+                link_tag = td.find("a")
+                if not link_tag:
+                    continue
+
+                fund_name = link_tag.get_text(separator="", strip=True)
+                fund_name = " ".join(fund_name.split()).upper()
+                fund_link = link_tag["href"]
+
+                # Found a valid marquee link
+                if "marquee.gs.com" in fund_link.lower():
+                    # Save the found link
+                    
+                    if not found_link:
+                        # --- Navigate back to the table ---
+                        found_link = True
+                        table = row.find_parent("table")
+
+                        if table:
+                            # Locate the first header row (mso-yfti-irow:0)
+                            header_row = table.find("tr", style=lambda s: s and "mso-yfti-irow:0" in s)
+                            if header_row:
+                                # Extract text from all cells in that header row
+                                headers = [
+                                    " ".join(cell.get_text(separator=" ", strip=True).split())
+                                    for cell in header_row.find_all(["td", "th"])
+                                ]
+                                matching_index = next(
+                                    (i for i, h in enumerate(headers)
+                                    if any(k in h.lower() for k in ["presenter", "manager"])),
+                                    None  # default if no match is found
+                                )
+                    presenter_text = td_cells[matching_index].get_text(separator=" ", strip=True)
+                    links.append((fund_name, fund_link, presenter_text))
             links_path = os.path.join(folder_path, "Links & Names.txt")
             with open(links_path, "w") as f:
-                for url, name in links:
-                    f.write(f"{url}\t{name}\n")
+                for url, name, manager in links:
+                    f.write(f"{url}\t{name}\t{manager}\n")
     # Parsing information from the links
-    for fund_name, fund_link in links:
-        page_html, requested_list = parse_from_marquee(url=fund_link, fund_name=fund_name, show=show)
+    for fund_name, fund_link, manager_name in links:
+        page_html, requested_list = parse_from_marquee(url=fund_link, fund_name=fund_name, manager_name=manager_name,show=show)
         if not page_html:
             print(f"No table found or access requested for {fund_name} at {fund_link}")
             empty_list = empty_list + requested_list
+            no_table_path = os.path.join(folder_path, "Requested & No Table.txt")
+            with open(no_table_path, "w") as f:
+                f.write("\n".join(empty_list))
         else:
             result = gpt_process_text(page_html)
             # Checking if there's performance recorded
             val = result['performance']
             if not (isinstance(val, list) and all(isinstance(item, dict) for item in val)) or (isinstance(val, list) and not val)  :
-                no_perf_list = no_perf_list + [result['fund_name']]
+                no_perf_list = no_perf_list + [fund_name]
+            no_perf_path = os.path.join(folder_path, "No Performance Found.txt")
+            with open(no_perf_path, "w") as f:
+                f.write("\n".join(no_perf_list))    
             results.append(result)
             if save:
               # Create "json" folder inside folder_path if it doesn't exist
@@ -961,16 +1075,9 @@ def get_link_from_html(folder_path=r"input\marquee",  save=False, show=False):
               output_path = os.path.join(json_folder, f"{result['fund_name']}.json")
               with open(output_path, "w", encoding="utf-8") as f:
                   json.dump(result, f, ensure_ascii=False, indent=2)
-    # Record the files without performance for future re-run
-    no_perf_path = os.path.join(folder_path, "No Performance Found.txt")
-    with open(no_perf_path, "w") as f:
-      f.write("\n".join(no_perf_list))
-    no_table_path = os.path.join(folder_path, "Requested & No Table.txt")
-    with open(no_table_path, "w") as f:
-      f.write("\n".join(empty_list))
     return results
 
-def rerun_no_table_list (folder_path=r"input\marquee", save=False):
+def rerun_no_table_list (folder_path=r"input\marquee", save=False, show = False):
     """
     Reads 'Requested & No Table.txt' in folder_path.
     Re-runs parse_from_marquee for files that match the prefixes listed.
@@ -988,17 +1095,17 @@ def rerun_no_table_list (folder_path=r"input\marquee", save=False):
         return []
     with open(no_perf_path, "r") as f:
         no_perf_list = [line.strip() for line in f if line.strip()]
-    with open(links_path, "rb") as f:
+    with open(links_path, "r") as f:
         for line in f:
-            url, name = line.strip().split("\t", 1)  # split into 2 parts only
-            links.append((url, name))
-    with open(filter_list_path, "rb") as f:
+            fund_name, url, manager_name= line.strip().split("\t", 2)  # split into 2 parts only
+            links.append(( fund_name, url, manager_name))
+    with open(filter_list_path, "r") as f:
         filter_list = [line.strip() for line in f if line.strip()]
     
-    for fund_name, fund_link in links:
+    for fund_name, fund_link, manager_name in links:
         if fund_name not in filter_list:
             continue  # skip anything not in the second list
-        page_html, requested_list = parse_from_marquee(url=fund_link, fund_name=fund_name)
+        page_html, requested_list = parse_from_marquee(url=fund_link, fund_name=fund_name, manager_name=manager_name, show=show)
         if not page_html:
             print(f"No table found or access requested for {fund_name} at {fund_link}")
         else:
