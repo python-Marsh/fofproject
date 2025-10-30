@@ -902,6 +902,128 @@ class Fund:
             fig.write_image(save_path, scale=2)
         return fig
 
+    def compare_worst_performance(self, 
+        benchmark_fund, 
+        n_worst=10, 
+        title="Fund Performance on Benchmark's Worst Days", 
+        save=False
+    ):
+        """
+        Plot the fund's returns on the benchmark's worst-performing dates.
+
+        Parameters
+        ----------
+        self : fund object
+            Fund object with monthly returns (dict) indexed by datetime.
+        benchmark_fund : fund object
+            Benchmark object with monthly returns (dict) indexed by datetime.
+        n_worst : int, optional
+            Number of worst benchmark days to consider. Default is 10.
+        title : str, optional
+            Plot title.
+        save : bool, optional
+            Whether to save the chart as a PNG.
+        """
+
+        # Align both series by date
+        fund_returns = self.monthly_returns
+        bench_returns = benchmark_fund.monthly_returns
+        fund_returns = pd.Series(
+            {entry["datetime"]: entry["value"] for entry in fund_returns}
+        )
+        bench_returns = pd.Series(
+            {entry["datetime"]: entry["value"] for entry in bench_returns}
+        )
+         # Combine into a DataFrame
+        combined = pd.concat([fund_returns, bench_returns], axis=1, join='inner')
+        combined.columns = [self.name, benchmark_fund.name]
+
+        # Find N worst benchmark returns (lowest values)
+        worst_bench = combined[benchmark_fund.name].nsmallest(n_worst)
+
+        # Keep those same dates and sort by severity (worst to least bad)
+        worst_df = combined.loc[worst_bench.index].sort_values(by=benchmark_fund.name)
+
+        # Assign rank labels for x-axis (1 = worst)
+        worst_df["Rank"] = range(1, len(worst_df) + 1)
+        x_labels = [f"#{r}" for r in worst_df["Rank"]]
+
+        # Build chart
+        fig = go.Figure()
+
+        # Benchmark bars (grey)
+        fig.add_trace(go.Bar(
+            x=x_labels,
+            y=worst_df[benchmark_fund.name],
+            name=f"{benchmark_fund.name} Returns",
+            marker_color="rgba(152,154,156,0.8)",
+            hovertemplate="Rank: %{x}<br>Return: %{y:.2%}<extra>Benchmark</extra>"
+        ))
+
+        # Fund bars (gold)
+        fig.add_trace(go.Bar(
+            x=x_labels,
+            y=worst_df[self.name],
+            name=f"{self.name} Returns",
+            marker_color="rgba(193,174,148,0.85)",
+            hovertemplate="Rank: %{x}<br>Return: %{y:.2%}<extra>Fund</extra>"
+        ))
+
+        # Average horizontal lines
+        fig.add_hline(
+            y=worst_df[self.name].mean(),
+            line_dash="dot",
+            line_color="rgba(193,174,148,0.6)",
+            annotation_text=f"{self.name} Avg: {worst_df[self.name].mean():.2%}",
+            annotation_position="top left"
+        )
+        fig.add_hline(
+            y=worst_df[benchmark_fund.name].mean(),
+            line_dash="dot",
+            line_color="rgba(152,154,156,0.6)",
+            annotation_text=f"{benchmark_fund.name} Avg: {worst_df[benchmark_fund.name].mean():.2%}",
+            annotation_position="bottom left"
+        )
+
+        # Layout and aesthetics
+        fig.update_layout(
+            title=dict(
+                text=f"<b>{title}</b>",
+                x=0.5,
+                font=dict(size=20)
+            ),
+            xaxis=dict(
+                title=f"Top {n_worst} Worst Benchmark Returns (Ranked)",
+                tickfont=dict(size=10),
+                showgrid=False
+            ),
+            yaxis=dict(
+                title="Daily Return",
+                tickformat=".2%",
+                zeroline=True,
+                zerolinecolor="black"
+            ),
+            barmode="group",
+            hovermode="x unified",
+            template="plotly_white",
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="center",
+                x=0.5
+            ),
+            margin=dict(l=60, r=40, t=60, b=80)
+        )
+
+        if save:
+            file_name = f"{self.name}_vs_{benchmark_fund.name}_worst_ranked.png"
+            save_path = f"{save_dir}/{file_name}"
+            fig.write_image(save_path, scale=2)
+            print(f"Chart saved to {file_name}")
+
+        return fig
+
     def plot_rolling_vol_vs_benchmark(
         self, benchmark_fund=None, window=12, title="Rolling Volatility (annually)", save = False
         ):

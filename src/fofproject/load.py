@@ -1134,4 +1134,4 @@ def rerun_no_table_list (folder_path=r"input\marquee", save=False, show = False)
     return results
 
 
-get_link_from_html(save = True, show=True)
+# get_link_from_html(save = True, show=True)
