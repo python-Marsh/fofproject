@@ -32,7 +32,7 @@ def presentation_data_update(month:str):
     print(f"Beta to MSCI China of RDGFF: {funds['RDGFF'].beta_to(funds['MSCI CHINA'], funds['RDGFF'].inception_date, end_month):.3f}")
     print(f"Beta to MSCI World of RDGFF: {funds['RDGFF'].beta_to(funds['MSCI WORLD'], funds['RDGFF'].inception_date, end_month):.3f}")
     print(f"YTD return of RDGFF: {funds['RDGFF'].cumulative_return(january, end_month)*100:.2f}%")
-    print(f"YTD return of HFRI: {funds['EUREKAHEDGE'].cumulative_return(january, end_month)*100:.2f}%")    
+    print(f"YTD return of HFRI: {funds['EUREKAHEDGE WORLD'].cumulative_return(january, end_month)*100:.2f}%")    
     print(f"YTD return of S&P 500: {funds['S&P 500'].cumulative_return(january, end_month)*100:.2f}%")
     print(f"YTD return of MSCI China: {funds['MSCI CHINA'].cumulative_return(january, end_month)*100:.2f}%")
     print(f"YTD return of MSCI World: {funds['MSCI WORLD'].cumulative_return(january, end_month)*100:.2f}%")
@@ -57,7 +57,7 @@ def presentation_data_update(month:str):
 
     for lan in ["en", "cn"]:
         plot = plot_cumulative_returns(
-        funds=subset_of_funds(funds, ['RDGFF', 'EUREKAHEDGE','MSCI CHINA']),   # subset based on this group
+        funds=subset_of_funds(funds, ['RDGFF', 'EUREKAHEDGE WORLD','MSCI CHINA']),   # subset based on this group
         title="Performance Since Inception",
         start_month=None,
         end_month=month,
@@ -73,8 +73,8 @@ def presentation_data_update(month:str):
         ['HAO', 'MSCI CHINA'],
         ['TAIREN', 'MSCI CHINA', 'MSCI WORLD'],
         ['LEXINGTON', 'MSCI WORLD', 'S&P 500'],
-        ['LIM', 'EUREKAHEDGE', 'TOPIX'],
-        ['FOREST', 'EUREKAHEDGE'],
+        ['LIM', 'EUREKAHEDGE WORLD', 'TOPIX'],
+        ['FOREST', 'EUREKAHEDGE WORLD'],
     ]
 
     for names in list_of_plots:
@@ -100,4 +100,4 @@ def presentation_data_update(month:str):
 
 
 
-presentation_data_update("2025-08")
+presentation_data_update("2025-09")

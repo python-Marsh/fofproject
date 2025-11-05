@@ -25,7 +25,7 @@ fund_name_map = {
     "MSCI WORLD": {"en": "MSCI World Index", "cn": "MSCI 世界指数"},
     "S&P 500": {"en": "S&P 500 Index", "cn": "标普500指数"},
     "TOPIX": {"en": "TOPIX Index", "cn": "東証株価指数"},
-    "EUREKAHEDGE": {
+    "EUREKAHEDGE WORLD": {
         "en": "Eurekahedge Hedge Fund Index",
         "cn": "Eurekahedge 对冲基金指数",
         # add more mappings here...
