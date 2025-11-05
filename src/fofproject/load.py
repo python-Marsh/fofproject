@@ -981,7 +981,7 @@ def parse_from_marquee(url: str, fund_name: str = "", manager_name:str = "", sho
             
         # Give JavaScript a bit more time if necessary
         time.sleep(2)
-        print("Page HTML has been saved to page_output.html")
+        print("Scraper Session Completed.")
 
     finally:
         driver.quit()
@@ -1086,7 +1086,7 @@ def rerun_no_table_list (folder_path=r"input\marquee", save=False, show = False)
     filter_list = []
     links = []
     results = []
-    empty_list = []
+    found_list = []
     no_perf_path = os.path.join(folder_path, "No Performance Found.txt")
     filter_list_path = os.path.join(folder_path, "Requested & No Table.txt")
     links_path = os.path.join(folder_path, "Links & Names.txt")
@@ -1105,16 +1105,21 @@ def rerun_no_table_list (folder_path=r"input\marquee", save=False, show = False)
     for fund_name, fund_link, manager_name in links:
         if fund_name not in filter_list:
             continue  # skip anything not in the second list
-        page_html, requested_list = parse_from_marquee(url=fund_link, fund_name=fund_name, manager_name=manager_name, show=show)
+        page_html = parse_from_marquee(url=fund_link, fund_name=fund_name, manager_name=manager_name, show=show)
         if not page_html:
             print(f"No table found or access requested for {fund_name} at {fund_link}")
         else:
             result = gpt_process_text(page_html)
             # Checking if there's performance recorded
+            print(f"{result['fund_name']} processed successfully.")
             val = result['performance']
             if not (isinstance(val, list) and all(isinstance(item, dict) for item in val)) or (isinstance(val, list) and not val)  :
                 no_perf_list = no_perf_list + [result['fund_name']]
-            empty_list = empty_list + requested_list
+            found_list = found_list + [fund_name]
+            filter_list = [item for item in filter_list if item not in found_list]
+            # Write the updated list back to the file
+            with open(filter_list_path, "w") as f:
+                f.write("\n".join(filter_list))
             results.append(result)
             if save:
                 # Create "json" folder inside folder_path if it doesn't exist
@@ -1124,14 +1129,8 @@ def rerun_no_table_list (folder_path=r"input\marquee", save=False, show = False)
                 output_path = os.path.join(json_folder, f"{result['fund_name']}.json")
                 with open(output_path, "w", encoding="utf-8") as f:
                     json.dump(result, f, ensure_ascii=False, indent=2)
-        # Record the files without performance for future re-run
-    no_perf_path = os.path.join(folder_path, "No Performance Found.txt")
-    with open(no_perf_path, "w") as f:
-        f.write("\n".join(no_perf_list))
-    no_table_path = os.path.join(folder_path, "Requested & No Table.txt")
-    with open(no_table_path, "w") as f:
-        f.write("\n".join(empty_list))
     return results
 
 
-# get_link_from_html(save = True, show=True)
+
+rerun_no_table_list(save = True, show=True)

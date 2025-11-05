@@ -1576,11 +1576,13 @@ class Fund:
         )
         plot3 = self.plot_monthly_return_distribution(save=save)
         plot4 = self.plot_rolling_vol_vs_benchmark(benchmark_fund=benchmark_fund, save=save)
+        plot5 = self.compare_worst_performance(benchmark_fund, n_worst=10, title="Fund Performance on Benchmark's Worst Days", save=save)
 
         plot1.show()
         plot2.show()
         plot3.show()
         plot4.show()
+        plot5.show()
 
 def compare_funds(fund_dict):
     """
