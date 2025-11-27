@@ -1017,7 +1017,7 @@ class Fund:
         )
 
         if save:
-            file_name = f"{self.name}_vs_{benchmark_fund.name}_worst_ranked.png"
+            file_name = f"{self.name}_vs_{benchmark_fund.name}_{title}.png"
             save_path = f"{save_dir}/{file_name}"
             fig.write_image(save_path, scale=2)
             print(f"Chart saved to {file_name}")
@@ -1295,7 +1295,12 @@ class Fund:
             rows = []
             for year in df_list[0].index:
                 row_value = df_list[0].loc[year].tolist()
-                row_benchmark = df_list[1].loc[year].tolist()
+                row_benchmark = (
+                    df_list[1].loc[year].fillna("-").tolist()
+                    if year in df_list[1].index
+                    else ["-"] * df_list[1].shape[1]
+                )
+
                 row_benchmark = [
                     b if v else "" for v, b in zip(row_value, row_benchmark)
                 ]
@@ -1559,6 +1564,132 @@ class Fund:
             save_path = f'{save_dir}/{self.name} key metrics table {end_month.strftime("%Y-%m-%d")}.png'
             plt.savefig(save_path, bbox_inches="tight", pad_inches=0, dpi=200)
         return fig
+    
+    def export_correlation_table(
+        self,
+        end_month: str,
+        benchmark_funds,
+        language: str = "en",
+        save: bool = False,
+        ):
+        """
+        Create a correlation table of `self` vs a list of benchmark funds.
+
+        Parameters
+        ----------
+        end_month : str
+            Month-end (e.g. "2024-01", "2024-01-31", etc.), parsed by parse_month.
+        benchmark_funds : list
+            List of fund-like objects, each with a `.name` attribute and
+            usable in self.correlation_to(benchmark, start_date, end_date).
+        language : {"en", "cn"}
+            Label language.
+        horizontal : bool, default False
+            If False: vertical table (rows = benchmarks, columns = Benchmark | Correlation).
+            If True: horizontal table (columns = benchmarks, 1 row of correlations).
+        fix_aspect : bool, default False
+            For horizontal layout only: optionally fix aspect ratio.
+        save : bool, default False
+            If True, save a PNG and also return the figure.
+        """
+
+        if not benchmark_funds:
+            raise ValueError("benchmark_funds must be a non-empty list.")
+
+        header_fill = "#cbb69d"
+        cell_fill = "#f0f0f0"
+        text_color = "black"
+
+        labels = {
+            "en": {
+                "benchmark": "Benchmark",
+                "corr": "Correlation",
+            },
+            "cn": {
+                "benchmark": "基准",
+                "corr": "相关性",
+            },
+        }
+        L = labels.get(language, labels["en"])
+
+        end_month = parse_month(end_month)
+
+        # Compute correlations vs each benchmark
+        benchmark_names = list(benchmark_funds.keys())
+        corr_values = [
+            f"{self.correlation_to(b, self.inception_date, self.latest_date):.2f}"
+            for b in benchmark_funds.values()
+        ]
+
+        font_size = 30
+        font_width = FONT2HEIGHT[font_size]
+        font_height = FONT2HEIGHT[font_size]
+
+
+        # Use L to localize a stub column (first column) and the header label
+        cell_text = [[L["corr"], *corr_values]]        # one data row with a localized stub cell
+        col_labels = [L["benchmark"], *benchmark_names] # header row with a localized first cell
+
+
+        col_widths = [
+            font_width * max(len(lab), len(val)) * 1.2
+            for lab, val in zip(col_labels, cell_text[0])
+        ]
+        table_width = sum(col_widths)
+
+        header_height = font_height * 2.5 * 1.2
+        cell_height = font_height * 2.5
+        table_height = header_height + cell_height
+
+        # Create figure sized to fit table
+        fig, ax = plt.subplots(figsize=(table_width, table_height))
+        ax.axis("off")
+
+        table = ax.table(
+            cellText=cell_text,
+            colLabels=col_labels,
+            loc="center",
+            cellLoc="center",
+        )
+
+        # Style cells
+        for (row, col), cell in table.get_celld().items():
+            if row == 0:  # header
+                cell.set_facecolor(header_fill)
+                cell.set_text_props(color=text_color, weight="bold")
+                cell.set_height(header_height / table_height - 1e-9)
+                cell.set_width(col_widths[col] / table_width - 1e-9)
+            else:  # data rows
+                cell.set_facecolor(cell_fill)
+                cell.set_text_props(color=text_color)
+                cell.set_height(cell_height / table_height - 1e-9)
+                cell.set_width(col_widths[col] / table_width - 1e-9)
+
+            font_prop = FontProperties(
+                fname=(
+                    FONT_FNAME[language]["bold"]
+                    if row == 0
+                    else FONT_FNAME[language]["regular"]
+                ),
+                size=font_size,
+            )
+            cell.get_text().set_fontproperties(font_prop)
+            cell.set_edgecolor("white")
+
+        plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+        plt.margins(0)
+        plt.axis("off")
+        plt.tight_layout()
+
+        if save:
+            save_path = (
+                f'{save_dir}/{self.name} correlation table '
+                f'{end_month.strftime("%Y-%m-%d")}.png'
+            )
+            plt.savefig(save_path, bbox_inches="tight", pad_inches=0, dpi=200)
+
+        return fig
+
 
     def summary_of_a_fund(self, benchmark_fund=None, language="en", save = False):
         print(self.fund_des)
@@ -1577,7 +1708,7 @@ class Fund:
         plot3 = self.plot_monthly_return_distribution(save=save)
         plot4 = self.plot_rolling_vol_vs_benchmark(benchmark_fund=benchmark_fund, save=save)
         plot5 = self.compare_worst_performance(benchmark_fund, n_worst=10, title="Fund Performance on Benchmark's Worst Days", save=save)
-
+        
         plot1.show()
         plot2.show()
         plot3.show()

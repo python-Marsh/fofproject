@@ -1131,6 +1131,3 @@ def rerun_no_table_list (folder_path=r"input\marquee", save=False, show = False)
                     json.dump(result, f, ensure_ascii=False, indent=2)
     return results
 
-
-
-rerun_no_table_list(save = True, show=True)
