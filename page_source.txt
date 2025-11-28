@@ -1,0 +1,558 @@
+<html lang="zh"><head></head><body onload="javascript:bodyLoad();"><form name="frmAppointment" action="/tdab2/tdabs_external/AdminServlet_tchinese?cmd=cmdGetTimeslotListBySearchAction" method="post">
+			<input name="storedAppointmentId" type="hidden" value="" autocomplete="off">
+<input name="storedAppointmentServiceType" type="hidden" value="DI" autocomplete="off">
+<input name="storedAppointmentRequestChannel" type="hidden" value="W" autocomplete="off">
+<input name="storedAppointmentLicenseType" type="hidden" value="P" autocomplete="off">
+<input name="storedAppointmentLicenseNumber" type="hidden" value="DP0ZSP27VyyvZ3fCXkmL4w==" autocomplete="off">
+<input name="storedAppointmentLicenseNumber2" type="hidden" value="Y7ApS2LqZQBil7M94GpLoA==" autocomplete="off">
+<input name="storedAppointmentPhoneNumber" type="hidden" value="N/A" autocomplete="off">
+<input name="storedAppointmentExpiryDate" type="hidden" value="11-11-1901" autocomplete="off">
+<input name="storedAppointmentCertExpiryDate" type="hidden" value="" autocomplete="off">
+<input name="storedAppointmentRegMarkNumber2" type="hidden" value="" autocomplete="off">
+<input name="storedAppointmentRegMarkNumber" type="hidden" value="" autocomplete="off">
+<input name="storedAppointmentShortRegMarkNumber" type="hidden" value="" autocomplete="off">
+<input name="storedAppointmentTimeslotId" type="hidden" value="" autocomplete="off">
+<input name="sendReminder" type="hidden" value="Y" autocomplete="off">
+<input name="storedAppointmentConfirmationFaxNumber" type="hidden" value="" autocomplete="off">
+<input name="storedAppointmentConfirmationPhoneNumber" type="hidden" value="" autocomplete="off">
+<input name="storedAppointmentConfirmationEmail" type="hidden" value="wd97409002@gmail.com" autocomplete="off">
+<input name="storedAppointmentReminderFaxNumber" type="hidden" value="" autocomplete="off">
+<input name="storedAppointmentReminderPhoneNumber" type="hidden" value="" autocomplete="off">
+<input name="storedAppointmentReminderEmail" type="hidden" value="wd97409002@gmail.com" autocomplete="off">
+<input name="storedAppointmentTimeslotDate" type="hidden" value="" autocomplete="off">
+<input name="storedAppointmentTimeslotFromTime" type="hidden" value="" autocomplete="off">
+<input name="storedAppointmentTimeslotToTime" type="hidden" value="" autocomplete="off">
+<input name="storedAppointmentOfficeCode" type="hidden" value="HKLO" autocomplete="off">
+<input name="storedAppointmentCalendarYear" type="hidden" value="2025" autocomplete="off">
+<input name="storedAppointmentCalendarMonth" type="hidden" value="10" autocomplete="off">
+<input name="storedAppointmentSessionId" type="hidden" value="A" autocomplete="off">
+<input name="storedAppointmentDayOfWeek" type="hidden" value="8" autocomplete="off">
+<input name="storedAppointmentOperation" type="hidden" value="A" autocomplete="off">
+<input name="transferOfOwnership" type="hidden" value="N" autocomplete="off">
+<input name="lang" type="hidden" value="tchinese" autocomplete="off">
+<input name="timestamp" type="hidden" value="1764300298830" autocomplete="off">
+<input name="storedAppointmentTimestamp" type="hidden" value="" autocomplete="off">
+<input name="inputtedPhoneNoBefore" type="hidden" value="" autocomplete="off">
+<input name="storedAppointmentReferenceNo" type="hidden" value="" autocomplete="off">
+<input name="inputType" type="hidden" value="N" autocomplete="off">
+<input name="fromIAMSmart" type="hidden" value="" autocomplete="off">
+<input name="storedAppointmentDLNewIssue" type="hidden" value="N" autocomplete="off">
+<input name="storedAppointmentLicenseOwnerName" type="hidden" value="" autocomplete="off">
+<input name="storedAppointmentIssuingCountry" type="hidden" value="OTH" autocomplete="off">
+<input name="storedAppointmentIssuingAuthority" type="hidden" value="" autocomplete="off">
+<input name="storedAppointmentIAMSmartHelperJwt" type="hidden" value="" autocomplete="off">
+
+
+		</form>
+	
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+	
+		<meta content="IE=edge">
+		<meta content="text/html; charset=UTF-8">
+		<meta content="no-cache">
+		<meta content="0">
+		<meta content="no-cache">
+		<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0">
+		<meta content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' http://www.gov.hk">
+		<title>Screen ID: SC-512-1-
+	006
+	</title>
+		<link href="../css/style_tdabs.css" type="text/css" rel="stylesheet">
+		<link href="../css/tchinese/main_tdabs.css" type="text/css" rel="stylesheet">
+		<link href="../css/bootstrap.min.css" type="text/css" rel="stylesheet">
+		<script src="../js/common.js"></script>
+		<script src="../js/main.js"></script>
+		<script type="text/javascript">
+		<!--
+			function bodyLoad() {
+
+			
+			var cnum = new Array(4)
+			cnum[0] = "一";
+			cnum[1] = "二";
+			cnum[2] = "三";
+			cnum[3] = "四";
+			cnum[4] = "五";
+			  for ( var i = 0; i < cnum.length; i++) {
+          		if (i+1 == total_steps) {
+          			total_steps = cnum[i];
+				}
+				if (i+1 == stepNo) {
+          		var	stepNum = cnum[i];
+				}
+			}
+				
+			var footerString;
+			var frame = parent.frames["javascript_container"];
+			
+			footerString="<strong>步驟" + stepNum + "</strong>，共" + total_steps + "個步驟";
+			
+
+			if (stepNo > 0) {
+				var stepRow = document.getElementById("step" + stepNo + "Row");
+				if (stepRow != null)
+					stepRow.className = "sel";
+				var stepFooter = document.getElementById("stepsOf");
+				if (stepFooter != null)
+					stepFooter.innerHTML = footerString.replace("{0}", stepNo);
+			}
+
+			var inputs = document.getElementsByTagName("input");
+
+			for (i = 0; i < inputs.length; i++) {
+				inputs[i].setAttribute("autocomplete", "off");
+				inputs[i].autocomplete = "off";
+			}
+			}
+			function changeImages(src, image) {
+
+				if(src.firstChild!=null){
+					src.firstChild.src=image;
+				}
+			}
+
+			function closeBrowser() {
+				parent.close();
+
+			}
+
+		document.oncontextmenu=new Function("return false");
+
+		// -->
+		</script>
+
+		<style type="text/css">
+#topPanel {
+	background-image: url("../images/top-background.jpg");
+}
+#contentPanelFloat {
+	background-image: url("../images/bg_lm.gif");
+	background-repeat: repeat-y;
+}
+</style>
+	
+	
+		<script>
+			function onClickBack() {
+
+				frmAppointment.action = "/tdab2/tdabs_external/AdminServlet_tchinese?cmd=cmdGetCalendarAction";
+				
+				if (isSubmitted())
+					return;				
+				frmAppointment.submit();
+			}
+			
+			function onClickBackToHomePage() {
+				frmAppointment.action = "/tdab2/tdabs_external/AdminServlet_tchinese?cmd=cmdShowHome";
+				
+				if (isSubmitted())
+					return;				
+				frmAppointment.submit();
+			}
+			
+			function onChangeOffice() {
+				frmAppointment.action = "/tdab2/tdabs_external/AdminServlet_tchinese?cmd=cmdSearchTimeslotAction";
+				frmAppointment.storedAppointmentOfficeCode.value = document.getElementById("listLicenseCenter").value;
+				
+				if (isSubmitted())
+					return;				
+				frmAppointment.submit();
+			}
+			
+			function onClickContinue() {
+				frmAppointment.action = "/tdab2/tdabs_external/AdminServlet_tchinese?cmd=cmdGetTimeslotListBySearchAction";
+				
+				var sessions = document.getElementsByName("session");
+				for (var i = 0; i < sessions.length; i ++) {
+					if (sessions[i].checked) {
+						frmAppointment.storedAppointmentSessionId.value = sessions[i].value;
+						break;
+					}
+				}
+
+				var weekDays = document.getElementsByName("weekDay");
+				for (var i = 0; i < weekDays.length; i ++) {
+					if (weekDays[i].checked) {
+						frmAppointment.storedAppointmentDayOfWeek.value = weekDays[i].value;
+						break;
+					}
+				}
+				
+				if (isSubmitted())
+					return;				
+				frmAppointment.submit();
+			}
+			
+			var stepNo = 2;
+			var total_steps = 3;
+			// -->
+		</script>
+	
+	
+		<main>
+
+									
+							
+
+<div class="mainframe">
+	<div class="container">
+		<div class="row mobile-no-gutters">
+	        <!--Header-->
+	        <div class="header">
+	        	<div class="col-md">
+	        		<div class="logo"><a href="http://www.gov.hk" target="_blank"><img src="../images/header.jpg" alt="GovHK香港政府一站通"></a></div>
+				</div>
+				<div class="col-md">
+					<div class="menu">
+						<div class="menuBody">
+							<div class="menuRow">
+								<div class="menuCell">
+									
+								</div>
+								<div class="menuCell">
+									<div class="exit"><a href="#" class="exit" onclick="closeBrowser()">離開</a></div>
+								</div>
+							</div>
+						</div>
+					</div>
+				</div>
+			</div>
+			
+			<div class="subheaderTwoRow">
+			
+        	<div class="cluster">&nbsp;</div>
+        	<div class="icon"><img src="../images/transport.PNG" alt="" class="icon"></div>
+        	<div class="text" id="welcomeTitle">
+        	
+			預約運輸署牌照事務處服務
+			
+        	</div>
+        </div>
+        <!--{End Header}-->
+
+			
+
+
+
+
+<!--Middle Content-->
+		<div class="content">
+			<div class="row">
+					<!--Left Column Content-->
+            <div class="col-md-3 col-lg-2 order-md-1">
+				<div class="navlayer">
+
+<!-- left menu begins -->
+       
+
+
+
+
+
+
+
+
+
+
+
+					<div class="navstep">
+
+						<div class="navstep_item" id="step1Row">
+                        	<div class="navstep_title">
+        						步驟一
+        					</div>
+        					<div>	
+								選擇服務及輸入資料		
+							</div>
+						</div>	
+						<div class="sel" id="step2Row">
+							<div class="navstep_title">
+								步驟二
+							</div>	
+							<div>	
+								選擇牌照事務處、預約日期和時間
+							</div>
+						</div>
+						<div class="navstep_item" id="step3Row">
+							<div class="navstep_title">
+								步驟三
+							</div>	
+							<div>
+								遞交預約資料
+							</div>
+						</div>
+					</div>
+
+		
+
+
+
+
+
+
+
+
+
+
+<script type="text/javascript">
+function openwin(href, name){
+/*		var win = null;
+		if (openedWindows[name] == null) {
+			win = window.open(href, name,'height=400,width=700,toolbar=yes,scrollbars=yes,resizable=yes,menubar=yes,location=yes');
+			openedWindows[name] = win;
+		}
+		else {
+			win = openedWindows[name];
+			win.location.href = href;
+		}
+*/
+		var win = window.open(href, name,'height=400,width=700,toolbar=yes,scrollbars=yes,resizable=yes,menubar=yes,location=yes');
+		win.focus();
+	}
+	
+	function openFAQ(){
+		
+		window.open('https://'+window.location.host+'/tdabsfaq/htm/tchinese/faq.htm','faq','height=400,width=700,toolbar=yes,scrollbars=yes,resizable=yes,menubar=yes,location=yes');
+	}
+
+</script>
+
+					<div class="navlink">
+						<div class="navlink_item">
+							<a href="#" class="navlink" onclick="openwin('../htm/tchinese/instructions_cover_page.htm', 'demo'); return false;">
+							網上示範</a>
+						</div>
+						<div class="navlink_item">
+                       		<a href="#" class="navlink" onclick="openFAQ(); return false;">
+                       		常見問題</a>
+                       	</div>
+						<div class="navlink_item2">
+                        	<div class="title">聯絡及支援</div>
+							<div>請致電<font class="red" face="Arial">1823</font>或發送電郵至<br></div>
+							 <a href="mailto:tellme@1823.gov.hk" rel="external" title="Contact Us" class="email">tellme@1823.gov.hk</a>
+                   		</div>                 
+					</div>
+               
+                </div>
+            </div>
+<!-- left menu ends -->
+							
+							
+							
+<!--Right Column Content-->      
+    <div class="col-md-9 col-lg-10 order-md-12">
+		<div class="contentpage">
+			<div class="cell">
+				<div class="contenttable">
+					<div class="step_hd">
+						<span class="step_no" style="margin-left:10px">步驟二</span>
+						<span class="step_info" style="margin-left:25px">快速搜索</span>									  
+					</div>
+				</div>
+			</div>				
+			<div class="cell">
+				<div class="contenttable">
+					<div class="title">
+						選擇預約時間
+					</div>
+	
+
+							
+								
+			<div class="row">                            	
+				<div class="colCell">
+					<div class="row_nomargin">							
+						<table class="content-table" role="none">
+							<tbody><tr>
+								<td colspan="2" class="heading3"></td>
+							</tr>
+							<tr>
+								<td class="content2">選擇牌照事務處</td>
+								<td class="content2">
+									<span class="body-text"><span size="3">
+									<select id="listLicenseCenter" size="1" onchange="onChangeOffice()" class="listLicenseCenter" title="listLicenseCenter">
+									
+												<option value="HKLO" selected="">香港牌照事務處 - 櫃位服務&nbsp;</option>
+									
+									</select>
+								</span></span>
+								</td>
+							</tr>
+							<tr>
+								<td class="content2" style="margin-top: 0;">選擇日期</td>
+								<td class="content2">
+									<table style="width: 500px;border: 0;" role="radiogroup" aria-label="SELECT_DATE">
+											<tbody><tr>
+												<th></th>
+											</tr>
+											<tr>
+												<td><label for="MONDAY"><input type="radio" name="weekDay" value="2" id="MONDAY" checked="" title="MONDAY" autocomplete="off">星期一</label></td>
+												<td><label for="TUESDAY"><input type="radio" name="weekDay" value="3" id="TUESDAY" title="TUESDAY" autocomplete="off">星期二</label></td>
+											</tr>
+											
+											<tr>
+												<td style="height: 25;"><label for="WEDNESDAY"><input type="radio" name="weekDay" id="WEDNESDAY" value="4" title="WEDNESDAY" autocomplete="off">星期三</label></td>
+												<td style="height: 25;"><label for="THURSDAY"><input type="radio" name="weekDay" id="THURSDAY" value="5" title="THURSDAY" autocomplete="off">星期四</label></td>
+											</tr>
+											
+											<tr>
+												<td><label for="FRIDAY"><input type="radio" name="weekDay" value="6" id="FRIDAY" title="FRIDAY" autocomplete="off">星期五</label></td>
+												<td><label for="ANY_WORKING_DAY"><input type="radio" name="weekDay" value="8" id="ANY_WORKING_DAY" title="ANY_WORKING_DAY" autocomplete="off">星期一至五</label></td>
+											</tr>	
+											
+									</tbody></table>			
+								</td>
+							</tr>
+							<tr>
+								<td class="content2" style="margin-top: 0;">選擇時段</td>
+								<td class="content2">
+									<table style="width: 100%;border: 0;" role="radiogroup" aria-label="SELECT_SESSION">
+											<tbody><tr>
+												<th></th>
+											</tr>
+													
+													<tr>
+														<td><label for="session0"><input type="radio" name="session" title="session0" id="session0" value="A" checked="" autocomplete="off">上午（09:00 - 13:00）</label></td>
+													</tr>
+													
+													<tr>
+														<td><label for="session1"><input type="radio" name="session" title="session1" id="session1" value="P" autocomplete="off">下午（13:00 - 17:00）</label></td>
+													</tr>
+											
+									</tbody></table>
+								
+								</td>
+							</tr>
+						</tbody></table>		
+					</div>
+					<br>
+			
+						
+					
+					
+				
+									
+										<!--<div class="item">
+											
+												
+												
+											
+
+
+
+
+
+
+
+<input type="button" value="返回主頁" class="resetBtn" onClick="onClickBackToHomePage()" onmouseover="this.className='resetBtn_hov'" onmouseout="this.className='resetBtn'">
+											</div> -->
+						
+					
+				</div>
+			</div>
+			</div>
+			</div>
+		</div>
+		
+					<div class="cell">
+						<div class="contenttable_button">
+							<div class="btnbar">
+                            			
+											
+											
+										
+
+
+
+
+
+
+
+<input type="button" value="返回" class="resetBtn" onclick="onClickBack()" onmouseover="this.className='resetBtn_hov'" onmouseout="this.className='resetBtn'" autocomplete="off">
+										
+											
+											
+										
+
+
+
+
+
+	
+	<input type="button" value="繼續" class="continueBtn_hov" onclick="onClickContinue()" onmouseover="this.className='continueBtn_hov'" onmouseout="this.className='continueBtn'" autocomplete="off">								
+
+
+							</div>
+						</div>
+					</div>
+				
+					<div class="steplayer">
+						<div id="stepsOf"><strong>步驟二</strong>，共三個步驟</div>					
+					</div>
+					
+					
+				</div>
+					
+		<!--End Right Column Content 1-->
+			<!-- <table height="400px"><tr><td>&nbsp;</td></tr></table>   --> 
+			
+			<!--  -->
+			   
+	<!-- </div> -->
+
+		
+	
+
+
+
+		<br>
+	</div>
+<!--{End Middle Content}-->
+<!--Footer Content-->
+        <div class="footer">
+			<div class="row">
+				<div class="col-md-7">
+					<div class="footerlinks">
+						<a class="footer" href="http://www.gov.hk/tc/about/aboutus.htm" target="_blank">關於「香港政府一站通」</a>
+	               		<a class="footer" href="http://www.gov.hk/tc/about/copyright.htm" target="_blank">版權告示</a>
+	               		<a class="footer" href="http://www.gov.hk/tc/about/privacy.htm" target="_blank">私隱政策</a>
+	               		<a class="footer" href="http://www.gov.hk/tc/about/disclaimer.htm" target="_blank">免責聲明</a>
+	            	</div>
+				</div>
+				<div class="col-md-5">
+					<div class="footer_logo">
+						<a href="https://www.w3.org/WAI/WCAG2AA-Conformance" title="Explanation of WCAG 2 Level AA conformance"><img height="32" width="88" src="https://www.w3.org/WAI/WCAG21/wcag2.1AA-blue-v" alt="Level AA conformance,W3C WAI Web Content Accessibility Guidelines 2.1"></a>
+            			<a href="http://www.brandhk.gov.hk/" target="_blank"><img src="../images/../images/logo_footer_tc.gif" alt="香港品牌" title="香港品牌"></a>
+					</div>
+				</div>
+			</div>
+		</div>
+        <!--End Footer Content-->
+
+
+
+	<script type="text/javascript">
+	
+	</script>
+	</div></div></div></div></main>
+	
+
+</body></html>

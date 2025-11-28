@@ -2517,6 +2517,24 @@ packaging = "*"
 tenacity = ">=6.2.0"
 
 [[package]]
+name = "plyer"
+version = "2.1.0"
+description = "Platform-independent wrapper for platform-dependent APIs"
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = [
+    {file = "plyer-2.1.0-py2.py3-none-any.whl", hash = "sha256:1b1772060df8b3045ed4f08231690ec8f7de30f5a004aa1724665a9074eed113"},
+    {file = "plyer-2.1.0.tar.gz", hash = "sha256:65b7dfb7e11e07af37a8487eb2aa69524276ef70dad500b07228ce64736baa61"},
+]
+
+[package.extras]
+android = ["pyjnius"]
+dev = ["flake8", "mock"]
+ios = ["pyobjus"]
+macosx = ["pyobjus"]
+
+[[package]]
 name = "prometheus-client"
 version = "0.22.1"
 description = "Python client for the Prometheus monitoring system."
@@ -4087,4 +4105,4 @@ repair = ["scipy (>=1.6.3)"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12"
-content-hash = "3b79a9deef05b0d68d0e9a13924c9f264fffe939cb7a833bde8669cc529fa7a6"
+content-hash = "7c100b234ba3177eedd50e8ef5e6bafb4534a55e1e5ea5ae892230a68d755b51"
