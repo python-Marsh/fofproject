@@ -8,3 +8,4 @@ output/
 input/
 *.env
 RETURN DATA.csv
+MANUAL INPUTS.csv

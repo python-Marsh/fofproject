@@ -27,7 +27,7 @@ PROXY_POOL = [p.strip() for p in os.getenv("PROXY_POOL", "").split(",") if p.str
 
 HEADLESS = os.getenv("HEADLESS", "false").lower() in ("1", "true", "yes")
 
-REFRESH_SECONDS = 200
+REFRESH_SECONDS = 300
 # ----------------------------------------------------------
 
 def build_chrome_options(proxy_url: str | None) -> Options:
@@ -194,17 +194,22 @@ def do_check(driver) -> bool:
             message="Time has been found. Manual action may be required.",
             timeout=10
         )
-        filename = "page_source.txt"
+        filename = "available_spots.txt"
         html_source = driver.page_source
         with open(filename, "w", encoding="utf-8") as f:
             f.write(html_source)
-        print(f"✅ Page source saved to '{filename}'")
+        print(f"✅ Page source of available spots saved to '{filename}'")
 
         try:
             continue_btn = WebDriverWait(driver, 10).until(
                 EC.element_to_be_clickable((By.XPATH, "//input[@type='button' and @value='繼續']"))
             )
             continue_btn.click()
+            filename = "unknown_page.txt"
+            html_source = driver.page_source
+            with open(filename, "w", encoding="utf-8") as f:
+                f.write(html_source)
+            print(f"✅ Page source or next page of available spots saved to '{filename}'")
         except Exception as e:
             print(f"⚠️ Could not click 繼續 button: {e}")
 
