@@ -9,3 +9,6 @@ input/
 *.env
 RETURN DATA.csv
 MANUAL INPUTS.csv
+
+# Streamlit secrets (contains password)
+.streamlit/secrets.toml
