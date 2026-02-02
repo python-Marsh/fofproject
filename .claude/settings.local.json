@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(timeout:*)",
+      "Bash(poetry run python:*)",
+      "Bash(poetry run streamlit:*)",
+      "Bash(curl:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nAdd Streamlit UI with password protection\n\n- Add app.py with Fund Workstation UI \\(comparison, charts, correlation, details\\)\n- Add password authentication via st.secrets\n- Add .streamlit config and secrets template\n- Add requirements.txt for Streamlit Cloud deployment\n- Update dependencies to include streamlit\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git push:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nFix missing dependencies in requirements.txt\n\nAdd matplotlib and pyfonts required by fund.py module\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git pull:*)",
+      "Bash(git stash:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nMake app.py fully standalone for Streamlit Cloud\n\n- Remove all imports from src.fofproject package\n- Include standalone Fund class with all metrics calculations\n- Minimal requirements.txt with only necessary dependencies\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(poetry show:*)",
+      "Bash(dir /b \"c:\\\\Users\\\\FOF Analyst\\\\Desktop\\\\fofproject\\\\output\\\\emails\")"
+    ]
+  }
+}

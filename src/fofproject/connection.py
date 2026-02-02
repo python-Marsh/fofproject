@@ -1,16 +1,31 @@
 from dotenv import load_dotenv
-load_dotenv()
+from pathlib import Path
+# Load .env from the same directory as this script
+env_path = Path(__file__).parent / ".env"
+load_dotenv(dotenv_path=env_path)
 import re
 import os
-import webbrowser
+import json
+import time
+import threading
+from datetime import datetime
+from typing import Optional
 import requests
 import msal
 
 # =========================
+# EMAIL STORAGE CONFIG
+# =========================
+# Base directory for storing emails (relative to project root)
+EMAIL_STORAGE_DIR = Path(__file__).parent.parent.parent / "output" / "emails"
+
+# =========================
 # CONFIG (fill in from .env)
 # =========================
-TENANT_ID = os.getenv("TENANT_ID")        
-CLIENT_ID = os.getenv("CLIENT_ID")           
+TENANT_ID = os.getenv("TENANT_ID")
+CLIENT_ID = os.getenv("CLIENT_ID")
+GRAPH_EMAIL = os.getenv("GRAPH_EMAIL")
+GRAPH_PASSWORD = os.getenv("GRAPH_PASSWORD")
 
 # If you ONLY need read + categorize, Mail.ReadWrite is enough.
 SCOPES = ["Mail.ReadWrite"]
@@ -18,112 +33,740 @@ SCOPES = ["Mail.ReadWrite"]
 GRAPH = "https://graph.microsoft.com/v1.0"
 
 
-def get_access_token_interactive():
+def automate_device_login(user_code: str, email: str, password: str):
     """
-    Delegated auth (user signs in). Great for running locally.
-    Requires a "Mobile and desktop applications" / public client app setup in Entra.
+    Use Selenium to automatically enter the device code and login credentials.
     """
-    authority = f"https://login.microsoftonline.com/{TENANT_ID}"
+    from selenium import webdriver
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.webdriver.chrome.options import Options
 
-    app = msal.PublicClientApplication(
+    print("Selenium: Starting browser...", flush=True)
+
+    options = Options()
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+
+    driver = webdriver.Chrome(options=options)
+    wait = WebDriverWait(driver, 30)
+
+    try:
+        # Navigate to the device login page
+        print("Selenium: Navigating to device login page...", flush=True)
+        driver.get("https://microsoft.com/devicelogin")
+
+        # Wait for and enter the device code
+        print("Selenium: Entering device code...", flush=True)
+        code_input = wait.until(EC.presence_of_element_located((By.ID, "otc")))
+        code_input.clear()
+        code_input.send_keys(user_code)
+
+        # Click Next button
+        print("Selenium: Clicking Next after code entry...", flush=True)
+        next_btn = wait.until(EC.element_to_be_clickable((By.ID, "idSIButton9")))
+        next_btn.click()
+
+        # Wait for email input field and enter email
+        print("Selenium: Waiting for email field...", flush=True)
+        email_input = wait.until(EC.presence_of_element_located((By.NAME, "loginfmt")))
+        print(f"Selenium: Entering email: {email}", flush=True)
+        email_input.clear()
+        email_input.send_keys(email)
+
+        # Click Next
+        print("Selenium: Clicking Next after email...", flush=True)
+        time.sleep(1)
+        next_btn = wait.until(EC.element_to_be_clickable((By.ID, "idSIButton9")))
+        next_btn.click()
+
+        # Wait for password field and enter password - robust approach
+        print("Selenium: Waiting for password field...", flush=True)
+        password_input = wait.until(EC.element_to_be_clickable((By.NAME, "passwd")))
+        time.sleep(1.5)
+
+        # Click to ensure focus
+        password_input.click()
+        time.sleep(0.3)
+
+        # Clear using JavaScript for reliability
+        driver.execute_script("arguments[0].value = '';", password_input)
+        time.sleep(0.2)
+
+        # Enter password using JavaScript to avoid input issues
+        print("Selenium: Entering password...", flush=True)
+        driver.execute_script("arguments[0].value = arguments[1];", password_input, password)
+
+        # Trigger input event so the page recognizes the change
+        driver.execute_script("""
+            var event = new Event('input', { bubbles: true });
+            arguments[0].dispatchEvent(event);
+        """, password_input)
+        time.sleep(0.5)
+
+        # Click Sign in
+        print("Selenium: Clicking Sign In...", flush=True)
+        time.sleep(1)
+        sign_in_btn = wait.until(EC.element_to_be_clickable((By.ID, "idSIButton9")))
+        sign_in_btn.click()
+
+        # Handle "Stay signed in?" prompt if it appears
+        print("Selenium: Checking for 'Stay signed in' prompt...", flush=True)
+        try:
+            time.sleep(2)
+            stay_signed_in_btn = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.ID, "idSIButton9"))
+            )
+            print("Selenium: Clicking 'Yes' on Stay signed in...", flush=True)
+            stay_signed_in_btn.click()
+        except:
+            print("Selenium: No 'Stay signed in' prompt found.", flush=True)
+
+        # Handle "Are you trying to sign in to..." confirmation if it appears
+        print("Selenium: Checking for confirmation prompt...", flush=True)
+        try:
+            time.sleep(3)
+            # Look for the continue button on the "Are you trying to sign in" page
+            continue_btn = WebDriverWait(driver, 15).until(
+                EC.element_to_be_clickable((By.ID, "idSIButton9"))
+            )
+            print("Selenium: Clicking Continue...", flush=True)
+            continue_btn.click()
+            time.sleep(2)
+        except:
+            print("Selenium: No confirmation prompt found.", flush=True)
+
+        # Wait for the success page - keep checking until we see success or timeout
+        print("Selenium: Waiting for success confirmation...", flush=True)
+        max_wait = 30
+        start = time.time()
+        while time.time() - start < max_wait:
+            page_source = driver.page_source.lower()
+
+            # Check for success indicators
+            if "you have signed in" in page_source or "you're all set" in page_source:
+                print("Selenium: Successfully authenticated!", flush=True)
+                break
+
+            # If we're still on the device auth page with a button, click it
+            try:
+                btn = driver.find_element(By.ID, "idSIButton9")
+                if btn.is_displayed() and btn.is_enabled():
+                    print("Selenium: Found additional button, clicking...", flush=True)
+                    btn.click()
+                    time.sleep(2)
+            except:
+                pass
+
+            time.sleep(1)
+        else:
+            print(f"Selenium: Final URL: {driver.current_url}", flush=True)
+            print("Selenium: Authentication flow completed (timeout waiting for success page).", flush=True)
+
+    except Exception as e:
+        print(f"Selenium automation error: {e}", flush=True)
+        try:
+            print(f"Selenium: Current URL at error: {driver.current_url}", flush=True)
+            print(f"Selenium: Page title: {driver.title}", flush=True)
+        except:
+            pass
+        raise
+    finally:
+        time.sleep(2)
+        driver.quit()
+        print("Selenium: Browser closed.", flush=True)
+
+
+def get_msal_app():
+    """Get or create MSAL PublicClientApplication."""
+    authority = f"https://login.microsoftonline.com/{TENANT_ID}"
+    return msal.PublicClientApplication(
         client_id=CLIENT_ID,
         authority=authority,
     )
 
+
+def get_access_token_interactive(app=None):
+    """
+    Delegated auth using device flow with Selenium automation.
+    """
+    print("Starting authentication...", flush=True)
+
+    if app is None:
+        app = get_msal_app()
+
     # Try cached token first
     accounts = app.get_accounts()
     if accounts:
+        print("Found cached accounts, attempting silent token acquisition...", flush=True)
         result = app.acquire_token_silent(SCOPES, account=accounts[0])
         if result and "access_token" in result:
+            print("Using cached token.", flush=True)
             return result["access_token"]
 
-    # Interactive device flow (easy + reliable)
+    # Interactive device flow with Selenium automation
+    print("Initiating device flow...", flush=True)
     flow = app.initiate_device_flow(scopes=SCOPES)
     if "user_code" not in flow:
         raise RuntimeError(f"Failed to create device flow. Error: {flow}")
 
-    print(flow["message"])  # shows code + login URL
-    # You can also open the login URL automatically:
-    try:
-        webbrowser.open(flow["verification_uri"])
-    except Exception:
-        pass
+    user_code = flow["user_code"]
+    print(f"Device code: {user_code}", flush=True)
+    print("Starting Selenium to automate login...", flush=True)
 
+    # Run Selenium in a separate thread so we can wait for the token
+    selenium_thread = threading.Thread(
+        target=automate_device_login,
+        args=(user_code, GRAPH_EMAIL, GRAPH_PASSWORD)
+    )
+    selenium_thread.start()
+
+    # Wait for the device flow to complete
+    print("Waiting for device flow to complete...", flush=True)
     result = app.acquire_token_by_device_flow(flow)
+    selenium_thread.join()
+
     if "access_token" not in result:
         raise RuntimeError(f"Token error: {result}")
 
+    print("Token acquired successfully!", flush=True)
     return result["access_token"]
 
 
-def list_inbox_messages(token, top=25):
+def create_token_provider():
+    """
+    Create a token provider function that handles token refresh.
+    Returns a callable that always returns a valid token.
+    """
+    app = get_msal_app()
+    # Initial authentication
+    get_access_token_interactive(app)
+
+    def get_token():
+        """Get a valid token, refreshing if necessary."""
+        accounts = app.get_accounts()
+        if accounts:
+            result = app.acquire_token_silent(SCOPES, account=accounts[0])
+            if result and "access_token" in result:
+                return result["access_token"]
+        # If silent fails, need interactive auth again
+        return get_access_token_interactive(app)
+
+    return get_token
+
+
+# =============================================================================
+# EMAIL STORAGE SYSTEM
+# =============================================================================
+# Folder Structure:
+#   output/emails/
+#   ├── index.json                          # Master index of all downloaded emails
+#   ├── 2026-02-02_Subject-Here_abc12345/   # One folder per email
+#   │   ├── metadata.json                   # Full email metadata
+#   │   └── attachments/                    # Attachments subfolder
+#   │       ├── document.pdf
+#   │       └── image.png
+#   └── ...
+# =============================================================================
+
+
+def sanitize_folder_name(name: str, max_length: int = 50) -> str:
+    """Sanitize a string to be used as a folder name."""
+    # Remove or replace invalid characters
+    sanitized = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '', name)
+    sanitized = re.sub(r'\s+', '-', sanitized)  # Replace whitespace with dash
+    sanitized = re.sub(r'-+', '-', sanitized)   # Collapse multiple dashes
+    sanitized = sanitized.strip('-.')           # Remove leading/trailing dashes and dots
+    # Truncate if too long
+    if len(sanitized) > max_length:
+        sanitized = sanitized[:max_length].rstrip('-')
+    return sanitized or "no-subject"
+
+
+def get_email_folder_name(msg: dict) -> str:
+    """Generate a unique folder name for an email."""
+    # Parse date
+    received = msg.get("receivedDateTime", "")
+    try:
+        dt = datetime.fromisoformat(received.replace("Z", "+00:00"))
+        date_str = dt.strftime("%Y-%m-%d_%H%M%S")
+    except:
+        date_str = "unknown-date"
+
+    # Sanitize subject
+    subject = msg.get("subject", "no-subject") or "no-subject"
+    subject_clean = sanitize_folder_name(subject)
+
+    # Use first 8 chars of message ID for uniqueness
+    msg_id = msg.get("id", "")[:8]
+
+    return f"{date_str}_{subject_clean}_{msg_id}"
+
+
+def get_message_full(token: str, message_id: str) -> dict:
+    """Fetch full message details including body."""
     headers = {"Authorization": f"Bearer {token}"}
     params = {
-        "$top": top,
-        # Keep payload small; add fields as needed
-        "$select": "id,subject,from,receivedDateTime,bodyPreview",
-        "$orderby": "receivedDateTime desc",
+        "$select": "id,subject,from,toRecipients,ccRecipients,bccRecipients,"
+                   "receivedDateTime,sentDateTime,bodyPreview,body,importance,"
+                   "hasAttachments,internetMessageId,conversationId,categories,"
+                   "isRead,isDraft,flag"
     }
-    r = requests.get(f"{GRAPH}/me/mailFolders/Inbox/messages", headers=headers, params=params, timeout=30)
+    r = requests.get(f"{GRAPH}/me/messages/{message_id}", headers=headers, params=params, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+
+def get_attachments(token: str, message_id: str) -> list:
+    """Get list of attachments for a message."""
+    headers = {"Authorization": f"Bearer {token}"}
+    r = requests.get(f"{GRAPH}/me/messages/{message_id}/attachments", headers=headers, timeout=30)
     r.raise_for_status()
     return r.json().get("value", [])
 
 
-def decide_category(msg):
+def download_attachment(attachment: dict, save_path: Path) -> Optional[Path]:
+    """Download a single attachment and save it to disk."""
+    att_name = attachment.get("name", "unnamed")
+    att_type = attachment.get("@odata.type", "")
+
+    # Handle different attachment types
+    if "#microsoft.graph.fileAttachment" in att_type:
+        # File attachment - content is base64 encoded in the response
+        content_bytes = attachment.get("contentBytes")
+        if content_bytes:
+            import base64
+            file_path = save_path / sanitize_folder_name(att_name, max_length=100)
+            # Preserve extension
+            original_ext = Path(att_name).suffix
+            if original_ext and not str(file_path).endswith(original_ext):
+                file_path = Path(str(file_path) + original_ext)
+            file_path.write_bytes(base64.b64decode(content_bytes))
+            return file_path
+    elif "#microsoft.graph.itemAttachment" in att_type:
+        # Item attachment (embedded email) - save as JSON
+        file_path = save_path / f"{sanitize_folder_name(att_name)}.json"
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(attachment, f, indent=2, ensure_ascii=False)
+        return file_path
+
+    return None
+
+
+def save_email(token: str, msg: dict, base_dir: Path) -> Path:
     """
-    Replace this with your real logic (keywords, ML model, etc.)
-    Return a category string or None.
+    Save an email with its metadata and attachments to a folder.
+    Returns the path to the email folder.
     """
-    subject = (msg.get("subject") or "").lower()
-    preview = (msg.get("bodyPreview") or "").lower()
-    sender = ((msg.get("from") or {}).get("emailAddress") or {}).get("address", "").lower()
+    # Get full message details
+    full_msg = get_message_full(token, msg["id"])
 
-    text = f"{subject} {preview} {sender}"
+    # Create folder for this email
+    folder_name = get_email_folder_name(full_msg)
+    email_folder = base_dir / folder_name
+    email_folder.mkdir(parents=True, exist_ok=True)
 
-    if re.search(r"\burgent\b|\basap\b|\bimmediately\b", text):
-        return "Urgent"
-    if "invoice" in text or "payment" in text:
-        return "Finance"
-    if "meeting" in text or "calendar" in text:
-        return "Meetings"
-    if sender.endswith("@yourcompany.com"):
-        return "Internal"
-
-    return "General"
-
-
-def set_message_category(token, message_id, category):
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
+    # Prepare metadata
+    metadata = {
+        "id": full_msg.get("id"),
+        "internetMessageId": full_msg.get("internetMessageId"),
+        "conversationId": full_msg.get("conversationId"),
+        "subject": full_msg.get("subject"),
+        "from": full_msg.get("from"),
+        "toRecipients": full_msg.get("toRecipients", []),
+        "ccRecipients": full_msg.get("ccRecipients", []),
+        "bccRecipients": full_msg.get("bccRecipients", []),
+        "receivedDateTime": full_msg.get("receivedDateTime"),
+        "sentDateTime": full_msg.get("sentDateTime"),
+        "importance": full_msg.get("importance"),
+        "categories": full_msg.get("categories", []),
+        "isRead": full_msg.get("isRead"),
+        "isDraft": full_msg.get("isDraft"),
+        "flag": full_msg.get("flag"),
+        "hasAttachments": full_msg.get("hasAttachments"),
+        "bodyPreview": full_msg.get("bodyPreview"),
+        "body": full_msg.get("body"),  # Contains contentType and content (HTML/text)
+        "attachments": [],  # Will be populated below
+        "_downloadedAt": datetime.now().isoformat(),
+        "_folderName": folder_name,
     }
 
-    # IMPORTANT:
-    # categories is a LIST of strings. This will overwrite existing categories.
-    # If you want to append instead, you must first read existing categories and merge.
-    payload = {"categories": [category]}
+    # Handle attachments
+    if full_msg.get("hasAttachments"):
+        attachments_dir = email_folder / "attachments"
+        attachments_dir.mkdir(exist_ok=True)
 
-    r = requests.patch(f"{GRAPH}/me/messages/{message_id}", headers=headers, json=payload, timeout=30)
-    r.raise_for_status()
+        attachments = get_attachments(token, msg["id"])
+        for att in attachments:
+            att_info = {
+                "id": att.get("id"),
+                "name": att.get("name"),
+                "contentType": att.get("contentType"),
+                "size": att.get("size"),
+                "isInline": att.get("isInline", False),
+                "type": att.get("@odata.type"),
+            }
+
+            # Download the attachment
+            saved_path = download_attachment(att, attachments_dir)
+            if saved_path:
+                att_info["localPath"] = str(saved_path.relative_to(email_folder))
+
+            metadata["attachments"].append(att_info)
+
+    # Save metadata
+    metadata_path = email_folder / "metadata.json"
+    with open(metadata_path, 'w', encoding='utf-8') as f:
+        json.dump(metadata, f, indent=2, ensure_ascii=False)
+
+    return email_folder
+
+
+def update_index(base_dir: Path, email_folder: Path, metadata: dict):
+    """Update the master index file with a new email entry."""
+    index_path = base_dir / "index.json"
+
+    # Load existing index or create new
+    if index_path.exists():
+        with open(index_path, 'r', encoding='utf-8') as f:
+            index = json.load(f)
+    else:
+        index = {
+            "created": datetime.now().isoformat(),
+            "lastUpdated": None,
+            "totalEmails": 0,
+            "emails": {}
+        }
+
+    # Add/update email entry
+    msg_id = metadata.get("id")
+    index["emails"][msg_id] = {
+        "folder": email_folder.name,
+        "subject": metadata.get("subject"),
+        "from": metadata.get("from", {}).get("emailAddress", {}).get("address"),
+        "receivedDateTime": metadata.get("receivedDateTime"),
+        "hasAttachments": metadata.get("hasAttachments"),
+        "attachmentCount": len(metadata.get("attachments", [])),
+    }
+    index["totalEmails"] = len(index["emails"])
+    index["lastUpdated"] = datetime.now().isoformat()
+
+    # Save index
+    with open(index_path, 'w', encoding='utf-8') as f:
+        json.dump(index, f, indent=2, ensure_ascii=False)
+
+
+def get_downloaded_ids(base_dir: Path) -> set:
+    """Get set of already downloaded message IDs from index."""
+    index_path = base_dir / "index.json"
+    if not index_path.exists():
+        return set()
+
+    with open(index_path, 'r', encoding='utf-8') as f:
+        index = json.load(f)
+
+    return set(index.get("emails", {}).keys())
+
+
+# =============================================================================
+# MAIN DOWNLOAD FUNCTIONS
+# =============================================================================
+
+
+def download_all_emails(token: str, base_dir: Path = None, skip_existing: bool = True) -> int:
+    """
+    Download ALL emails from inbox with pagination.
+
+    Args:
+        token: Access token for Graph API
+        base_dir: Directory to save emails (default: EMAIL_STORAGE_DIR)
+        skip_existing: If True, skip emails already downloaded
+
+    Returns:
+        Number of emails downloaded
+    """
+    base_dir = base_dir or EMAIL_STORAGE_DIR
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    downloaded_ids = get_downloaded_ids(base_dir) if skip_existing else set()
+    downloaded_count = 0
+
+    headers = {"Authorization": f"Bearer {token}"}
+    params = {
+        "$top": 50,  # Batch size
+        "$select": "id,subject,from,receivedDateTime,hasAttachments",
+        "$orderby": "receivedDateTime desc",
+    }
+
+    url = f"{GRAPH}/me/mailFolders/Inbox/messages"
+
+    print(f"Starting download of all emails to: {base_dir}", flush=True)
+
+    while url:
+        r = requests.get(url, headers=headers, params=params, timeout=60)
+        r.raise_for_status()
+        data = r.json()
+
+        messages = data.get("value", [])
+        for msg in messages:
+            msg_id = msg.get("id")
+
+            if skip_existing and msg_id in downloaded_ids:
+                print(f"  Skipping (already exists): {msg.get('subject', '')[:50]}", flush=True)
+                continue
+
+            try:
+                email_folder = save_email(token, msg, base_dir)
+
+                # Load metadata for index update
+                with open(email_folder / "metadata.json", 'r', encoding='utf-8') as f:
+                    metadata = json.load(f)
+                update_index(base_dir, email_folder, metadata)
+
+                downloaded_count += 1
+                att_count = len(metadata.get("attachments", []))
+                print(f"  Downloaded ({downloaded_count}): {msg.get('subject', '')[:50]} "
+                      f"[{att_count} attachments]", flush=True)
+
+            except Exception as e:
+                print(f"  ERROR downloading {msg.get('subject', '')[:30]}: {e}", flush=True)
+
+        # Get next page URL
+        url = data.get("@odata.nextLink")
+        params = {}  # Clear params for next link (they're included in the URL)
+
+    print(f"Download complete. Total emails downloaded: {downloaded_count}", flush=True)
+    return downloaded_count
+
+
+def download_top_emails(token: str, count: int = 100, base_dir: Path = None,
+                        skip_existing: bool = True) -> int:
+    """
+    Download the top N most recent emails.
+
+    Args:
+        token: Access token for Graph API
+        count: Number of emails to download (default: 100)
+        base_dir: Directory to save emails (default: EMAIL_STORAGE_DIR)
+        skip_existing: If True, skip emails already downloaded
+
+    Returns:
+        Number of emails downloaded
+    """
+    base_dir = base_dir or EMAIL_STORAGE_DIR
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    downloaded_ids = get_downloaded_ids(base_dir) if skip_existing else set()
+    downloaded_count = 0
+
+    headers = {"Authorization": f"Bearer {token}"}
+
+    print(f"Starting download of top {count} emails to: {base_dir}", flush=True)
+
+    # Fetch in batches
+    remaining = count
+    skip = 0
+
+    while remaining > 0:
+        batch_size = min(50, remaining)
+        params = {
+            "$top": batch_size,
+            "$skip": skip,
+            "$select": "id,subject,from,receivedDateTime,hasAttachments",
+            "$orderby": "receivedDateTime desc",
+        }
+
+        r = requests.get(f"{GRAPH}/me/mailFolders/Inbox/messages",
+                        headers=headers, params=params, timeout=60)
+        r.raise_for_status()
+        data = r.json()
+
+        messages = data.get("value", [])
+        if not messages:
+            break
+
+        for msg in messages:
+            if remaining <= 0:
+                break
+
+            msg_id = msg.get("id")
+
+            if skip_existing and msg_id in downloaded_ids:
+                print(f"  Skipping (already exists): {msg.get('subject', '')[:50]}", flush=True)
+                remaining -= 1
+                continue
+
+            try:
+                email_folder = save_email(token, msg, base_dir)
+
+                # Load metadata for index update
+                with open(email_folder / "metadata.json", 'r', encoding='utf-8') as f:
+                    metadata = json.load(f)
+                update_index(base_dir, email_folder, metadata)
+
+                downloaded_count += 1
+                remaining -= 1
+                att_count = len(metadata.get("attachments", []))
+                print(f"  Downloaded ({downloaded_count}/{count}): {msg.get('subject', '')[:50]} "
+                      f"[{att_count} attachments]", flush=True)
+
+            except Exception as e:
+                print(f"  ERROR downloading {msg.get('subject', '')[:30]}: {e}", flush=True)
+                remaining -= 1
+
+        skip += batch_size
+
+    print(f"Download complete. Total emails downloaded: {downloaded_count}", flush=True)
+    return downloaded_count
+
+
+def monitor_emails(token_func, base_dir: Path = None, poll_interval: int = 60,
+                   max_runtime: int = None) -> None:
+    """
+    Continuously monitor for new emails and download them.
+
+    Args:
+        token_func: Callable that returns a valid access token (handles refresh)
+        base_dir: Directory to save emails (default: EMAIL_STORAGE_DIR)
+        poll_interval: Seconds between checks (default: 60)
+        max_runtime: Maximum seconds to run (None = run forever)
+    """
+    base_dir = base_dir or EMAIL_STORAGE_DIR
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    start_time = time.time()
+    total_downloaded = 0
+
+    print(f"Starting email monitor. Checking every {poll_interval} seconds.", flush=True)
+    print(f"Saving to: {base_dir}", flush=True)
+    print("Press Ctrl+C to stop.", flush=True)
+
+    try:
+        while True:
+            # Check runtime limit
+            if max_runtime and (time.time() - start_time) > max_runtime:
+                print(f"Max runtime reached ({max_runtime}s). Stopping.", flush=True)
+                break
+
+            try:
+                # Get fresh token for each poll cycle to handle expiration
+                token = token_func()
+            except Exception as e:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Token refresh failed: {e}", flush=True)
+                time.sleep(poll_interval)
+                continue
+
+            downloaded_ids = get_downloaded_ids(base_dir)
+            headers = {"Authorization": f"Bearer {token}"}
+
+            # Check for new emails (most recent 20)
+            params = {
+                "$top": 20,
+                "$select": "id,subject,from,receivedDateTime,hasAttachments",
+                "$orderby": "receivedDateTime desc",
+            }
+
+            try:
+                r = requests.get(f"{GRAPH}/me/mailFolders/Inbox/messages",
+                                headers=headers, params=params, timeout=30)
+
+                # Handle token expiration specifically
+                if r.status_code == 401:
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Token expired, will refresh on next cycle.", flush=True)
+                    time.sleep(poll_interval)
+                    continue
+
+                r.raise_for_status()
+                messages = r.json().get("value", [])
+
+                new_emails = [m for m in messages if m["id"] not in downloaded_ids]
+
+                if new_emails:
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Found {len(new_emails)} new email(s)",
+                          flush=True)
+
+                    for msg in new_emails:
+                        try:
+                            email_folder = save_email(token, msg, base_dir)
+
+                            with open(email_folder / "metadata.json", 'r', encoding='utf-8') as f:
+                                metadata = json.load(f)
+                            update_index(base_dir, email_folder, metadata)
+
+                            total_downloaded += 1
+                            att_count = len(metadata.get("attachments", []))
+                            print(f"  New email: {msg.get('subject', '')[:50]} [{att_count} att]",
+                                  flush=True)
+
+                        except Exception as e:
+                            print(f"  ERROR: {e}", flush=True)
+                else:
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] No new emails.", flush=True)
+
+            except requests.exceptions.RequestException as e:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] API error: {e}", flush=True)
+
+            # Wait before next check
+            time.sleep(poll_interval)
+
+    except KeyboardInterrupt:
+        print("\nMonitor stopped by user.", flush=True)
+
+    print(f"Total emails downloaded during session: {total_downloaded}", flush=True)
 
 
 def main():
+    """Main entry point with mode selection."""
+    import sys
+
+    print("=" * 60)
+    print("EMAIL DOWNLOAD SYSTEM")
+    print("=" * 60)
+    print("\nSelect mode:")
+    print("  1. Download top 100 emails")
+    print("  2. Download ALL emails")
+    print("  3. Monitor for new emails (continuous)")
+    print()
+
+    # Check for command line argument
+    if len(sys.argv) > 1:
+        mode = sys.argv[1]
+    else:
+        mode = input("Enter mode (1-3): ").strip()
+
+    if mode == "1":
+        token = get_access_token_interactive()
+        download_top_emails(token, count=100)
+    elif mode == "2":
+        token = get_access_token_interactive()
+        download_all_emails(token)
+    elif mode == "3":
+        # Monitor continuously with automatic token refresh
+        token_provider = create_token_provider()
+        monitor_emails(token_provider, poll_interval=60)
+    else:
+        print("Invalid mode. Please enter 1, 2, or 3.")
+
+
+# Convenience functions for direct imports
+def run_download_top_100():
+    """Download top 100 emails."""
     token = get_access_token_interactive()
+    return download_top_emails(token, count=100)
 
-    msgs = list_inbox_messages(token, top=20)
-    print(f"Fetched {len(msgs)} messages.")
 
-    for m in msgs:
-        cat = decide_category(m)
-        if not cat:
-            continue
+def run_download_all():
+    """Download all emails."""
+    token = get_access_token_interactive()
+    return download_all_emails(token)
 
-        msg_id = m["id"]
-        subject = m.get("subject", "")
-        sender = ((m.get("from") or {}).get("emailAddress") or {}).get("address", "")
 
-        set_message_category(token, msg_id, cat)
-        print(f"Categorized: [{cat}] From: {sender} | Subject: {subject}")
+def run_monitor(poll_interval: int = 60, max_runtime: int = None):
+    """Start email monitor with automatic token refresh."""
+    token_provider = create_token_provider()
+    return monitor_emails(token_provider, poll_interval=poll_interval, max_runtime=max_runtime)
 
 
 if __name__ == "__main__":
