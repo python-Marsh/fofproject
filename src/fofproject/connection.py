@@ -17,7 +17,7 @@ import msal
 # EMAIL STORAGE CONFIG
 # =========================
 # Base directory for storing emails (relative to project root)
-EMAIL_STORAGE_DIR = Path(__file__).parent.parent.parent / "output" / "emails"
+EMAIL_STORAGE_DIR = Path(r"Z:\Research Team\Artificial Intelligence\emails")
 
 # =========================
 # CONFIG (fill in from .env)
@@ -261,7 +261,7 @@ def create_token_provider():
 # EMAIL STORAGE SYSTEM
 # =============================================================================
 # Folder Structure:
-#   output/emails/
+#   "Z:\Research Team\Artificial Intelligence\emails"
 #   ├── index.json                          # Master index of all downloaded emails
 #   ├── 2026-02-02_Subject-Here_abc12345/   # One folder per email
 #   │   ├── metadata.json                   # Full email metadata

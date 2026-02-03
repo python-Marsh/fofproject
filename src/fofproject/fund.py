@@ -18,6 +18,17 @@ if not save_dir.exists():
     save_dir.mkdir(parents=True, exist_ok=True)
 
 def get_font2height():
+    """
+    Build a lookup table mapping font sizes (1-39) to their rendered heights in inches.
+
+    Creates a matplotlib figure for each font size, renders sample text, and measures
+    the bounding box height. Used to dynamically size table cells based on font size.
+
+    Returns
+    -------
+    dict
+        Dictionary where keys are font sizes (int) and values are heights in inches (float).
+    """
     font2height = {}
     for font_size in range(1, 40):
         fig, ax = plt.subplots()
@@ -52,14 +63,56 @@ FONT_FNAME = {
 }
 
 def find_largest_font_size(target_height, font2height):
-    """Find the largest font size that fits within the target height."""
+    """
+    Find the largest font size whose rendered height fits within a target height.
+
+    Iterates through font sizes from largest to smallest and returns the first
+    one that fits. Used for auto-sizing text in table cells.
+
+    Parameters
+    ----------
+    target_height : float
+        Maximum allowed height in inches.
+    font2height : dict
+        Lookup table from get_font2height() mapping font sizes to heights.
+
+    Returns
+    -------
+    int or None
+        Largest font size that fits, or None if no font size is small enough.
+    """
     for font_size, height in reversed(font2height.items()):
         if height <= target_height:
             return font_size
     return None
 
 def input_monthly_returns(file_path, performance_fee=0.2, management_fee=0.01):
-    """Read monthly returns from a CSV file and create Fund instances."""
+    """
+    Load monthly return data from a CSV file and create Fund objects for each column.
+
+    Expects a CSV with a 'date' column (DD/MM/YYYY format) and one column per fund
+    containing decimal returns (e.g., 0.05 for 5%). Each non-date column becomes
+    a separate Fund instance.
+
+    Parameters
+    ----------
+    file_path : str
+        Path to the CSV file containing monthly returns.
+    performance_fee : float, default 0.2
+        Performance fee as decimal (0.2 = 20%). Stored on Fund for reference.
+    management_fee : float, default 0.01
+        Management fee as decimal (0.01 = 1%). Stored on Fund for reference.
+
+    Returns
+    -------
+    dict
+        Dictionary mapping fund names (column headers) to Fund objects.
+
+    Example
+    -------
+    >>> funds = input_monthly_returns("RETURN DATA.csv")
+    >>> funds["RDGFF"].total_ann_rtn  # Access annualized return
+    """
     # Read CSV file
     df = pd.read_csv(file_path)
     funds = {}
@@ -81,8 +134,30 @@ def input_monthly_returns(file_path, performance_fee=0.2, management_fee=0.01):
     return funds
 
 def subset_of_funds(funds, keys=["RDGFF", "MSCI CHINA", "MSCI GLOBAL"]):
-    """funds: dict of Fund instances;
-    keys: list of fund names to extract"""
+    """
+    Extract a subset of funds from a larger fund dictionary.
+
+    Useful for selecting specific funds to plot or analyze together.
+    Returns None for any key not found in the original dictionary.
+
+    Parameters
+    ----------
+    funds : dict
+        Dictionary of Fund objects, typically from input_monthly_returns().
+    keys : list of str
+        Fund names to extract from the dictionary.
+
+    Returns
+    -------
+    dict
+        Dictionary containing only the requested funds (or None for missing keys).
+
+    Example
+    -------
+    >>> all_funds = input_monthly_returns("data.csv")
+    >>> selected = subset_of_funds(all_funds, ["RDGFF", "MSCI CHINA"])
+    >>> plot_cumulative_returns(selected)
+    """
     funds_to_be_plot = {k: funds.get(k, None) for k in keys} 
     return funds_to_be_plot
 
@@ -105,13 +180,66 @@ class Fund:
         performance_fee: Optional[float] = None,
     ):
 
-        """Initialize a Fund object.
+        """
+        Initialize a Fund object with monthly return data and optional metadata.
 
-        Args:
-            name (str): Name of the fund
-            monthly_returns (List[Dict]): List of monthly returns with 'date' and 'value' keys
-            performance_fee (float): Performance fee as a decimal (e.g., 0.2 for 20%)
-            management_fee (float): Management fee as a decimal (e.g., 0.01 for 1%)
+        Parses and validates monthly returns, ensuring dates are continuous (no gaps).
+        Automatically computes summary statistics like annualized return, volatility,
+        Sharpe ratio, max drawdown, etc. upon initialization.
+
+        Parameters
+        ----------
+        name : str
+            Fund identifier (e.g., "RDGFF", "MSCI CHINA"). Used in labels and filenames.
+        monthly_returns : List[Dict]
+            List of dicts with 'date' (DD/MM/YYYY string) and 'value' (decimal return).
+            Example: [{"date": "01/01/2024", "value": 0.05}, ...]
+        fund_des : str, optional
+            Text description of the fund's investment approach.
+        investment_location : List[str], optional
+            Geographic regions (e.g., ["China", "Hong Kong"]).
+        investment_strategy : List[str], optional
+            Strategy types (e.g., ["Long/Short Equity", "Event Driven"]).
+        investment_sector : List[str], optional
+            Sector focus (e.g., ["Technology", "Healthcare"]).
+        manager_names : List[str], optional
+            Names of portfolio managers.
+        manager_profiles : Dict[str, Dict], optional
+            Detailed manager info keyed by name.
+        contact : Dict[str, str], optional
+            Contact details with keys: 'name', 'location', 'email', 'number'.
+        aum_size : float, optional
+            Assets under management in millions USD.
+        net_exposure : List[float], optional
+            Range of net exposure [min, max] as decimals (e.g., [0.3, 0.7] for 30-70%).
+        net_return : bool, optional
+            Whether returns are net of fees.
+        management_fee : float, optional
+            Annual management fee as decimal (0.01 = 1%).
+        performance_fee : float, optional
+            Performance fee as decimal (0.2 = 20%).
+
+        Raises
+        ------
+        ValueError
+            If monthly_returns is not a list of dicts or dates are not continuous.
+
+        Attributes
+        ----------
+        total_cum_rtn : float
+            Cumulative return from inception to latest date.
+        total_ann_rtn : float
+            Annualized return from inception to latest date.
+        total_vol : float
+            Annualized volatility from inception to latest date.
+        total_sharpe : float
+            Sharpe ratio from inception to latest date.
+        total_max_dd : float
+            Maximum drawdown from inception to latest date.
+        total_sortino : float
+            Sortino ratio from inception to latest date.
+        total_pos_months : float
+            Percentage of months with positive returns.
         """
         if not all(isinstance(x, dict) for x in monthly_returns):
             raise ValueError(f"{name}: No valid monthly returns")
@@ -193,6 +321,21 @@ class Fund:
         )
 
     def get_monthly_return(self, year: int, month: int):
+        """
+        Retrieve the return for a specific month.
+
+        Parameters
+        ----------
+        year : int
+            Calendar year (e.g., 2024).
+        month : int
+            Month number (1-12).
+
+        Returns
+        -------
+        float or None
+            The monthly return as a decimal, or None if not found.
+        """
         target = datetime(year, month, 1)
         for entry in self.monthly_returns:
             if entry["month"] == target:
@@ -200,6 +343,14 @@ class Fund:
         return None
 
     def compute_inception_date(self):
+        """
+        Find the earliest month in the return series.
+
+        Returns
+        -------
+        datetime or None
+            First day of the earliest month with data, or None if no data.
+        """
         return (
             min(entry["month"] for entry in self.monthly_returns)
             if self.monthly_returns
@@ -207,6 +358,14 @@ class Fund:
         )
 
     def compute_latest_date(self):
+        """
+        Find the most recent month in the return series.
+
+        Returns
+        -------
+        datetime or None
+            First day of the latest month with data, or None if no data.
+        """
         return (
             max(entry["month"] for entry in self.monthly_returns)
             if self.monthly_returns
@@ -224,19 +383,27 @@ class Fund:
         self, start_month: Union[str, datetime], end_month: Union[str, datetime]
     ) -> float:
         """
-        Calculates cumulative value from start_month to end_month (inclusive).
+        Calculate the total compounded return over a date range.
+
+        Compounds all monthly returns between start_month and end_month (inclusive)
+        using the formula: (1 + r1) * (1 + r2) * ... * (1 + rn) - 1
 
         Parameters
         ----------
-        start_month : str
-            Month string in 'YYYY-MM' or 'YYYY-M' format (e.g. '2024-7').
-        end_month : str
-            Month string in 'YYYY-MM' or 'YYYY-M' format (e.g. '2024-12').
+        start_month : str or datetime
+            Start of the period. Accepts 'YYYY-MM' string or datetime object.
+        end_month : str or datetime
+            End of the period. Accepts 'YYYY-MM' string or datetime object.
 
         Returns
         -------
         float
-            The cumulative return from start_month (exclusive) to end_month (inclusive).
+            Cumulative return as a decimal (e.g., 0.25 means 25% total return).
+
+        Example
+        -------
+        >>> fund.cumulative_return("2023-01", "2023-12")  # Full year 2023
+        0.1523  # 15.23% cumulative return
         """
         # convert str to datetime
         start_month = (
@@ -252,8 +419,30 @@ class Fund:
 
     def annualized_return(self, start_month, end_month):
         """
-        Calculates annualized return from start_month to end_month (inclusive).
-        start_month and end_month should be in 'YYYY-MM' format.
+        Calculate the annualized (CAGR) return over a date range.
+
+        Converts cumulative return to an equivalent annual rate using:
+        (1 + cumulative_return) ^ (12 / num_months) - 1
+
+        This allows comparing returns across different time periods on an
+        equal footing.
+
+        Parameters
+        ----------
+        start_month : str or datetime
+            Start of the period. Accepts 'YYYY-MM' string or datetime object.
+        end_month : str or datetime
+            End of the period. Accepts 'YYYY-MM' string or datetime object.
+
+        Returns
+        -------
+        float
+            Annualized return as a decimal (e.g., 0.12 means 12% per year).
+
+        Example
+        -------
+        >>> fund.annualized_return("2020-01", "2023-12")  # 4-year period
+        0.0823  # 8.23% annualized return
         """
         # Step 1: Compute cumulative return over the period
         cumulative = self.cumulative_return(start_month, end_month)
@@ -275,26 +464,32 @@ class Fund:
         return annualized
 
     def volatility(self, start_month=None, end_month=None, ddof=1):
-        """Calculate the volatility of returns.
+        """
+        Calculate annualized volatility (standard deviation of returns).
+
+        Computes the standard deviation of monthly returns and scales to annual
+        by multiplying by sqrt(12). Higher volatility indicates more variable returns.
 
         Parameters
         ----------
-        start_month: str, optional
-            The month from which to start calculating volatility. The
-            comparison is exclusive, meaning returns with a month strictly
-            greater than ``start_month`` are included. If ``None`` (default),
-            the calculation uses the beginning of the series.
-        end_month: str, optional
-            The final month (inclusive) to consider in the calculation. If
-            ``None`` (default), the calculation uses the end of the series.
-        ddof: int, optional
-            degree of freedom of the volatility
+        start_month : str or datetime, optional
+            Start of the period (inclusive). If None, uses inception date.
+        end_month : str or datetime, optional
+            End of the period (inclusive). If None, uses latest date.
+        ddof : int, default 1
+            Degrees of freedom for standard deviation calculation.
+            Use 1 for sample std (default), 0 for population std.
 
         Returns
         -------
         float
-            The standard deviation of the selected series of monthly returns.
-            If the range is empty, ``0.0`` is returned.
+            Annualized volatility as a decimal (e.g., 0.15 means 15% annual volatility).
+            Returns 0.0 if no data in range.
+
+        Example
+        -------
+        >>> fund.volatility("2023-01", "2023-12")
+        0.1234  # 12.34% annualized volatility
         """
         start_month = parse_month(start_month)
         start_ms = start_month.month + start_month.year * 12 if start_month else None
@@ -322,19 +517,26 @@ class Fund:
     
     def rolling_volatility(self, window=12):
         """
-        Calculate rolling volatility using the existing fund.volatility method.
+        Calculate rolling annualized volatility over a sliding window.
+
+        For each month, computes volatility using the preceding 'window' months.
+        Useful for visualizing how fund risk changes over time.
 
         Parameters
         ----------
-        fund : object
-            Fund instance with a .volatility() method.
-        window : int
-            Rolling window length in months.
+        window : int, default 12
+            Number of months in the rolling window. 12 gives trailing 1-year volatility.
 
         Returns
         -------
         pd.Series
-            Rolling volatility values indexed by month.
+            Rolling volatility indexed by date. First (window-1) values are None
+            due to insufficient history.
+
+        Example
+        -------
+        >>> rolling_vol = fund.rolling_volatility(window=12)
+        >>> rolling_vol.plot()  # Visualize volatility over time
         """
         dates = [entry["datetime"] for entry in self.monthly_returns]
         vols = []
@@ -351,32 +553,61 @@ class Fund:
         return pd.Series(vols, index=pd.to_datetime(dates))
     
     def vol_of_vol(self, window=12):
+        """
+        Calculate volatility-of-volatility (standard deviation of rolling volatility).
+
+        Measures how stable the fund's risk profile is over time. Higher values
+        indicate more variable/unpredictable volatility.
+
+        Parameters
+        ----------
+        window : int, default 12
+            Rolling window size in months for the underlying volatility calculation.
+
+        Returns
+        -------
+        float
+            Standard deviation of the rolling volatility series.
+
+        Example
+        -------
+        >>> fund.vol_of_vol(window=12)
+        0.0234  # Volatility varies by about 2.34% over time
+        """
         rolling_vol = self.rolling_volatility(window=window)
         vol_of_vol = rolling_vol.std()
         return vol_of_vol
     
     def sharpe_ratio(self, start_month=None, end_month=None, risk_free_rate=0.0):
-        """Calculate the Sharpe ratio of returns.
+        """
+        Calculate the Sharpe ratio (risk-adjusted return).
+
+        Measures excess return per unit of total risk:
+        Sharpe = (Annualized Return - Risk-Free Rate) / Annualized Volatility
+
+        Higher values indicate better risk-adjusted performance. Generally:
+        - < 1.0: Subpar
+        - 1.0-2.0: Good
+        - > 2.0: Excellent
 
         Parameters
         ----------
-        start_month: str, optional
-            The month from which to start calculating the Sharpe ratio. The
-            comparison is exclusive, meaning returns with a month strictly
-            greater than ``start_month`` are included. If ``None`` (default),
-            the calculation uses the beginning of the series.
-        end_month: str, optional
-            The final month (inclusive) to consider in the calculation. If
-            ``None`` (default), the calculation uses the end of the series.
-        risk_free_rate: float, optional
-            The annualized risk-free rate to use in the calculation. This is
-            expressed as a decimal (e.g., ``0.03`` for 3%). Default is ``0.0``.
+        start_month : str or datetime, optional
+            Start of the period (inclusive). If None, uses inception date.
+        end_month : str or datetime, optional
+            End of the period (inclusive). If None, uses latest date.
+        risk_free_rate : float, default 0.0
+            Annual risk-free rate as decimal (e.g., 0.03 for 3%).
 
         Returns
         -------
         float
-            The Sharpe ratio of the selected series of monthly returns.
-            If the range is empty or volatility is zero, ``0.0`` is returned.
+            Sharpe ratio. Returns 0.0 if volatility is zero.
+
+        Example
+        -------
+        >>> fund.sharpe_ratio("2020-01", "2023-12", risk_free_rate=0.02)
+        1.45  # Good risk-adjusted performance
         """
 
         # Step 1: Calculate annualized return over the specified period
@@ -402,21 +633,30 @@ class Fund:
 
     def sortino_ratio(self, start_month=None, end_month=None, risk_free_rate=0.0):
         """
-        Calculate the annualized Sortino ratio from monthly returns.
+        Calculate the Sortino ratio (downside risk-adjusted return).
+
+        Similar to Sharpe but only penalizes downside volatility, not upside.
+        More appropriate for funds with asymmetric return distributions.
+        Sortino = (Annualized Return - Risk-Free Rate) / Downside Deviation
 
         Parameters
         ----------
-        start_month : str, optional
-            Include months strictly greater than this (exclusive lower bound).
-        end_month : str, optional
-            Include months up to and including this (inclusive upper bound).
+        start_month : str or datetime, optional
+            Start of the period (inclusive). If None, uses inception date.
+        end_month : str or datetime, optional
+            End of the period (inclusive). If None, uses latest date.
         risk_free_rate : float, default 0.0
-            Annual risk-free rate (e.g., 0.02 for 2%).
+            Annual risk-free rate as decimal (e.g., 0.02 for 2%).
 
         Returns
         -------
         float
-            Annualized Sortino ratio. Returns 0.0 if no usable data.
+            Sortino ratio. Returns NaN if no downside deviation, 0.0 if no data.
+
+        Example
+        -------
+        >>> fund.sortino_ratio("2020-01", "2023-12")
+        1.82  # Higher than Sharpe means positive skew in returns
         """
 
         start_month = parse_month(start_month)
@@ -454,20 +694,27 @@ class Fund:
 
     def max_drawdown(self, start_month=None, end_month=None):
         """
-        Calculate the maximum drawdown from monthly returns.
+        Calculate the maximum peak-to-trough decline.
+
+        Measures the largest percentage drop from any peak to subsequent trough.
+        Key risk metric showing worst-case loss an investor could have experienced.
 
         Parameters
         ----------
-        start_month : str, optional
-            Include months strictly greater than this (exclusive lower bound).
-        end_month : str, optional
-            Include months up to and including this (inclusive upper bound).
+        start_month : str or datetime, optional
+            Start of the period (inclusive). If None, uses inception date.
+        end_month : str or datetime, optional
+            End of the period (inclusive). If None, uses latest date.
 
         Returns
         -------
         float
-            Maximum drawdown as a decimal (e.g., 0.2 for 20%).
-            Returns 0.0 if no usable data.
+            Maximum drawdown as a decimal (e.g., 0.25 means 25% peak-to-trough loss).
+
+        Example
+        -------
+        >>> fund.max_drawdown("2020-01", "2023-12")
+        0.1834  # Worst drawdown was 18.34% from peak
         """
 
         start_dt = parse_month(start_month)
@@ -497,19 +744,27 @@ class Fund:
 
     def positive_months(self, start_month=None, end_month=None):
         """
-        Count the number of months with positive returns.
+        Calculate the win rate (percentage of months with positive returns).
+
+        Measures consistency of positive performance. Higher values indicate
+        more reliable positive months, though doesn't account for magnitude.
 
         Parameters
         ----------
-        start_month : str, optional
-            Include months strictly greater than this (exclusive lower bound).
-        end_month : str, optional
-            Include months up to and including this (inclusive upper bound).
+        start_month : str or datetime, optional
+            Start of the period (inclusive). If None, uses inception date.
+        end_month : str or datetime, optional
+            End of the period (inclusive). If None, uses latest date.
 
         Returns
         -------
-        int
-            Number of months with positive returns.
+        float
+            Fraction of months with positive returns (e.g., 0.65 means 65% win rate).
+
+        Example
+        -------
+        >>> fund.positive_months("2020-01", "2023-12")
+        0.5833  # 58.33% of months had positive returns
         """
 
         start_dt = parse_month(start_month)
@@ -527,19 +782,27 @@ class Fund:
 
     def return_in_positive_months(self, start_month=None, end_month=None):
         """
-        Calculate cumulative return in months with positive returns.
+        Calculate average return during winning months.
+
+        Shows the typical gain magnitude when the fund is up. Compare with
+        return_in_negative_months to assess gain/loss asymmetry.
 
         Parameters
         ----------
-        start_month : str, optional
-            Include months strictly greater than this (exclusive lower bound).
-        end_month : str, optional
-            Include months up to and including this (inclusive upper bound).
+        start_month : str or datetime, optional
+            Start of the period (inclusive). If None, uses inception date.
+        end_month : str or datetime, optional
+            End of the period (inclusive). If None, uses latest date.
 
         Returns
         -------
         float
-            Cumulative return in months with positive returns.
+            Average monthly return during positive months as decimal.
+
+        Example
+        -------
+        >>> fund.return_in_positive_months("2020-01", "2023-12")
+        0.0312  # Average gain of 3.12% in winning months
         """
 
         start_dt = parse_month(start_month)
@@ -556,19 +819,27 @@ class Fund:
 
     def return_in_negative_months(self, start_month=None, end_month=None):
         """
-        Calculate cumulative return in months with negative returns.
+        Calculate average return during losing months.
+
+        Shows the typical loss magnitude when the fund is down. Compare with
+        return_in_positive_months to assess gain/loss asymmetry.
 
         Parameters
         ----------
-        start_month : str, optional
-            Include months strictly greater than this (exclusive lower bound).
-        end_month : str, optional
-            Include months up to and including this (inclusive upper bound).
+        start_month : str or datetime, optional
+            Start of the period (inclusive). If None, uses inception date.
+        end_month : str or datetime, optional
+            End of the period (inclusive). If None, uses latest date.
 
         Returns
         -------
         float
-            Cumulative return in months with negative returns.
+            Average monthly return during negative months as decimal (negative value).
+
+        Example
+        -------
+        >>> fund.return_in_negative_months("2020-01", "2023-12")
+        -0.0198  # Average loss of 1.98% in losing months
         """
 
         start_dt = parse_month(start_month)
@@ -584,7 +855,28 @@ class Fund:
         return total_rtn / count if count > 0 else 0.0
 
     def join_two_funds(self, benchmark_fund, start_month=None, end_month=None):
+        """
+        Align this fund's returns with a benchmark over their common date range.
 
+        Finds the overlapping period between both funds and the requested date range,
+        then extracts matching return values. Used internally by correlation, beta,
+        and capture ratio calculations.
+
+        Parameters
+        ----------
+        benchmark_fund : Fund
+            The benchmark Fund object to align with.
+        start_month : str or datetime, optional
+            Requested start date. Will be adjusted to common range.
+        end_month : str or datetime, optional
+            Requested end date. Will be adjusted to common range.
+
+        Returns
+        -------
+        tuple
+            (fund_values, benchmark_values) - two aligned lists of decimal returns.
+            Returns empty lists if no overlapping period.
+        """
         fund1 = self.monthly_returns  # market returns
         fund2 = benchmark_fund.monthly_returns  # stock returns
 
@@ -614,12 +906,33 @@ class Fund:
         return fund1_values, fund2_values
 
     def correlation_to(self, benchmark_fund, start_month=None, end_month=None):
-        """_summary_
+        """
+        Calculate Pearson correlation coefficient with a benchmark.
 
-        Args:
-            benchmark_fund (Fund Class): A index that you want to compare/calculate the correlation with
-            start_month (_type_): _description_
-            end_month (_type_): _description_
+        Measures how closely the fund's returns move with the benchmark.
+        Range is -1 to +1:
+        - +1: Perfect positive correlation (moves together)
+        - 0: No linear relationship
+        - -1: Perfect negative correlation (moves opposite)
+
+        Parameters
+        ----------
+        benchmark_fund : Fund
+            The benchmark Fund object to correlate with.
+        start_month : str or datetime, optional
+            Start of the period (inclusive). If None, uses common inception.
+        end_month : str or datetime, optional
+            End of the period (inclusive). If None, uses common end date.
+
+        Returns
+        -------
+        float
+            Correlation coefficient between -1 and +1.
+
+        Example
+        -------
+        >>> fund.correlation_to(msci_china, "2020-01", "2023-12")
+        0.72  # Moderate positive correlation
         """
         # Example: list1 and list2 are your two lists
         fund1_values, fund2_values = self.join_two_funds(
@@ -637,22 +950,34 @@ class Fund:
 
     def beta_to(self, benchmark_fund, start_month=None, end_month=None):
         """
-        Calculate the beta of this fund relative to a benchmark fund.
+        Calculate beta (market sensitivity) relative to a benchmark.
+
+        Beta measures how much the fund moves for each 1% move in the benchmark:
+        - Beta = 1.0: Moves in line with benchmark
+        - Beta > 1.0: More volatile than benchmark (amplified moves)
+        - Beta < 1.0: Less volatile than benchmark (dampened moves)
+        - Beta < 0: Moves opposite to benchmark
+
+        Calculated as: Cov(fund, benchmark) / Var(benchmark)
 
         Parameters
         ----------
         benchmark_fund : Fund
-            The benchmark Fund object to compare against.
-        start_month : str, optional
-            Include months strictly greater than this (exclusive lower bound).
-        end_month : str, optional
-            Include months up to and including this (inclusive upper bound).
+            The benchmark Fund object (typically a market index).
+        start_month : str or datetime, optional
+            Start of the period (inclusive). If None, uses common inception.
+        end_month : str or datetime, optional
+            End of the period (inclusive). If None, uses common end date.
 
         Returns
         -------
         float
-            Beta of this fund relative to the benchmark fund.
-            Returns None if insufficient data.
+            Beta coefficient relative to the benchmark.
+
+        Example
+        -------
+        >>> fund.beta_to(msci_china, "2020-01", "2023-12")
+        0.65  # Fund captures 65% of benchmark's moves
         """
         # Example: assume you already have two lists of dicts
         fund1_values, fund2_values = self.join_two_funds(
@@ -670,6 +995,166 @@ class Fund:
 
         return beta
 
+    def upside_capture_ratio(self, benchmark_fund, start_month=None, end_month=None):
+        """
+        Calculate upside capture ratio relative to a benchmark.
+
+        Measures fund participation in benchmark gains during up markets.
+        Compares compounded fund returns to compounded benchmark returns
+        only during months when the benchmark was positive.
+
+        Interpretation:
+        - 100%: Fund matches benchmark gains
+        - >100%: Fund outperforms in up markets (desirable)
+        - <100%: Fund underperforms in up markets
+
+        Parameters
+        ----------
+        benchmark_fund : Fund
+            The benchmark Fund object to compare against.
+        start_month : str or datetime, optional
+            Start of the period (inclusive).
+        end_month : str or datetime, optional
+            End of the period (inclusive).
+
+        Returns
+        -------
+        float
+            Upside capture as percentage (e.g., 110 means 110%).
+            Returns None if no positive benchmark months.
+
+        Example
+        -------
+        >>> fund.upside_capture_ratio(msci_china, "2020-01", "2023-12")
+        85.5  # Fund captures 85.5% of benchmark's upside
+        """
+        fund_values, benchmark_values = self.join_two_funds(
+            benchmark_fund=benchmark_fund, start_month=start_month, end_month=end_month
+        )
+
+        if not fund_values or not benchmark_values:
+            return None
+
+        # Find months where benchmark is positive
+        fund_up = []
+        bench_up = []
+        for f_val, b_val in zip(fund_values, benchmark_values):
+            if b_val > 0:
+                fund_up.append(f_val)
+                bench_up.append(b_val)
+
+        if not bench_up:
+            return None
+
+        # Compound returns for up months
+        fund_compound = np.prod([1 + r for r in fund_up]) - 1
+        bench_compound = np.prod([1 + r for r in bench_up]) - 1
+
+        if bench_compound == 0:
+            return None
+
+        return (fund_compound / bench_compound) * 100
+
+    def downside_capture_ratio(self, benchmark_fund, start_month=None, end_month=None):
+        """
+        Calculate downside capture ratio relative to a benchmark.
+
+        Measures fund participation in benchmark losses during down markets.
+        Compares compounded fund returns to compounded benchmark returns
+        only during months when the benchmark was negative.
+
+        Interpretation:
+        - 100%: Fund matches benchmark losses
+        - <100%: Fund loses less in down markets (desirable)
+        - >100%: Fund loses more in down markets (concerning)
+
+        Parameters
+        ----------
+        benchmark_fund : Fund
+            The benchmark Fund object to compare against.
+        start_month : str or datetime, optional
+            Start of the period (inclusive).
+        end_month : str or datetime, optional
+            End of the period (inclusive).
+
+        Returns
+        -------
+        float
+            Downside capture as percentage (e.g., 70 means 70%).
+            Returns None if no negative benchmark months.
+
+        Example
+        -------
+        >>> fund.downside_capture_ratio(msci_china, "2020-01", "2023-12")
+        65.0  # Fund only captures 65% of benchmark's downside (good)
+        """
+        fund_values, benchmark_values = self.join_two_funds(
+            benchmark_fund=benchmark_fund, start_month=start_month, end_month=end_month
+        )
+
+        if not fund_values or not benchmark_values:
+            return None
+
+        # Find months where benchmark is negative
+        fund_down = []
+        bench_down = []
+        for f_val, b_val in zip(fund_values, benchmark_values):
+            if b_val < 0:
+                fund_down.append(f_val)
+                bench_down.append(b_val)
+
+        if not bench_down:
+            return None
+
+        # Compound returns for down months
+        fund_compound = np.prod([1 + r for r in fund_down]) - 1
+        bench_compound = np.prod([1 + r for r in bench_down]) - 1
+
+        if bench_compound == 0:
+            return None
+
+        return (fund_compound / bench_compound) * 100
+
+    def capture_ratio(self, benchmark_fund, start_month=None, end_month=None):
+        """
+        Calculate the capture ratio (upside capture / downside capture).
+
+        Combines upside and downside capture into a single metric that shows
+        how asymmetrically the fund participates in market moves.
+
+        Interpretation:
+        - > 1.0: Captures more upside than downside (desirable)
+        - = 1.0: Symmetric participation
+        - < 1.0: Captures more downside than upside (concerning)
+
+        Parameters
+        ----------
+        benchmark_fund : Fund
+            The benchmark Fund object to compare against.
+        start_month : str or datetime, optional
+            Start of the period (inclusive).
+        end_month : str or datetime, optional
+            End of the period (inclusive).
+
+        Returns
+        -------
+        float
+            Ratio of upside to downside capture.
+            Returns None if either capture ratio cannot be computed.
+
+        Example
+        -------
+        >>> fund.capture_ratio(msci_china, "2020-01", "2023-12")
+        1.31  # Upside 85.5% / Downside 65% = 1.31 (favorable asymmetry)
+        """
+        upside = self.upside_capture_ratio(benchmark_fund, start_month, end_month)
+        downside = self.downside_capture_ratio(benchmark_fund, start_month, end_month)
+
+        if upside is None or downside is None or downside == 0:
+            return None
+
+        return upside / downside
+
     def plot_monthly_return_distribution(
         self,
         *,
@@ -680,9 +1165,29 @@ class Fund:
         save = False,
     ):
         """
-        Plot a histogram (bar chart) of this fund's historical monthly returns.
-        Style is defined directly inside the function (no external STYLE_DICT).
-        Adds a smoothed KDE curve for a softer distribution edge.
+        Create a histogram of monthly return distribution with KDE overlay.
+
+        Visualizes the shape of return distribution including frequency of
+        positive/negative months. Includes statistical annotations (mean,
+        median, percentiles) and a smoothed KDE curve.
+
+        Parameters
+        ----------
+        start_month : str, optional
+            Start of the period in 'YYYY-MM' format. Defaults to inception.
+        end_month : str, optional
+            End of the period in 'YYYY-MM' format. Defaults to latest date.
+        bins : int, default 24
+            Number of histogram bins.
+        show_stats_lines : bool, default True
+            Whether to show vertical lines for mean and zero.
+        save : bool, default False
+            If True, saves PNG to output directory.
+
+        Returns
+        -------
+        plotly.graph_objects.Figure
+            Interactive Plotly figure object.
         """
         from math import exp, pi, sqrt
 
@@ -902,27 +1407,34 @@ class Fund:
             fig.write_image(save_path, scale=2)
         return fig
 
-    def compare_worst_performance(self, 
-        benchmark_fund, 
-        n_worst=10, 
-        title="Fund Performance on Benchmark's Worst Days", 
+    def compare_worst_performance(self,
+        benchmark_fund,
+        n_worst=10,
+        title="Fund Performance on Benchmark's Worst Days",
         save=False
     ):
         """
-        Plot the fund's returns on the benchmark's worst-performing dates.
+        Compare fund behavior during benchmark's worst months.
+
+        Creates a bar chart showing how the fund performed during the N worst
+        benchmark months. Useful for assessing downside protection and crisis
+        behavior. Includes average lines for both fund and benchmark.
 
         Parameters
         ----------
-        self : fund object
-            Fund object with monthly returns (dict) indexed by datetime.
-        benchmark_fund : fund object
-            Benchmark object with monthly returns (dict) indexed by datetime.
-        n_worst : int, optional
-            Number of worst benchmark days to consider. Default is 10.
-        title : str, optional
-            Plot title.
-        save : bool, optional
-            Whether to save the chart as a PNG.
+        benchmark_fund : Fund
+            The benchmark Fund object to compare against.
+        n_worst : int, default 10
+            Number of worst benchmark months to analyze.
+        title : str, default "Fund Performance on Benchmark's Worst Days"
+            Chart title.
+        save : bool, default False
+            If True, saves PNG to output directory.
+
+        Returns
+        -------
+        plotly.graph_objects.Figure
+            Interactive grouped bar chart comparing returns.
         """
 
         # Align both series by date
@@ -1028,19 +1540,27 @@ class Fund:
         self, benchmark_fund=None, window=12, title="Rolling Volatility (annually)", save = False
         ):
         """
-        Plot rolling volatility for `fund` (and optionally `benchmark`), 
-        and annotate their vol-of-vol values.
+        Plot rolling volatility time series with optional benchmark comparison.
+
+        Visualizes how fund risk evolves over time using trailing window volatility.
+        Shows historical volatility levels as horizontal reference lines and
+        annotates volatility-of-volatility for stability assessment.
 
         Parameters
         ----------
-        self : fund object
-            Fund-like object with .rolling_volatility(window) and .vol_of_vol(window)
-        benchmark : fund object or None
-            Optional benchmark object with same interface as fund
-        window : int
-            Rolling window size in months
-        title : str
-            Chart title
+        benchmark_fund : Fund, optional
+            Benchmark to overlay for comparison. If None, shows fund only.
+        window : int, default 12
+            Rolling window size in months (12 = trailing 1-year).
+        title : str, default "Rolling Volatility (annually)"
+            Chart title.
+        save : bool, default False
+            If True, saves PNG to output directory.
+
+        Returns
+        -------
+        plotly.graph_objects.Figure
+            Interactive line chart with volatility time series.
         """
         def to_py_dt(idx):
             if isinstance(idx, pd.PeriodIndex):
@@ -1168,15 +1688,39 @@ class Fund:
         return fig
 
     def export_monthly_table(
-        self, language: str = "en", 
-        benchmark_fund: Fund = None, 
+        self, language: str = "en",
+        benchmark_fund: Fund = None,
         benchmark_name: str = None,
         inception_column: bool = False,
         end_month = None,
         save = False,
     ):
         """
-        Export a Matplotlib table of monthly + YTD returns to an interactive HTML file.
+        Create a calendar-style table of monthly returns by year.
+
+        Generates a grid showing Jan-Dec returns for each year, plus YTD and
+        optional since-inception columns. Can include benchmark for comparison
+        (alternating rows). Styled with matplotlib for clean PNG export.
+
+        Parameters
+        ----------
+        language : str, default "en"
+            Language for labels ("en" for English, "cn" for Chinese).
+        benchmark_fund : Fund, optional
+            If provided, adds alternating benchmark rows for comparison.
+        benchmark_name : str, optional
+            Custom display name for benchmark. Uses benchmark_fund.name if None.
+        inception_column : bool, default False
+            If True, adds a cumulative since-inception column.
+        end_month : str, optional
+            Last month to include ('YYYY-MM'). Defaults to latest available.
+        save : bool, default False
+            If True, saves PNG to output directory.
+
+        Returns
+        -------
+        matplotlib.pyplot
+            Matplotlib figure object (call .show() to display).
         """
         # ---------------- configurations ----------------
         month_labels = {
@@ -1396,6 +1940,38 @@ class Fund:
         fix_aspect: bool = False,
         save = False,
     ):
+        """
+        Create a summary table of key performance metrics.
+
+        Generates a styled table with configurable metrics including return,
+        risk, and benchmark-relative measures. Supports vertical (2-column)
+        or horizontal (1-row) layouts.
+
+        Parameters
+        ----------
+        end_month : str
+            End date for calculations in 'YYYY-MM' format.
+        benchmark_fund : Fund, optional
+            Required for beta, correlation, and capture ratio metrics.
+        language : str, default "en"
+            Language for labels ("en" for English, "cn" for Chinese).
+        metrics : list of str, optional
+            Specific metrics to include. Options: 'cagr', 'vol', 'sharpe',
+            'sortino', 'cum', 'mdd', 'beta', 'corr', 'capture', 'win',
+            'best', 'worst', 'aum', 'skew', 'kurt', 'turnover'.
+            If None, uses default order.
+        horizontal : bool, default False
+            If True, creates horizontal single-row layout.
+        fix_aspect : bool, default False
+            If True with horizontal=True, fixes aspect ratio.
+        save : bool, default False
+            If True, saves PNG to output directory.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            Matplotlib figure object.
+        """
         header_fill = "#cbb69d"
         cell_fill = "#f0f0f0"
         text_color = "black"
@@ -1419,6 +1995,7 @@ class Fund:
                 "skew": "Skewness",
                 "kurt": "Kurtosis",
                 "turnover": "Avg. Monthly Turnover",
+                "capture": f"Capture Ratio (vs. {benchmark_fund.name})",
             },
             "cn": {
                 "metric": "指标",
@@ -1438,6 +2015,7 @@ class Fund:
                 "skew": "偏度",
                 "kurt": "峰度",
                 "turnover": "平均月换手率",
+                "capture": f"捕获比率（{benchmark_fund.name}）",
             },
         }
         L = labels.get(language, labels["en"])
@@ -1458,6 +2036,7 @@ class Fund:
             "skew": "[placeholder]",
             "kurt": "[placeholder]",
             "turnover": "[placeholder]",
+            "capture": f"{self.capture_ratio(benchmark_fund, self.inception_date, end_month):.2f}",
         }
 
         default_order = [
@@ -1468,6 +2047,7 @@ class Fund:
             "mdd",
             "beta",
             "corr",
+            "capture",
             "win",
             "best",
             "worst",
@@ -1573,24 +2153,32 @@ class Fund:
         save: bool = False,
         ):
         """
-        Create a correlation table of `self` vs a list of benchmark funds.
+        Create a horizontal table showing correlations to multiple benchmarks.
+
+        Displays fund correlation coefficients against a set of benchmarks
+        in a single-row format. Useful for presenting diversification metrics.
 
         Parameters
         ----------
         end_month : str
-            Month-end (e.g. "2024-01", "2024-01-31", etc.), parsed by parse_month.
-        benchmark_funds : list
-            List of fund-like objects, each with a `.name` attribute and
-            usable in self.correlation_to(benchmark, start_date, end_date).
-        language : {"en", "cn"}
-            Label language.
-        horizontal : bool, default False
-            If False: vertical table (rows = benchmarks, columns = Benchmark | Correlation).
-            If True: horizontal table (columns = benchmarks, 1 row of correlations).
-        fix_aspect : bool, default False
-            For horizontal layout only: optionally fix aspect ratio.
+            End date in 'YYYY-MM' format (used for reference, correlations
+            calculated from inception to latest common date).
+        benchmark_funds : dict
+            Dictionary of {name: Fund} benchmark objects to correlate with.
+        language : str, default "en"
+            Language for labels ("en" for English, "cn" for Chinese).
         save : bool, default False
-            If True, save a PNG and also return the figure.
+            If True, saves PNG to output directory.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            Matplotlib figure object.
+
+        Raises
+        ------
+        ValueError
+            If benchmark_funds is empty.
         """
 
         if not benchmark_funds:
@@ -1692,6 +2280,31 @@ class Fund:
 
 
     def summary_of_a_fund(self, benchmark_fund=None, language="en", save = False):
+        """
+        Generate a comprehensive fund analysis with multiple visualizations.
+
+        Produces a complete fund report including:
+        1. Fund description and contact info (printed)
+        2. Monthly returns calendar table
+        3. Key performance metrics table
+        4. Return distribution histogram
+        5. Rolling volatility time series
+        6. Worst month comparison vs benchmark
+
+        Parameters
+        ----------
+        benchmark_fund : Fund, optional
+            Benchmark for comparative analysis. Required for relative metrics.
+        language : str, default "en"
+            Language for labels ("en" for English, "cn" for Chinese).
+        save : bool, default False
+            If True, saves all charts as PNGs to output directory.
+
+        Returns
+        -------
+        None
+            Displays all charts interactively via .show() calls.
+        """
         print(self.fund_des)
         print(f"Net Exposure = {min(self.net_exposure)*100}% to {max(self.net_exposure)*100}%") if self.net_exposure else None
         print(self.contact_info)
@@ -1715,13 +2328,41 @@ class Fund:
         plot4.show()
         plot5.show()
 
-def compare_funds(fund_dict):
+def compare_funds(fund_dict, benchmark_fund=None):
     """
-    Given a dict with {fund_name: fund_object}, return a DataFrame comparing key metrics.
+    Create a comparison DataFrame of multiple funds with key metrics.
+
+    Aggregates fund metadata and performance statistics into a single table
+    for side-by-side comparison. Includes descriptive info, fees, and all
+    major performance metrics.
+
+    Parameters
+    ----------
+    fund_dict : dict
+        Dictionary mapping fund names to Fund objects.
+    benchmark_fund : Fund, optional
+        If provided, adds a "Capture Ratio" column showing each fund's
+        upside/downside capture relative to the benchmark.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with one row per fund containing:
+        - Metadata: Name, Description, Location, Strategy, Sector, Managers,
+          Contact, AUM, Net Exposure, Net Return, Fees
+        - Dates: Inception Date, Latest Date, # Months
+        - Performance: Cumulative Return, Annualized Return, Volatility,
+          Sharpe Ratio, Sortino Ratio, Max Drawdown, Positive Months
+        - Benchmark-relative (if benchmark_fund provided): Capture Ratio
+
+    Example
+    -------
+    >>> df = compare_funds({"Fund A": fund_a, "Fund B": fund_b}, benchmark_fund=msci)
+    >>> df[["Name", "Annualized Return", "Sharpe Ratio", "Capture Ratio"]]
     """
     data = []
     for name, fund in fund_dict.items():
-        data.append({
+        row = {
             "Name": fund.name,
             "Description": fund.fund_des,
             "Location": fund.investment_location,
@@ -1745,7 +2386,10 @@ def compare_funds(fund_dict):
             "Sortino Ratio": fund.total_sortino,
             "Max Drawdown": fund.total_max_dd,
             "Positive Months": fund.total_pos_months,
-        })
+        }
+        if benchmark_fund is not None:
+            row["Capture Ratio"] = fund.capture_ratio(benchmark_fund, fund.inception_date, fund.latest_date)
+        data.append(row)
 
     df = pd.DataFrame(data)
     return df
