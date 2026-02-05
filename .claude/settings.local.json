@@ -13,7 +13,9 @@
       "Bash(git stash:*)",
       "Bash(git commit -m \"$\\(cat <<''EOF''\nMake app.py fully standalone for Streamlit Cloud\n\n- Remove all imports from src.fofproject package\n- Include standalone Fund class with all metrics calculations\n- Minimal requirements.txt with only necessary dependencies\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
       "Bash(poetry show:*)",
-      "Bash(dir /b \"c:\\\\Users\\\\FOF Analyst\\\\Desktop\\\\fofproject\\\\output\\\\emails\")"
+      "Bash(dir /b \"c:\\\\Users\\\\FOF Analyst\\\\Desktop\\\\fofproject\\\\output\\\\emails\")",
+      "Bash(dir:*)",
+      "Bash(python -m py_compile:*)"
     ]
   }
 }
