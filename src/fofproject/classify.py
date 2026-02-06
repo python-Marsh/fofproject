@@ -283,8 +283,7 @@ def extract_domain_hints(email_address: str) -> list:
 def classify_email_with_gpt(
     client: OpenAI,
     email_metadata: dict,
-    existing_firms: list,
-    attachment_names: list = None
+    existing_firms: list
 ) -> dict:
     """
     Use GPT to classify an email and extract firm information.
@@ -300,203 +299,122 @@ def classify_email_with_gpt(
         "is_third_party": bool  # True if from cap intro, fund admin, prime broker, etc.
     }
     """
-    # Prepare context
-    subject = email_metadata.get("subject", "")
-    from_info = email_metadata.get("from", {}).get("emailAddress", {})
-    from_name = from_info.get("name", "")
-    from_address = from_info.get("address", "")
-    body_preview = email_metadata.get("bodyPreview", "")[:1000]  # Limit body size
-
-    attachments = email_metadata.get("attachments", [])
-    attachment_names = attachment_names or [a.get("name", "") for a in attachments]
-
     # Build the prompt
-    system_prompt = """You are an expert at identifying hedge fund and investment fund related emails.
+    system_prompt = """You are an analyst-classification engine specialized in hedge funds and asset management communications.
 
-Your task is to:
-1. Determine if an email is related to either a hedge fund or asset management firm
-2. Extract the AM FIRM NAME (asset management company), NOT the fund name. This is the hardest part.
-3. Classify the type of email
-
-------------------------------------------------------------------------------------------------------------------------------
-
-To determine if the email is hedge fund related, consider these as hedge fund related:
-- Monthly/quarterly performance updates
-- Webinar or macro event invitations from fund managers
-- Investor letters and newsletters
-- Factsheets and tear sheets
-- NAV estimates and statements
-- Fund marketing materials
-- Subscription/redemption documents
-- Due diligence materials
-- Cap intro presentations featuring multiple managers
-
-NOT hedge fund related:
-- General marketing from brokers (unless it's about specific funds)
-- Meeting invitations non-related to any hedge fund
-- Personal emails
-- IT/system notifications
-- General news without fund-specific content
-
-------------------------------------------------------------------------------------------------------------------------------
-
-To extract the AM FIRM NAME, follow these steps:
-1. Gather clues from the email. We are not trying to find who is sending the email, but whom is this email related to:
-   - Attachment filenames and contents
-   - Investment manager names mentioned in email content
-   - Sender's name and title
-   - Signature block with company information
-   - Email domain (e.g., @springscap.com might be "Springs Capital")
-
-2. MANDATORY SEARCH STEP - Search the internet for the official firm name:
-   - Take the fund name and SEARCH the internet to find the linked company name
-   - If you have a person's name like David Johnson, SEARCH DAVID JOHNSON LINKEDIN to verify which firm they work for
-   - Cross-reference any hints (domain, manager name, fund name) to find the official entity
-   - DO NOT guess or directly use fund name from the email without this MANDATORY verification step
-   - Example: If domain is "citadel.com", search your knowledge to confirm the official name is "CITADEL LLC"
-
-    FIRM NAMES are typically:
-   - The management company or investment advisor
-   - Usually ends with: Capital, Asset Management, Partners, Advisors, Investment Management, Holdings
-   - Examples: "Citadel", "Bridgewater Associates", "Two Sigma", "Point72 Asset Management"
-   
-   You must extract the FIRM NAME (the management company), NOT the fund name. These are different:
-
-    FUND NAMES typically include:
-   - Strategy descriptors: "Equity Long/Short", "Global Macro", "Credit Opportunities", "Multi-Strategy"
-   - Geographic focus: "European", "Asia Pacific", "China Focused", "Emerging Markets"
-   - Structure terms: "Master Fund", "Feeder Fund", "Offshore Fund", "Onshore Fund"
-   - Class designators: "Class A", "Series B", "USD Class"
-    
-    If no firm name is explicitly stated, strip out fund-specific descriptors from fund name to get the core firm name (e.g., "ABC Asia Equity Long/Short Fund" -> "ABC Capital").
-
-3. Decide the firm name - The firm name will be used as a folder name, so use the canonical/official name that would be recognized industry-wide.
-    Be very careful with acronyms as firms often use abbreviated names. Look up for clues if you identify potential acronyms:
-        - "MS" likely means "Morgan Stanley"
-        - "GS" likely means "Goldman Sachs"
-        - "JPM" or "JP" likely means "JPMorgan"
-        - "UBS", "HSBC", "CS" (Credit Suisse) are common abbreviations
-        - Two or three letter abbreviations in email domains or signatures often represent well-known firms
-
-CRITICAL - INFORMATION SOURCE PRIORITY:
-You MUST follow this priority hierarchy when identifying the Asset Management (AM) firm:
-
-**HIGHEST PRIORITY - Explicit Statement:**
-The email content or an attachment explicitly states which AM firm manages the fund.
-- Look for "Managed by:", "Investment Manager:", "Fund Manager:", explicit firm signatures within the attachments or email body
-- If explicitly stated, use this as the definitive answer
-- Set firm_name_source to "email_content" or "attachment"
-
-**MEDIUM PRIORITY - External Verification:**
-No AM firm is explicitly mentioned in the email.
-- First, identify the FUND NAME from: the attachment file name, the attachement content, the email body, or the email domain
-- Then, SEARCH your knowledge base/external sources to find which AM firm manages that specific fund
-- Only use this if you can find reliable external confirmation linking the fund to its managing firm
-- Set firm_name_source to "email_content" or "attachment" with reasoning explaining the external verification
-
-**MEDIUM-LOW PRIORITY - Inference Without Verification:**
-No firm can be confirmed through external sources.
-- Infer the AM firm directly from:
-  * The fund name (e.g., "ABC Asia Fund" likely managed by "ABC Capital" or "ABC Asset Management")
-  * The sender's email domain (e.g., @springscap.com likely means "Springs Capital")
-- Use this ONLY when external verification performed or is not possible
-- Set firm_name_source to "email_address" or "subject"
-
-**LOWEST PRIORITY - Non-Hedge Fund:**
-- Neither a firm name nor a fund name is available
-- The email domain does not provide a reliable indication of fund ownership
-- This should normally be classified as NOT hedge fund related (is_hedge_fund_related: false)
-
-In your reasoning, ALWAYS explain:
-1. Which priority level you used (HIGHEST/MEDIUM/MEDIUM-LOW/LOWEST)
-2. What information source you relied on
-3. What search/verification you performed to identify the official name
-
------------------------------------------------------------------------------------------------------------------------------------------------
-
-THIRD-PARTY INTERMEDIARIES:
-These firms are intermediaries (cap intro, fund admin, prime brokers, placement agents, data providers):
-
-Cap Intro / Capital Introduction:
-- IConnections, With Intelligence, Agecroft Partners, Park Hill Group, Eaton Partners, HFM (Hedge Fund Manager)
-
-Fund Administrators:
-- CITCO, Apex Group, ApexConnect, SS&C Technologies, NAV Consulting, Trident Trust, Custom House, Alter Domus
-
-Prime Brokers (when sending cap intro or research):
-- Goldman Sachs (GS), Morgan Stanley (MS), Bank of America (BofA/BAML), JPMorgan, UBS, Credit Suisse, Barclays
-
-Other Intermediaries:
-- Marex, Preqin, eVestment, Bloomberg, Refinitiv, PivotalPath, HFR (Hedge Fund Research)
-
-IMPORTANT FOR THIRD-PARTY EMAILS:
-When an email is FROM a third-party intermediary AND contains hedge fund related content:
-- Return the THIRD-PARTY SENDER'S firm name (e.g., "ICONNECTIONS", "CITCO", "APEX GROUP")
-- Do NOT extract the underlying hedge funds mentioned in the email content
-- Set is_third_party to true
-- The email will be filed under the third-party sender's name
-
-------------------------------------------------------------------------------------------------------------------------------
-
-Return your analysis as JSON."""
-
-    user_prompt = f"""
-Analyze the following email and return a STRICT JSON object only.
-
-EMAIL DETAILS
--------------
-Subject: {subject}
-
-From: {from_name} <{from_address}>
-
-Body Preview:
-{body_preview}
-
-Attachments:
-{', '.join(attachment_names) if attachment_names else 'None'}
-
-Known existing firms in our database:
-{', '.join(existing_firms[:20]) if existing_firms else 'None yet'}
-
-TASK OBJECTIVES
----------------
-1. Determine whether this email is related to a hedge fund or asset management firm.
+Your job is to:
+1. Determine whether an email is related to a hedge fund or asset management firm.
 2. Identify the CANONICAL ASSET MANAGEMENT FIRM NAME (the management company), NOT the fund name.
 3. Classify the email type.
 
-IMPORTANT CLARIFICATIONS
-------------------------
-- Do NOT return the fund name.
-- The firm name should be the official, industry-recognized asset manager.
-- If the email is from a THIRD-PARTY INTERMEDIARY (cap intro, fund admin, prime broker, etc.), return the THIRD-PARTY firm's name and set is_third_party = true.
-- You MUST follow the priority hierarchy below when identifying the firm.
+────────────────────────────────────────
+DEFINITIONS
+────────────────────────────────────────
+Hedge fund / asset management related emails include:
+- Monthly, quarterly, or annual performance updates
+- Investor letters, newsletters, and reports
+- Factsheets and tear sheets
+- NAV estimates or statements
+- Fund marketing and fundraising materials
+- Subscription / redemption documents
+- Due diligence materials
+- Cap intro materials
 
-FIRM IDENTIFICATION PRIORITY HIERARCHY (MANDATORY)
--------------------------------------------------
-highest:
-- Explicit statement in email body or attachment.
+Not hedge fund related:
+- Personal emails
+- IT / system notifications
+- General broker marketing not tied to specific funds
+- Generic news with no fund or manager reference
 
-medium:
-- Fund name identified; verified externally to find the manager.
+────────────────────────────────────────
+ASSET MANAGEMENT FIRM IDENTIFICATION (CRITICAL)
+────────────────────────────────────────
+You must extract the ASSET MANAGEMENT FIRM (investment manager), not the fund.
 
-medium_low:
-- Inference from domain or naming when verification is not possible.
+FIRM ≠ FUND
 
-lowest:
-- Not hedge fund related or insufficient information.
+Fund names often include:
+- Strategy descriptors (e.g., Global Macro, Long/Short)
+- Structures (Master, Feeder, SP, Class A)
+- Geography or currency
 
-OUTPUT FORMAT (STRICT JSON)
----------------------------
-Return a JSON object with EXACTLY these fields:
+Firm names are the management company and typically end with:
+Capital, Asset Management, Investment Management, Advisors, Partners, Holdings
+
+────────────────────────────────────────
+PRIORITY HIERARCHY (MANDATORY)
+────────────────────────────────────────
+You MUST follow this hierarchy when identifying the firm:
+
+HIGHEST:
+- Explicitly stated asset management firm in the email body or attachment
+  (e.g., signature, “Managed by”, letterhead)
+
+MEDIUM:
+- Fund name identified → you must verify (using the web search tool calling) which firm manages that fund
+
+MEDIUM-LOW:
+- No verification possible → infer from domain or fund naming
+
+LOWEST:
+- Not hedge fund related or insufficient information
+
+You MUST be able to explain:
+- Which priority level was used
+- What source was relied on
+- What verification or reasoning was performed
+
+────────────────────────────────────────
+THIRD-PARTY INTERMEDIARIES
+────────────────────────────────────────
+Third-party intermediaries include:
+- Cap intro firms
+- Fund administrators
+- Prime brokers
+- Data providers
+
+The email domain name may differ from the ASSET MANAGEMENT FIRM without implying a third-party intermediary (e.g., forwarded emails or simply when the AM firm name manages a materially different fund name).
+To be more certain, the following are some examples of third-party firms (exhaustive):
+- Cap Intro / Capital Introduction: - IConnections, With Intelligence, Agecroft Partners, Park Hill Group, Eaton Partners, HFM (Hedge Fund Manager) 
+- Fund Administrators: - CITCO, Apex Group, ApexConnect, SS&C Technologies, NAV Consulting, Trident Trust, Custom House, Alter Domus 
+- Prime Brokers (when sending cap intro or research): - Goldman Sachs (GS), Morgan Stanley (MS), Bank of America (BofA/BAML), JPMorgan, UBS, Credit Suisse, Barclays 
+- Other Intermediaries: - Marex, Preqin, eVestment, Bloomberg, Refinitiv, PivotalPath, HFR (Hedge Fund Research)
+
+If an email is from a third-party intermediary and contains hedge fund content:
+- Return the THIRD-PARTY firm name
+- Set is_third_party = true
+- Do NOT return underlying hedge fund names
+
+────────────────────────────────────────
+NAMING RULES
+────────────────────────────────────────
+- Use canonical, industry-recognized firm names
+- Clean the "," "LLC", "Ltd.", "Inc.", "LP", "LLP", "Corporation", "Corp." suffixes when identifying the firm name, but recognize them as indicators of a firm name
+- Expand acronyms when possible (e.g., E20 → E20 Capital)
+- Do NOT guess firm names without justification
+- If no firm can be identified, return an empty string
+
+You must follow these rules exactly."""
+
+    user_prompt = f"""Analyze the following email metadata and return the classification.
+
+EMAIL METADATA:
+{json.dumps(email_metadata, indent=2, default=str)}
+
+EXISTING FIRMS (for de-duplication only):
+{json.dumps(existing_firms[:20] if existing_firms else [], indent=2)}
+
+OUTPUT REQUIREMENTS:
+Return a STRICT JSON object with EXACTLY the following fields:
 
 {{
   "is_hedge_fund_related": true or false,
   "confidence": number between 0 and 1,
   "is_third_party": true or false,
   "firm_name": "string",
-  "firm_name_source": "email_content" | "attachment" | "email_address" | "subject" | "unknown",
+  "firm_name_source": "email_content" | "attachment" | "web search"  | "email_address" | "subject" | "unknown",
   "source_priority": "highest" | "medium" | "medium_low" | "lowest",
-  "reasoning": "string",
+  "reasoning": "brief explanation following the priority hierarchy",
   "email_type": "Monthly performance update" |
                 "Quarterly performance update" |
                 "Annual report" |
@@ -510,8 +428,7 @@ Return a JSON object with EXACTLY these fields:
                 "Other"
 }}
 
-Do NOT include explanations outside the JSON.
-Do NOT guess firm names without justification.
+Return JSON only. No commentary.
 """
 
 
@@ -600,8 +517,7 @@ def copy_email_to_firm_folder(
 def classify_and_organize_emails(
     email_input_dir: Path = None,
     output_dir: Path = None,
-    force_reclassify: bool = False,
-    dry_run: bool = False
+    force_reclassify: bool = False
 ) -> dict:
     """
     Main function to classify and organize all emails.
@@ -610,7 +526,6 @@ def classify_and_organize_emails(
         email_input_dir: Directory containing email folders
         output_dir: Directory for organized firm folders
         force_reclassify: If True, ignore cache and reclassify all
-        dry_run: If True, don't actually copy files
 
     Returns:
         Classification report
@@ -759,12 +674,11 @@ def classify_and_organize_emails(
                     classification_entry["reassignment"] = reassignment
 
                 # Copy to firm folder (using sanitized name and parent folder based on third-party status)
-                if not dry_run:
-                    dest = copy_email_to_firm_folder(email_folder, canonical_name, output_dir, is_third_party)
-                    classification_entry["destination"] = str(dest)
-                    parent_folder = "3rd parties" if is_third_party else "hedge funds"
-                    folder_display = sanitize_folder_name(canonical_name)
-                    print(f"    -> Copied to: {parent_folder}/{folder_display}/")
+                dest = copy_email_to_firm_folder(email_folder, canonical_name, output_dir, is_third_party)
+                classification_entry["destination"] = str(dest)
+                parent_folder = "3rd parties" if is_third_party else "hedge funds"
+                folder_display = sanitize_folder_name(canonical_name)
+                print(f"    -> Copied to: {parent_folder}/{folder_display}/")
             else:
                 report["hedge_fund_related"] -= 1  # Correction: no firm name found
                 report["non_hedge_fund"] += 1
@@ -776,9 +690,8 @@ def classify_and_organize_emails(
         report["classifications"].append(classification_entry)
 
     # Save updated data
-    if not dry_run:
-        save_firm_mappings(firm_mappings, output_dir)
-        save_classification_cache(classification_cache, output_dir)
+    save_firm_mappings(firm_mappings, output_dir)
+    save_classification_cache(classification_cache, output_dir)
 
     # Save report
     report_path = output_dir / CLASSIFICATION_REPORT_FILE
@@ -1315,6 +1228,302 @@ def list_firms(output_dir: Path = None) -> dict:
     return mappings.get("canonical_names", {})
 
 
+def list_firm_aliases(firm_name: str, output_dir: Path = None) -> list:
+    """
+    List all aliases for a specific firm.
+
+    Args:
+        firm_name: The canonical firm name to look up
+        output_dir: Output directory
+
+    Returns:
+        List of aliases for the firm
+    """
+    output_dir = output_dir or DEFAULT_OUTPUT_DIR
+    mappings = load_firm_mappings(output_dir)
+    canonical_names = mappings.get("canonical_names", {})
+
+    # Find the firm (case-insensitive)
+    firm_key = None
+    for key in canonical_names:
+        if key.lower() == firm_name.lower():
+            firm_key = key
+            break
+
+    if not firm_key:
+        print(f"Firm '{firm_name}' not found in mappings.")
+        return []
+
+    aliases = canonical_names[firm_key].get("aliases", [])
+
+    print(f"\nAliases for '{firm_key}':")
+    print("-" * 40)
+    if aliases:
+        for i, alias in enumerate(aliases, 1):
+            print(f"  {i}. {alias}")
+    else:
+        print("  (No aliases defined)")
+
+    return aliases
+
+
+def delete_firm_alias(firm_name: str, alias_to_delete: str, output_dir: Path = None) -> bool:
+    """
+    Delete a specific alias from a firm.
+
+    Args:
+        firm_name: The canonical firm name
+        alias_to_delete: The alias to remove
+        output_dir: Output directory
+
+    Returns:
+        True if alias was deleted, False otherwise
+    """
+    output_dir = output_dir or DEFAULT_OUTPUT_DIR
+    mappings = load_firm_mappings(output_dir)
+    canonical_names = mappings.get("canonical_names", {})
+
+    # Find the firm (case-insensitive)
+    firm_key = None
+    for key in canonical_names:
+        if key.lower() == firm_name.lower():
+            firm_key = key
+            break
+
+    if not firm_key:
+        print(f"Firm '{firm_name}' not found in mappings.")
+        return False
+
+    aliases = canonical_names[firm_key].get("aliases", [])
+
+    # Find and remove the alias (case-insensitive match)
+    alias_found = None
+    for alias in aliases:
+        if alias.lower() == alias_to_delete.lower():
+            alias_found = alias
+            break
+
+    if alias_found:
+        aliases.remove(alias_found)
+        canonical_names[firm_key]["aliases"] = aliases
+        save_firm_mappings(mappings, output_dir)
+        print(f"Deleted alias '{alias_found}' from firm '{firm_key}'.")
+        return True
+    else:
+        print(f"Alias '{alias_to_delete}' not found for firm '{firm_key}'.")
+        return False
+
+
+def add_firm_alias(firm_name: str, new_alias: str, output_dir: Path = None) -> bool:
+    """
+    Add a new alias to a firm.
+
+    Args:
+        firm_name: The canonical firm name
+        new_alias: The alias to add
+        output_dir: Output directory
+
+    Returns:
+        True if alias was added, False otherwise
+    """
+    output_dir = output_dir or DEFAULT_OUTPUT_DIR
+    mappings = load_firm_mappings(output_dir)
+    canonical_names = mappings.get("canonical_names", {})
+
+    # Find the firm (case-insensitive)
+    firm_key = None
+    for key in canonical_names:
+        if key.lower() == firm_name.lower():
+            firm_key = key
+            break
+
+    if not firm_key:
+        print(f"Firm '{firm_name}' not found in mappings.")
+        return False
+
+    aliases = canonical_names[firm_key].get("aliases", [])
+
+    # Check if alias already exists (case-insensitive)
+    for alias in aliases:
+        if alias.lower() == new_alias.lower():
+            print(f"Alias '{new_alias}' already exists for firm '{firm_key}'.")
+            return False
+
+    # Add the new alias
+    aliases.append(new_alias)
+    canonical_names[firm_key]["aliases"] = aliases
+    save_firm_mappings(mappings, output_dir)
+    print(f"Added alias '{new_alias}' to firm '{firm_key}'.")
+    return True
+
+
+def manage_firm_aliases(output_dir: Path = None):
+    """
+    Interactive menu to manage firm aliases (list and delete).
+    """
+    output_dir = output_dir or DEFAULT_OUTPUT_DIR
+
+    print("\n" + "=" * 50)
+    print("MANAGE FIRM ALIASES")
+    print("=" * 50)
+
+    # First, list all firms
+    mappings = load_firm_mappings(output_dir)
+    canonical_names = mappings.get("canonical_names", {})
+
+    if not canonical_names:
+        print("No firms found in mappings.")
+        return
+
+    print("\nAvailable firms:")
+    for i, firm in enumerate(sorted(canonical_names.keys()), 1):
+        alias_count = len(canonical_names[firm].get("aliases", []))
+        print(f"  {i}. {firm} ({alias_count} aliases)")
+
+    firm_name = input("\nEnter firm name to manage aliases: ").strip()
+    if not firm_name:
+        print("No firm name provided.")
+        return
+
+    # List aliases for the firm
+    aliases = list_firm_aliases(firm_name, output_dir)
+
+    print("\nOptions:")
+    print("  1. Add a new alias")
+    print("  2. Delete a specific alias")
+    print("  3. Exit")
+
+    choice = input("\nEnter choice (1-3): ").strip()
+
+    if choice == "1":
+        new_alias = input("Enter new alias to add: ").strip()
+        if new_alias:
+            add_firm_alias(firm_name, new_alias, output_dir)
+        else:
+            print("No alias provided.")
+    elif choice == "2":
+        if not aliases:
+            print("No aliases to delete.")
+            return
+        alias_to_delete = input("Enter alias to delete: ").strip()
+        if alias_to_delete:
+            delete_firm_alias(firm_name, alias_to_delete, output_dir)
+        else:
+            print("No alias provided.")
+    elif choice == "3":
+        print("Exiting alias management.")
+    else:
+        print("Invalid choice.")
+
+
+def switch_firm_category(output_dir: Path = None):
+    """
+    Switch a firm between hedge fund and 3rd party categories.
+    Moves all emails from one category folder to the other and reclassifies.
+    """
+    output_dir = output_dir or DEFAULT_OUTPUT_DIR
+
+    print("\n" + "=" * 50)
+    print("SWITCH FIRM CATEGORY")
+    print("=" * 50)
+
+    # Show existing folders in both categories
+    hedge_funds_dir = output_dir / "hedge funds"
+    third_parties_dir = output_dir / "3rd parties"
+
+    print("\nCurrent hedge fund firms:")
+    if hedge_funds_dir.exists():
+        hf_firms = [f.name for f in hedge_funds_dir.iterdir() if f.is_dir()]
+        for firm in sorted(hf_firms):
+            print(f"  - {firm}")
+    else:
+        print("  (none)")
+
+    print("\nCurrent 3rd party firms:")
+    if third_parties_dir.exists():
+        tp_firms = [f.name for f in third_parties_dir.iterdir() if f.is_dir()]
+        for firm in sorted(tp_firms):
+            print(f"  - {firm}")
+    else:
+        print("  (none)")
+
+    firm_name = input("\nEnter firm name to switch: ").strip()
+    if not firm_name:
+        print("No firm name provided.")
+        return
+
+    safe_firm_name = sanitize_folder_name(firm_name)
+
+    # Determine current category
+    hf_path = hedge_funds_dir / safe_firm_name
+    tp_path = third_parties_dir / safe_firm_name
+
+    if hf_path.exists() and hf_path.is_dir():
+        current_category = "hedge funds"
+        new_category = "3rd parties"
+        source_path = hf_path
+        dest_path = tp_path
+    elif tp_path.exists() and tp_path.is_dir():
+        current_category = "3rd parties"
+        new_category = "hedge funds"
+        source_path = tp_path
+        dest_path = hf_path
+    else:
+        print(f"Firm '{firm_name}' not found in either 'hedge funds' or '3rd parties' folders.")
+        return
+
+    print(f"\nFirm '{safe_firm_name}' is currently in '{current_category}'.")
+    confirm = input(f"Move to '{new_category}'? (y/n): ").strip().lower()
+
+    if confirm != 'y':
+        print("Operation cancelled.")
+        return
+
+    # Create destination directory if needed
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Move the firm folder
+    if dest_path.exists():
+        # Merge: move all email subfolders from source to dest
+        emails_moved = 0
+        for item in source_path.iterdir():
+            if item.is_dir():
+                item_dest = dest_path / item.name
+                if item_dest.exists():
+                    shutil.rmtree(item_dest)
+                shutil.move(str(item), str(item_dest))
+                emails_moved += 1
+        # Remove empty source folder
+        try:
+            shutil.rmtree(source_path)
+        except Exception as e:
+            print(f"Warning: Could not delete source folder: {e}")
+        print(f"Merged {emails_moved} email(s) into existing '{new_category}/{safe_firm_name}/'")
+    else:
+        # Simple move
+        shutil.move(str(source_path), str(dest_path))
+        email_count = len([f for f in dest_path.iterdir() if f.is_dir()])
+        print(f"Moved '{safe_firm_name}' with {email_count} email(s) to '{new_category}/'")
+
+    # Update classification cache to reflect new is_third_party status
+    cache = load_classification_cache(output_dir)
+    new_is_third_party = (new_category == "3rd parties")
+    updated_count = 0
+
+    for email_id, classification in cache.items():
+        firm = classification.get("firm_name", "")
+        normalized = normalize_firm_name(firm, load_firm_mappings(output_dir))
+        if normalized.lower() == firm_name.upper().lower() or sanitize_folder_name(normalized) == safe_firm_name:
+            classification["is_third_party"] = new_is_third_party
+            updated_count += 1
+
+    save_classification_cache(cache, output_dir)
+
+    print(f"\nCategory switch complete:")
+    print(f"  - Firm: {safe_firm_name}")
+    print(f"  - From: {current_category}")
+    print(f"  - To: {new_category}")
+    print(f"  - Cache entries updated: {updated_count}")
 
 
 def main():
@@ -1326,59 +1535,62 @@ def main():
     print("=" * 60)
     print("\nSelect mode:")
     print("  1. Classify and organize all emails")
-    print("  2. Classify only (dry run - no file copying)")
-    print("  3. Force reclassify all (ignore cache)")
-    print("  4. List known firms")
-    print("  5. List all overrides")
-    print("  6. Add email override (specific address -> firm)")
-    print("  7. Add domain override (all from domain -> firm)")
-    print("  8. Reassign/rename firm (old firm -> new firm, merges if new exists)")
-    print("  9. Monitor for new emails (continuous)")
-    print(" 10. Check for new emails (one-time)")
+    print("  2. Force reclassify all (ignore cache)")
+    print("  3. List known firms")
+    print("  4. List all overrides")
+    print("  5. Add email override (specific address -> firm)")
+    print("  6. Add domain override (all from domain -> firm)")
+    print("  7. Reassign/rename firm (old firm -> new firm, merges if new exists)")
+    print("  8. Monitor for new emails (continuous)")
+    print("  9. Check for new emails (one-time)")
+    print(" 10. Manage firm aliases (list/delete)")
+    print(" 11. Switch firm between hedge fund and 3rd party")
     print()
 
     if len(sys.argv) > 1:
         mode = sys.argv[1]
     else:
-        mode = input("Enter mode (1-10): ").strip()
+        mode = input("Enter mode (1-11): ").strip()
 
     if mode == "1":
         classify_and_organize_emails()
     elif mode == "2":
-        classify_and_organize_emails(dry_run=True)
-    elif mode == "3":
         classify_and_organize_emails(force_reclassify=True)
-    elif mode == "4":
+    elif mode == "3":
         list_firms()
-    elif mode == "5":
+    elif mode == "4":
         list_overrides()
-    elif mode == "6":
+    elif mode == "5":
         email = input("Enter email address: ").strip()
         firm = input("Enter firm name to assign: ").strip()
         if email and firm:
             add_email_override(email, firm)
         else:
             print("Email and firm name are required.")
-    elif mode == "7":
+    elif mode == "6":
         domain = input("Enter domain (without @): ").strip()
         firm = input("Enter firm name to assign: ").strip()
         if domain and firm:
             add_domain_override(domain, firm)
         else:
             print("Domain and firm name are required.")
-    elif mode == "8":
+    elif mode == "7":
         old_firm = input("Enter old firm name to reassign/remove: ").strip()
         new_firm = input("Enter new firm name (will be created if doesn't exist): ").strip()
         if old_firm and new_firm:
             reassign_firm(old_firm, new_firm)
         else:
             print("Both firm names are required.")
-    elif mode == "9":
+    elif mode == "8":
         interval = input("Poll interval in seconds (default 30): ").strip()
         interval = int(interval) if interval.isdigit() else 30
         monitor_and_classify(poll_interval=interval, run_once=False)
-    elif mode == "10":
+    elif mode == "9":
         monitor_and_classify(run_once=True)
+    elif mode == "10":
+        manage_firm_aliases()
+    elif mode == "11":
+        switch_firm_category()
     else:
         print("Invalid mode.")
 
