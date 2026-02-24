@@ -440,9 +440,9 @@ def update_index(base_dir: Path, email_folder: Path, metadata: dict):
             "emails": {}
         }
 
-    # Add/update email entry
+    # Add/update email entry - INSERT AT BEGINNING to keep newest at top
     msg_id = metadata.get("id")
-    index["emails"][msg_id] = {
+    new_entry = {
         "folder": email_folder.name,
         "subject": metadata.get("subject"),
         "from": metadata.get("from", {}).get("emailAddress", {}).get("address"),
@@ -450,6 +450,9 @@ def update_index(base_dir: Path, email_folder: Path, metadata: dict):
         "hasAttachments": metadata.get("hasAttachments"),
         "attachmentCount": len(metadata.get("attachments", [])),
     }
+
+    # Prepend new entry so newest emails stay at top
+    index["emails"] = {msg_id: new_entry, **index["emails"]}
     index["totalEmails"] = len(index["emails"])
     index["lastUpdated"] = datetime.now().isoformat()
 

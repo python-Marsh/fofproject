@@ -15,7 +15,9 @@
       "Bash(poetry show:*)",
       "Bash(dir /b \"c:\\\\Users\\\\FOF Analyst\\\\Desktop\\\\fofproject\\\\output\\\\emails\")",
       "Bash(dir:*)",
-      "Bash(python -m py_compile:*)"
+      "Bash(python -m py_compile:*)",
+      "Bash(poetry run pytest:*)",
+      "WebFetch(domain:developers.notion.com)"
     ]
   }
 }
