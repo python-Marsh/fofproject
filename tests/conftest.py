@@ -109,8 +109,9 @@ def output_dir(tmp_path):
 
 @pytest.fixture
 def mock_gpt_hedge_fund_response():
-    """Mock GPT response for a hedge fund email (new nested format)."""
+    """Mock GPT response for a hedge fund email (v2.0 artifact-based format)."""
     return {
+        "schema_version": "2.0",
         "email_classification": {
             "is_hedge_fund_related": True,
             "confidence": 0.95,
@@ -121,15 +122,52 @@ def mock_gpt_hedge_fund_response():
         },
         "firm_name": "TEST CAPITAL",
         "firm_name_source": "email_content",
+        "artifact_assignments": {
+            "included_attachments": [],
+            "included_links": [
+                {
+                    "artifact_id": "link:0",
+                    "artifact_type": "link",
+                    "url": "https://testcapital.com/factsheet.pdf",
+                    "description": "Monthly factsheet",
+                    "link_type": "factsheet",
+                    "assigned_firm_name": "TEST CAPITAL",
+                    "assigned_firm_id": "firm_test_capital",
+                    "assigned_fund_name": "",
+                    "assigned_fund_id": "",
+                    "confidence": 0.90,
+                    "method": "link_context",
+                    "evidence": "fund factsheet URL",
+                    "reason_code": "fund_document",
+                }
+            ],
+            "skipped_attachments": [],
+            "skipped_links": [],
+            "summary": {
+                "total_attachments": 0,
+                "total_links": 1,
+                "included_count": 1,
+                "skipped_count": 0,
+            },
+        },
         "attachments": [],
-        "fund_related_links": [],
+        "fund_related_links": [
+            {
+                "url": "https://testcapital.com/factsheet.pdf",
+                "description": "Monthly factsheet",
+                "link_type": "factsheet",
+                "assigned_firm_id": "firm_test_capital",
+                "assigned_fund_id": "",
+            }
+        ],
     }
 
 
 @pytest.fixture
 def mock_gpt_third_party_response():
-    """Mock GPT response for a third-party intermediary email (new nested format)."""
+    """Mock GPT response for a third-party intermediary email (v2.0 artifact-based format)."""
     return {
+        "schema_version": "2.0",
         "email_classification": {
             "is_hedge_fund_related": True,
             "confidence": 0.90,
@@ -140,15 +178,52 @@ def mock_gpt_third_party_response():
         },
         "firm_name": "GOLDMAN SACHS",
         "firm_name_source": "email_content",
+        "artifact_assignments": {
+            "included_attachments": [],
+            "included_links": [
+                {
+                    "artifact_id": "link:0",
+                    "artifact_type": "link",
+                    "url": "https://gs.com/capintro/deck.pdf",
+                    "description": "Cap intro deck",
+                    "link_type": "factsheet",
+                    "assigned_firm_name": "GOLDMAN SACHS",
+                    "assigned_firm_id": "firm_goldman_sachs",
+                    "assigned_fund_name": "",
+                    "assigned_fund_id": "",
+                    "confidence": 0.88,
+                    "method": "link_context",
+                    "evidence": "cap intro document",
+                    "reason_code": "fund_document",
+                }
+            ],
+            "skipped_attachments": [],
+            "skipped_links": [],
+            "summary": {
+                "total_attachments": 0,
+                "total_links": 1,
+                "included_count": 1,
+                "skipped_count": 0,
+            },
+        },
         "attachments": [],
-        "fund_related_links": [],
+        "fund_related_links": [
+            {
+                "url": "https://gs.com/capintro/deck.pdf",
+                "description": "Cap intro deck",
+                "link_type": "factsheet",
+                "assigned_firm_id": "firm_goldman_sachs",
+                "assigned_fund_id": "",
+            }
+        ],
     }
 
 
 @pytest.fixture
 def mock_gpt_not_hedge_fund_response():
-    """Mock GPT response for a non-hedge-fund email (new nested format)."""
+    """Mock GPT response for a non-hedge-fund email (v2.0 artifact-based format)."""
     return {
+        "schema_version": "2.0",
         "email_classification": {
             "is_hedge_fund_related": False,
             "confidence": 0.85,
@@ -159,6 +234,18 @@ def mock_gpt_not_hedge_fund_response():
         },
         "firm_name": "",
         "firm_name_source": "unknown",
+        "artifact_assignments": {
+            "included_attachments": [],
+            "included_links": [],
+            "skipped_attachments": [],
+            "skipped_links": [],
+            "summary": {
+                "total_attachments": 0,
+                "total_links": 0,
+                "included_count": 0,
+                "skipped_count": 0,
+            },
+        },
         "attachments": [],
         "fund_related_links": [],
     }

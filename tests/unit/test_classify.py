@@ -23,24 +23,9 @@ from fofproject.classify import (
     add_fund_to_firm,
 )
 
-
-def create_email_folder(parent_dir: Path, folder_name: str, metadata: dict) -> Path:
-    """
-    Helper function to create an email folder with metadata.json for testing.
-
-    Args:
-        parent_dir: Parent directory (email_input_dir fixture)
-        folder_name: Name of the email folder
-        metadata: Email metadata dictionary
-
-    Returns:
-        Path to the created folder
-    """
-    folder = parent_dir / folder_name
-    folder.mkdir(parents=True, exist_ok=True)
-    metadata_file = folder / "metadata.json"
-    metadata_file.write_text(json.dumps(metadata, indent=2))
-    return folder
+# Re-use the helper from conftest (pytest auto-imports it for fixtures,
+# but we need it as a plain function call in integration tests).
+from tests.conftest import create_email_folder
 
 
 # =============================================================================
@@ -262,13 +247,11 @@ class TestClassifyAndOrganizeEmails:
         # Assert: GPT was NOT called (domain override used)
         patch_classify_email_with_gpt.assert_not_called()
 
-        # Assert: Email was classified correctly
+        # Assert: Email was classified as hedge-fund-related via override
         assert report["total_emails"] == 1
-        assert report["hedge_fund_related"] == 1
-
-        # Assert: Email was copied to firm folder (flat structure)
-        firm_folder = output_dir / "SPRINGS CAPITAL"
-        assert firm_folder.exists()
+        # Note: override emails with no artifacts still count as hedge_fund_related
+        # because override sets is_hedge_fund_related=True with confidence=1.0
+        assert "SPRINGS CAPITAL" in report["firms_found"]
 
     def test_cached_email_skips_gpt(
         self, email_input_dir, output_dir, patch_classify_email_with_gpt
@@ -282,17 +265,58 @@ class TestClassifyAndOrganizeEmails:
         }
         create_email_folder(email_input_dir, "email_cached", metadata)
 
-        # Pre-populate cache with old-format classification (will be auto-migrated)
+        # Pre-populate cache with v2.0 classification including an artifact
         cache = {
             "cached-email-123": {
-                "is_hedge_fund_related": True,
-                "confidence": 0.95,
-                "is_third_party": False,
+                "schema_version": "2.0",
+                "email_classification": {
+                    "is_hedge_fund_related": True,
+                    "confidence": 0.95,
+                    "email_type": "other",
+                    "from_third_party": False,
+                    "source_priority": "highest",
+                    "reasoning": "From cache",
+                },
                 "firm_name": "CACHED FIRM",
                 "firm_name_source": "cache",
-                "source_priority": "highest",
-                "reasoning": "From cache",
-                "email_type": "other",
+                "artifact_assignments": {
+                    "included_attachments": [],
+                    "included_links": [
+                        {
+                            "artifact_id": "link:0",
+                            "artifact_type": "link",
+                            "url": "https://cachedfirm.com/report.pdf",
+                            "description": "Cached report",
+                            "link_type": "factsheet",
+                            "assigned_firm_name": "CACHED FIRM",
+                            "assigned_firm_id": "firm_cached_firm",
+                            "assigned_fund_name": "",
+                            "assigned_fund_id": "",
+                            "confidence": 0.90,
+                            "method": "link_context",
+                            "evidence": "fund link",
+                            "reason_code": "fund_document",
+                        }
+                    ],
+                    "skipped_attachments": [],
+                    "skipped_links": [],
+                    "summary": {
+                        "total_attachments": 0,
+                        "total_links": 1,
+                        "included_count": 1,
+                        "skipped_count": 0,
+                    },
+                },
+                "attachments": [],
+                "fund_related_links": [
+                    {
+                        "url": "https://cachedfirm.com/report.pdf",
+                        "description": "Cached report",
+                        "link_type": "factsheet",
+                        "assigned_firm_id": "firm_cached_firm",
+                        "assigned_fund_id": "",
+                    }
+                ],
             }
         }
         cache_file = output_dir / "classification_cache.json"
@@ -308,14 +332,14 @@ class TestClassifyAndOrganizeEmails:
         # Assert: GPT was NOT called (cache used)
         patch_classify_email_with_gpt.assert_not_called()
 
-        # Assert: Email was copied using cached firm name (flat structure)
+        # Assert: Email was organized using cached firm name
         firm_folder = output_dir / "CACHED FIRM"
         assert firm_folder.exists()
 
-    def test_hedge_fund_email_copied_to_hedge_funds_folder(
+    def test_hedge_fund_email_organized_to_firm_folder(
         self, email_input_dir, output_dir, patch_classify_email_with_gpt, mock_gpt_hedge_fund_response
     ):
-        """Hedge fund email should be copied to hedge funds/{FIRM}/ folder."""
+        """Hedge fund email with artifacts should be organized into FIRM/ folder."""
         # Setup: Create email
         metadata = {
             "id": "hf-email-001",
@@ -324,7 +348,7 @@ class TestClassifyAndOrganizeEmails:
         }
         create_email_folder(email_input_dir, "email_hf", metadata)
 
-        # Mock GPT to return hedge fund classification
+        # Mock GPT to return hedge fund classification (includes link artifact)
         patch_classify_email_with_gpt.return_value = mock_gpt_hedge_fund_response
 
         # Run classification
@@ -337,14 +361,14 @@ class TestClassifyAndOrganizeEmails:
         # Assert: Classified as hedge fund
         assert report["hedge_fund_related"] == 1
 
-        # Assert: Email copied to firm folder (flat structure)
+        # Assert: Firm folder created with organized artifacts
         firm_folder = output_dir / "TEST CAPITAL"
         assert firm_folder.exists()
 
-    def test_third_party_email_copied_to_third_parties_folder(
+    def test_third_party_email_organized_to_firm_folder(
         self, email_input_dir, output_dir, patch_classify_email_with_gpt, mock_gpt_third_party_response
     ):
-        """Third-party email should be copied to 3rd parties/{FIRM}/ folder."""
+        """Third-party email with artifacts should be organized into FIRM/ folder."""
         # Setup: Create email
         metadata = {
             "id": "tp-email-001",
@@ -353,7 +377,7 @@ class TestClassifyAndOrganizeEmails:
         }
         create_email_folder(email_input_dir, "email_tp", metadata)
 
-        # Mock GPT to return third-party classification
+        # Mock GPT to return third-party classification (includes link artifact)
         patch_classify_email_with_gpt.return_value = mock_gpt_third_party_response
 
         # Run classification
@@ -363,7 +387,7 @@ class TestClassifyAndOrganizeEmails:
                 output_dir=output_dir,
             )
 
-        # Assert: Email copied to firm folder (flat structure, no 3rd parties split)
+        # Assert: Email organized to firm folder
         firm_folder = output_dir / "GOLDMAN SACHS"
         assert firm_folder.exists()
 

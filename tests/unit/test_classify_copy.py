@@ -1,14 +1,8 @@
-import importlib.util
 import json
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-
-MODULE_PATH = Path(__file__).resolve().parents[2] / "src" / "fofproject" / "classify.py"
-SPEC = importlib.util.spec_from_file_location("fofproject.classify", MODULE_PATH)
-classify_copy = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(classify_copy)
+import fofproject.classify as classify_copy
 
 
 def _fake_client_with_payload(payload: dict):
