@@ -17,7 +17,9 @@
       "Bash(dir:*)",
       "Bash(python -m py_compile:*)",
       "Bash(poetry run pytest:*)",
-      "WebFetch(domain:developers.notion.com)"
+      "WebFetch(domain:developers.notion.com)",
+      "Bash(cd:*)",
+      "Bash(1:*)"
     ]
   }
 }

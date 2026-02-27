@@ -1,96 +1,125 @@
 from dotenv import load_dotenv
-load_dotenv()
+from pathlib import Path
+
+# Load .env from this package directory so notebooks/scripts can run from any CWD.
+env_path = Path(__file__).parent / ".env"
+load_dotenv(dotenv_path=env_path)
 from typing import List, Dict
 from fofproject.fund import Fund
 from openai import OpenAI
 from datetime import datetime
 import pandas as pd
 import calendar
+import math
 import os
 import json
 import fitz
 
 
 SYSTEM_PROMPT = """
-You are a precise financial data extractor. 
+You are a precise financial data extractor.
 
-OUTPUT CONTRACT (IMPORTANT): 
-- Return VALID JSON ONLY that conforms exactly to the JSON Schema below. 
+OUTPUT CONTRACT (IMPORTANT):
+- Return VALID JSON ONLY that conforms exactly to the JSON Schema below.
 - If nothing is found, do not hallucinate.
-- No explanations, no markdown, no code fences, no comments — only the JSON object. 
-- If a field is not supported by the source, obey the field-specific fallback rules below. 
-- Do not invent fields not present in the schema. 
-- Do not include additional properties. 
+- No explanations, no markdown, no code fences, no comments — only the JSON object.
+- If a field is not supported by the source, obey the field-specific fallback rules below.
+- Do not invent fields not present in the schema.
+- Do not include additional properties.
 - Be careful. Don't leave out any value, especially within the performance table.
 
-SECTION-WISE INSTRUCTIONS 
+SECTION-WISE INSTRUCTIONS
 
-1) fund_name 
-Goal: Extract the most specific fund name from the file. Rules: • Convert to ALL CAPS. • Limit to ≤ 2 words (drop “Finance/Capital/Fund/LP/Partners/Ltd” etc). 
+1) fund_name
+Goal: Extract the most specific fund name from the file. Rules: • Convert to ALL CAPS. • Limit to ≤ 2 words (drop "Finance/Capital/Fund/LP/Partners/Ltd" etc).
 Rules -
-a. If only a company name fits, use the company name. Examples: "3W CHINA", "HAO", "TAIREN". 
-b. If you do not find anything similar to fund name, and think this might not be a fund sheet - add "ERROR" in the fund name. 
+a. If only a company name fits, use the company name. Examples: "3W CHINA", "HAO", "TAIREN".
+b. If you do not find anything similar to fund name, and think this might not be a fund sheet - add "ERROR" in the fund name.
 c. If the name happens to be similar the following list, use the existing name instead: ['TAIREN','HAO','LEXINGTON','LIM','FOREST','WT CHINA','E20','3W GLOBAL','3W CHINA','3W HEALTHCARE','TIMEFOLIO','MONOLITH','PERSEVERANCE','NEO IVY','JH BIOTECH']. Some specific change are listed here: "Lim Japan Event Fund" → "LIM" - e.g. "水木清风特殊机会基金" → "FOREST",  "Janus Henderson Biotechnology" → "JH BIOTECH".
 
+2) one_liner
+Goal: A single-sentence summary of the fund. Capture the key edge, style and what makes it interesting or not. Keep it concise (≤ 2 sentences).
 
-2) fund_des
-Goal: Summarize the fund in ≤5 lines. Try include style, edge, manager, and key metrics. End with your rating (a scale of 1 to 5) and overall view of the fund.
-
-3) performance 
-Goal: Extract monthly performance as a time series. 
-Instruction strictly follows step-by-step: 
-a. Copy the monthly return table into a list of lists with the headers included as the first list item. If there's benchmark row in the table, only copy the row of the fund itself into a list of lists. 
+3) performance
+Goal: Extract monthly performance as a time series.
+Instruction strictly follows step-by-step:
+a. Copy the monthly return table into a list of lists with the headers included as the first list item. If there's benchmark row in the table, only copy the row of the fund itself into a list of lists.
 b. identify the first item as header, and the rest as value rows. Within the header, identify non-month header and the month header. - Identify month headers: these are strictly 12 values that represent months (January–December) in any form similar to the following:
   • Numeric: 1–12
   • English: Jan–Dec
   • Chinese: 一月–十二月
-- Everything else in the header that is not a month should be categorized as a **non-month header** (e.g., "Year", "Fund", "YTD", "Inception", etc.). If the non-month header seems like one cell, then it should be one continous item. For example - "since inception", "since formation" etc. 
-c. Clean the value rows by removing empty values. 
+- Everything else in the header that is not a month should be categorized as a **non-month header** (e.g., "Year", "Fund", "YTD", "Inception", etc.). If the non-month header seems like one cell, then it should be one continous item. For example - "since inception", "since formation" etc.
+c. Clean the value rows by removing empty values.
 Rule: Retain all column headers (e.g., Jan–Dec, YTD), even if data is missing for some months in the value rows. In value rows, remove empty values that are similar to "NaN", "-", "", "ꟷ", or None.
-d. Change the monthly header to the format of "%d/%m" and the % value to number like "1.23%" -> "0.0123". 
-The final output should be 3 list: a list of lists that includes the table, and a list of month header and a list of non-month header. 
+d. Change the monthly header to the format of "%d/%m" and the % value to number like "1.23%" -> "0.0123".
+The final output should be 3 list: a list of lists that includes the table, and a list of month header and a list of non-month header.
+CRITICAL RULES:
+- You MUST include ALL rows from the table, including partial inception year rows (the earliest year that may only have a few months of data). Never drop a row just because it has few values.
+- Every value row MUST start with its year as the first element. If the year label appears at the start of a line merged with data (e.g. "2025 0.58 6.68"), the first token is the year.
+- If there are two separate performance tables for different share classes (e.g., CNR vs CR, Class A vs Class D), only extract the FIRST table (the primary/unrestricted class).
 Final output: three lists — (a) full table, (b) month headers, and (c) non-month headers. If you do not identify a monthly return performance table with timeseries data, then simply put the value as "[]". Do not treat the following as valid monthly performance tables: key metrics summary, annual return table that has no monthly timeseries performance.
 
-4) investment_location 
-Goal: Categorize geographical focus. Allowed values, strictly a list with one or more of the following values: ["latin_america","north_america","europe","middle_east_africa","south_asia","apac"]. Rule: If ≥ 3 regions are mentioned, return ["global"]. Otherwise, return 1–2 relevant tags. 
+4) geo_focus
+Goal: Categorize the fund's geographical investment focus. Return exactly ONE value from this list: ["APAC","China","Developed Markets","Emerging Markets","Europe","Global","Japan","Korea","Latin America","Theme-Global","US"].
+Rules:
+a. Pick the single most representative region.
+b. If the fund invests across 3+ diverse regions, return "Global".
+c. If the fund is thematic but global in scope, return "Theme-Global".
+d. If not found on the factsheet, return "".
 
-5) investment_strategy 
-Goal: Identify strategy type(s). Allowed values, strictly a list with one or more of the following values: ["equity_ls","event_driven","multi-strat","special_situation","quantitative","market_neutral","convertible_arbitrage","global_macro","vol_arb","stat_arb","cta","activists","commodities","fixed_income"]. Fallback: If unclear, return "NaN" (a single string, not an array). 
+5) strategy
+Goal: Identify the fund's investment strategy type(s). Return a list with one or more values from: ["Activists","CTA","Credit LS","Distressed / Special Situation","Equity LS","Global Macro","Multi-Strategy","Niche Strategies","Relative Value","SMID Cap","Systematic","Themed"].
+Rules:
+a. Select all strategies that clearly apply based on the factsheet.
+b. If not stated or unclear from the factsheet, return [].
 
-6) investment_sector 
-Goal: Identify sector focus. Allowed values, strictly a list with one or more of the following values: ["equity_diversified","equity_energy","equity_industrials","equity_healthcare","equity_TMT","equity_finance","equity_consumer","commodities","fixed_income"]. Fallback: If unclear, return "NaN" (a single string, not an array). Rule: If ≥ 4 sectors are mentioned, return ["equity_diversified"].
+6) asset_class
+Goal: Identify the fund's asset class focus. Return a list with one or more values from: ["Commodities","Convertible","Credit","Currencies (FX)","Digital Assets","Equities","Insurance Linked","Structured Products","Volatility"].
+Rules:
+a. Select all asset classes that clearly apply based on the factsheet.
+b. If the fund is a general equity long/short fund, return ["Equities"].
+c. If not stated or unclear from the factsheet, return [].
 
-7) manager_names
-Goal: Collect an array of unique fund manager names mentioned in the file. Keep names clean and consistent (full names, no duplicates).
+7) ir_name
+Goal: Extract the name of the primary investor relations contact or main representative mentioned on the factsheet. Return a full name as a string. If not found on the factsheet, return "".
 
-8) manager_profiles
-Goal: Build a object keyed directly by each manager’s name. Each value must contain: a. summary: 1–2 lines on role/mandate b. location: city/region the manager is based (add country if available) c. years_of_experience: whole years (non-negative number)
-Rules - 
-a. Only derive characteristics for managers whose names appear in manager_names.
-b. If a profile cannot be found for a name, append "NaN" as its value instead of leaving it blank.
+8) email
+Goal: Extract the primary contact email address shown on the factsheet. If not found, return "".
 
-9) contact
-Goal: Collect one primary contact as a JSON object. Must include: a. name: full name b. location: city/region (add country if available) c. email: email address d. number: phone number
-Rules
-a. If a field is missing, use an empty string "".
-b. Return only one contact (the main representative).
+9) phone
+Goal: Extract the primary contact phone number shown on the factsheet. If not found, return "".
 
-10) aum_size 
-Goal: Extract fund-level AUM in USD millions (number). Rules: Convert values such as "US$ 1,969.00mn" → 1969.00. 
+10) base
+Goal: Extract the fund's or manager's base location (city, country) as stated on the factsheet. Example: "Hong Kong", "New York, US", "Zurich, Switzerland". If not found, return "".
 
-11) net_exposure 
-Goal: Return the net exposure in the format of an array. Use a single number within the list, if it is a number like [0], use 2 number to represent the range like [-0.2, 0.2] 
-Rules: 
-a. Convert values such as "50%" → 0.5 
+11) fund_inception
+Goal: Extract the fund inception date as stated on the factsheet. Return as an ISO date string "YYYY-MM-DD". If only month and year are available, use the first day of the month (e.g., "March 2015" → "2015-03-01"). If only a year is available, use "YYYY-01-01". If not found on the factsheet, return "".
+
+12) aum_size
+Goal: Extract fund-level AUM in USD millions (number) as stated on the factsheet. Rules: Convert values such as "US$ 1,969.00mn" → 1969.00. If not found, return null.
+
+13) return_pa
+Goal: Extract the fund's annualized return (since inception or as stated on the factsheet). Return as a decimal (e.g., "12.5%" → 0.125). If not stated on the factsheet, return null.
+
+14) volatility_pa
+Goal: Extract the fund's annualized volatility/standard deviation as stated on the factsheet. Return as a decimal (e.g., "14.5%" → 0.145). If not stated on the factsheet, return null.
+
+15) min_ticket
+Goal: Extract the minimum investment/ticket size as stated on the factsheet, in thousands of USD. Convert to number in thousands (e.g., "$1,000,000" → 1000, "$500K" → 500, "$5M" → 5000). If not stated on the factsheet, return null.
+
+16) net_exposure
+Goal: Return the net exposure as stated on the factsheet in the format of an array. Use a single number within the list, if it is a number like [0], use 2 number to represent the range like [-0.2, 0.2]
+Rules:
+a. Convert values such as "50%" → 0.5
 b. Always output as a JSON array.
 
-12) net_return 
-Goal: Identify whether performance is net of fees. Rules: • true if the document explicitly states returns are after management/performance fees. • Else, false. • If true, use the applicable class fees for management_fee and performance_fee. • If false, still populate management_fee and performance_fee with the most common class fees in the document. 
+17) net_return
+Goal: Identify whether performance is net of fees. Rules: • true if the document explicitly states returns are after management/performance fees. • Else, false. • If true, use the applicable class fees for management_fee and performance_fee. • If false, still populate management_fee and performance_fee with the most common class fees in the document.
 
-13) management_fee 
+18) management_fee
 Goal: Extract as a single decimal. Example: "1%" → 0.01. Rule: Use the fee matching the share class of the performance series (or the most common class if unclear).
 
-14) performance_fee 
+19) performance_fee
 Goal: Extract as a single decimal. Example: "20%" → 0.20. Rule: Use the fee matching the share class of the performance series (or the most common class if unclear).
 """
 
@@ -100,7 +129,7 @@ RESPONSE_SCHEMA = """
     "fund_name": {
       "type": "string"
     },
-    "fund_des": {
+    "one_liner": {
       "type": "string"
     },
     "performance": {
@@ -128,64 +157,59 @@ RESPONSE_SCHEMA = """
           }
         }
       },
-      "required": ["table", "month_header", "non_month_header"]
+      "required": ["table", "month_header", "non_month_header"],
       "additionalProperties": false
     },
-    "investment_location": {
+    "geo_focus": {
+      "type": "string",
+      "enum": ["APAC","China","Developed Markets","Emerging Markets","Europe","Global","Japan","Korea","Latin America","Theme-Global","US",""]
+    },
+    "strategy": {
       "type": "array",
       "items": {
-        "type": "string"
+        "type": "string",
+        "enum": ["Activists","CTA","Credit LS","Distressed / Special Situation","Equity LS","Global Macro","Multi-Strategy","Niche Strategies","Relative Value","SMID Cap","Systematic","Themed"]
       }
     },
-    "investment_strategy": {
-      "type": ["array", "string"],
-      "items": {
-        "type": "string"
-      }
-    },
-    "investment_sector": {
-      "type": ["array", "string"],
-      "items": {
-        "type": "string"
-      }
-    },
-    "manager_names": {
+    "asset_class": {
       "type": "array",
-      "items": { "type": "string"},
-      "uniqueItems": true
-    },
-    "manager_profiles": {
-      "type": "object",
-      "patternProperties": {
-        "^.+$": {
-          "type": "object",
-          "properties": {
-            "summary": { "type": "string" },
-            "location": { "type": "string" },
-            "years_of_experience": { "type": "number"}
-          },
-          "required": ["summary", "location", "years_of_experience"],
-        }
+      "items": {
+        "type": "string",
+        "enum": ["Commodities","Convertible","Credit","Currencies (FX)","Digital Assets","Equities","Insurance Linked","Structured Products","Volatility"]
       }
     },
-    "contact": {
-      "type": "object",
-      "properties": {
-        "name": { "type": "string" },
-        "location": { "type": "string" },
-        "email": { "type": "string", "format": "email" },
-        "number": { "type": "string" }
-      },
-      "required": ["name", "location", "email", "number"],
+    "ir_name": {
+      "type": "string"
+    },
+    "email": {
+      "type": "string"
+    },
+    "phone": {
+      "type": "string"
+    },
+    "base": {
+      "type": "string"
+    },
+    "fund_inception": {
+      "type": "string"
     },
     "aum_size": {
-      "type": "number"
+      "type": ["number", "null"]
+    },
+    "return_pa": {
+      "type": ["number", "null"]
+    },
+    "volatility_pa": {
+      "type": ["number", "null"]
+    },
+    "min_ticket": {
+      "type": ["number", "null"]
     },
     "net_exposure": {
       "type": "array",
       "items": { "type": "number" },
       "maxItems": 2
-    }
+    },
     "net_return": {
       "type": "boolean"
     },
@@ -198,15 +222,20 @@ RESPONSE_SCHEMA = """
   },
   "required": [
     "fund_name",
-    "fund_des",
+    "one_liner",
     "performance",
-    "investment_location",
-    "investment_strategy",
-    "investment_sector",
-    "manager_names",
-    "manager_profiles",
-    "contact",
+    "geo_focus",
+    "strategy",
+    "asset_class",
+    "ir_name",
+    "email",
+    "phone",
+    "base",
+    "fund_inception",
     "aum_size",
+    "return_pa",
+    "volatility_pa",
+    "min_ticket",
     "net_exposure",
     "net_return",
     "management_fee",
@@ -216,6 +245,75 @@ RESPONSE_SCHEMA = """
 """
 
 ignored_funds = []
+
+def _find_ytd_index(header_row, non_month_header):
+    """Find the index of the YTD column in the original header row."""
+    for i, h in enumerate(header_row):
+        if h.upper().strip() in ("YTD", "Y.T.D.", "YEAR TO DATE", "年初至今"):
+            return i
+    return None
+
+def _ytd_cross_validate_rows(cleaned_rows, year_rows, ytd_col_idx, fund_name):
+    """Cross-validate monthly values against YTD using compounding.
+
+    For each complete year (12 months):
+      1. **Scale fix** – if values are in percentage form (e.g. 13.82 meaning
+         13.82%) instead of decimal (0.1382), divide by 100.
+      2. **Flag** – if compound return doesn't match YTD after scale fix,
+         log a warning with the error magnitude.
+    Modifies cleaned_rows in-place (scale corrections only).
+    """
+    from datetime import datetime as _dt
+
+    # Group cleaned_rows by year
+    by_year = {}
+    for r in cleaned_rows:
+        y = _dt.strptime(r["date"], "%d/%m/%Y").year
+        by_year.setdefault(y, []).append(r)
+
+    # Build year→YTD lookup from the raw rows
+    ytd_by_year = {}
+    for entry in year_rows:
+        year, all_vals = next(iter(entry.items()))
+        val_idx = ytd_col_idx - 1  # subtract 1 for the year column
+        if 0 <= val_idx < len(all_vals):
+            try:
+                raw = all_vals[val_idx]
+                ytd_val = float(raw.strip("%")) / 100 if "%" in raw else float(raw)
+                ytd_by_year[year] = ytd_val
+            except (ValueError, TypeError):
+                pass
+
+    for year, entries in by_year.items():
+        if len(entries) != 12 or year not in ytd_by_year:
+            continue
+
+        ytd_raw = ytd_by_year[year]
+        monthly_vals = [e["value"] for e in entries]
+
+        def _compound(vals):
+            return math.prod(1 + v for v in vals) - 1
+
+        # Only attempt /100 scale correction if values appear to be in
+        # percentage form (median |value| > 0.5, e.g. 13.82 meaning 13.82%)
+        abs_vals = sorted(abs(v) for v in monthly_vals if v != 0)
+        is_pct_scale = abs_vals and abs_vals[len(abs_vals) // 2] > 0.5
+        if is_pct_scale:
+            for e in entries:
+                e["value"] = round(e["value"] / 100, 6)
+            monthly_vals = [e["value"] for e in entries]
+            print(f"YTD cross-validation ({fund_name}, {year}): applied /100 scale correction")
+
+        # Flag remaining YTD mismatch (after any scale fix)
+        ytd_expected = ytd_raw / 100 if abs(ytd_raw) > 0.5 else ytd_raw
+        compound = _compound(monthly_vals)
+        error = abs(compound - ytd_expected)
+        if error > 0.0002:
+            print(
+                f"YTD cross-validation ({fund_name}, {year}): "
+                f"compound={compound:.6f} vs YTD={ytd_expected:.6f} "
+                f"(error={error:.6f}, likely minor OCR discrepancy)"
+            )
 
 def process_performance(data):
     
@@ -248,12 +346,13 @@ def process_performance(data):
             header = header[idx:]
             break
     years = []
+    raw_row_lengths = {}  # year -> original row length (before stripping empties)
     # Identify year column position
     def parse_yearly_performance(data_lists, year_counter = 2025):
         """
         Takes the raw list of lists collected from GPT (idealy one list per year), where each sub-list starts with a year followed by performance values.
         Returns a list of dicts mapping {year: [values]}.
-        
+
         Example:
         [
             ["2025","1.21%","-0.59%","-2.44%"],
@@ -269,25 +368,28 @@ def process_performance(data):
         for data in data_lists:
             year = None
             values = []
-            
+
             for item in data:
                 value = item.strip()
                 # skip the empty value, and do not append it to the results
                 if not value:
                     continue
                 # find the year and add it as key later
-                if value.isdigit() and 1900 <= int(value) <= 2100:
-                    year = int(value)
+                # Strip common suffixes like * or # from year labels (e.g. "2021*")
+                cleaned = value.rstrip('*#†‡ ')
+                if cleaned.isdigit() and 1900 <= int(cleaned) <= 2100:
+                    year = int(cleaned)
                     years.append(year)
                 # find the value and add it as values
                 else:
                     values.append(value)
-            
+
             if year is None:
               year = year_counter
               years.append(year)
               year_counter -= 1
               print(f"No valid year found in {data}, appending {year}")
+            raw_row_lengths[year] = len(data)
             results.append({year: values})
         
         return results
@@ -301,8 +403,14 @@ def process_performance(data):
     # Clean non_month_header
     cleaned_rows = []
 
-    # Count how many non-month headers exist in the header
+    # Derive non-month column count from full middle years (more robust than
+    # counting from GPT's non_month_header list, which can be inconsistent).
     count_non_month = sum(1 for h in header if h in non_month_header)
+    for entry in rows:
+        y, v = next(iter(entry.items()))
+        if y not in (earliest_year, latest_year) and len(v) > 12:
+            count_non_month = len(v) - 12
+            break
 
     for entry in rows:
         year, values = next(iter(entry.items()))  # unpack single-key dict
@@ -347,7 +455,57 @@ def process_performance(data):
                 if year != latest_year and len(values) != 12:
                     print(f"Parsing error: Year {year} has {len(values)} values (expected 12).")
                     return []
-    return cleaned_rows  
+
+    # Auto-detect percentage-scale values: if median |value| > 0.5, values are
+    # likely in percentage form (e.g. 1.23 meaning 1.23%) and need dividing by 100
+    if cleaned_rows:
+        abs_vals = sorted(abs(r["value"]) for r in cleaned_rows if r["value"] != 0)
+        if abs_vals:
+            median_abs = abs_vals[len(abs_vals) // 2]
+            if median_abs > 0.5:
+                for r in cleaned_rows:
+                    r["value"] = round(r["value"] / 100, 6)
+
+    # --- YTD cross-validation ---
+    # Identify YTD column from the non-month headers in the original header row.
+    ytd_idx = _find_ytd_index(data["performance"]["table"][0], non_month_header)
+    if ytd_idx is not None:
+        _ytd_cross_validate_rows(cleaned_rows, rows, ytd_idx, data["fund_name"])
+
+    return cleaned_rows
+
+def compute_identifier(performance_data):
+    """Compute a fund identifier from the first 5 months of performance data.
+
+    Takes the last 2 decimal digits of each of the first 5 monthly returns
+    and concatenates them. For example, if the first 5 returns are
+    3.17%, 0.01%, -0.51%, 3.33%, -7.81% (stored as 0.0317, 0.0001, -0.0051,
+    0.0333, -0.0781), the identifier is "1701513381".
+
+    The values are sorted chronologically (earliest first), so we take the
+    first 5 dates in ascending order.
+    """
+    if not isinstance(performance_data, list) or len(performance_data) < 5:
+        return ""
+
+    # Sort by date ascending and take first 5
+    sorted_perf = sorted(
+        performance_data,
+        key=lambda x: datetime.strptime(x["date"], "%d/%m/%Y")
+    )
+    first_five = sorted_perf[:5]
+
+    identifier_parts = []
+    for entry in first_five:
+        # Multiply by 100 to get percentage, e.g. 0.0317 -> 3.17
+        pct_value = entry["value"] * 100
+        # Format to 2 decimal places and take last 2 digits of the decimal
+        formatted = f"{abs(pct_value):.2f}"
+        # Get the 2 decimal digits (after the dot)
+        decimal_part = formatted.split(".")[1]
+        identifier_parts.append(decimal_part)
+
+    return "".join(identifier_parts)
 
 def extract_text_from_pdf(file_path):
     doc = fitz.open(file_path)
@@ -356,6 +514,59 @@ def extract_text_from_pdf(file_path):
         text += page.get_text()
     doc.close()
     return text
+
+def _gpt_extract_from_file(client, file_path: str):
+    """Upload a PDF and run GPT extraction via file upload (for image-based tables)."""
+    with open(file_path, "rb") as f:
+        uploaded_file = client.files.create(
+            file=f,
+            purpose="assistants"
+        )
+
+    response = client.responses.create(
+      model="gpt-5.2",
+      temperature=0,
+      input=[
+          {
+              "role": "system",
+              "content": [
+                  {"type": "input_text", "text": SYSTEM_PROMPT + "\n\nJSON Schema:\n" + RESPONSE_SCHEMA}
+              ]
+          },
+          {
+              "role": "user",
+              "content": [
+                  {"type": "input_text", "text": "Extract the required data from this PDF file:"},
+                  {"type": "input_file", "file_id": uploaded_file.id}
+              ]
+          }
+      ]
+    )
+    output_text = response.output_text.strip()
+    data = json.loads(output_text)
+    data["performance"] = process_performance(data)
+    return data
+
+def _gpt_extract_from_text(client, text: str):
+    """Run GPT extraction on pre-extracted text."""
+    response = client.responses.create(
+        model="gpt-4.1",
+        temperature=0,
+        input=[
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT + "\n\nJSON Schema:\n" + RESPONSE_SCHEMA
+            },
+            {
+                "role": "user",
+                "content": f"Extract the required data from this file:\n{text}"
+            }
+        ]
+    )
+    output_text = response.output_text.strip()
+    data = json.loads(output_text)
+    data["performance"] = process_performance(data)
+    return data
 
 def gpt_process_pdf(file_path: str):
     """
@@ -368,57 +579,24 @@ def gpt_process_pdf(file_path: str):
     text = extract_text_from_pdf(file_path)
     # Cannot parse pdf into text, try uploading pdf directly
     if not text:
-        with open(file_path, "rb") as f:
-            uploaded_file = client.files.create(
-                file=f,
-                purpose="assistants"
-            )
-
-        response = client.responses.create(
-          model="gpt-4.1-mini",
-          temperature=0,
-          input=[
-              {
-                  "role": "system",
-                  "content": [
-                      {"type": "input_text", "text": SYSTEM_PROMPT + "\n\nJSON Schema:\n" + RESPONSE_SCHEMA}
-                  ]
-              },
-              {
-                  "role": "user",
-                  "content": [
-                      {"type": "input_text", "text": "Extract the required data from this PDF file:"},
-                      {"type": "input_file", "file_id": uploaded_file.id} 
-                  ]
-              }
-          ]
-        )
-        output_text = response.output_text.strip()
-        data = json.loads(output_text)
-        data["performance"] = process_performance(data)
+        data = _gpt_extract_from_file(client, file_path)
         print(f"{data['fund_name']} uses pdf screening. Values can be unstable...")
         data['fund_name'] = f"{data['fund_name']} from_pdf"
     else:
-        response = client.responses.create(
-            model="gpt-4.1-mini",
-            temperature=0,
-            input=[
-                {
-                    "role": "system",
-                    "content": SYSTEM_PROMPT + "\n\nJSON Schema:\n" + RESPONSE_SCHEMA
-                },
-                {
-                    "role": "user",
-                    "content": f"Extract the required data from this file:\n{text}"
-                }
-            ]
-        )
-        output_text = response.output_text.strip()
-        data = json.loads(output_text)
-        data["performance"] = process_performance(data)
+        data = _gpt_extract_from_text(client, text)
+        # Fallback: if text extraction yielded no performance, retry with PDF upload
+        # (handles cases where performance table is embedded as an image)
+        if not data.get("performance"):
+            print(f"{data['fund_name']} text extraction found no performance, retrying with PDF upload...")
+            pdf_data = _gpt_extract_from_file(client, file_path)
+            if pdf_data.get("performance"):
+                # Keep non-performance fields from text extraction (usually more reliable)
+                # but use performance from PDF upload
+                data["performance"] = pdf_data["performance"]
     if isinstance(data.get('performance'), list) and data['performance']:
     # Check if performance is a non-empty list and sort it
       data['performance'].sort(key=lambda x:datetime.strptime(x["date"], "%d/%m/%Y"))
+    data['identifier'] = compute_identifier(data.get('performance', []))
     return data
 
 def gpt_process_text(text: str):
@@ -430,7 +608,7 @@ def gpt_process_text(text: str):
       api_key=os.getenv("OPENAI_API_KEY")
     )
     response = client.responses.create(
-        model="gpt-4.1-mini",
+        model="gpt-4.1",
         temperature=0,
         input=[
             {
@@ -449,6 +627,7 @@ def gpt_process_text(text: str):
     if isinstance(data.get('performance'), list) and data['performance']:
     # Check if performance is a non-empty list and sort it
       data['performance'].sort(key=lambda x:datetime.strptime(x["date"], "%d/%m/%Y"))
+    data['identifier'] = compute_identifier(data.get('performance', []))
     return data
 
 def process_pdfs_in_folder(folder_path="input", save=False, identifier = "_parsed from_"):
@@ -705,14 +884,20 @@ def init_funds(funds_data: List[Dict]) -> Dict[str, Fund]:
             fund = Fund(
                 name=data["fund_name"],
                 monthly_returns=data.get("performance"),
-                fund_des=data.get("fund_des"),
-                investment_location=data.get("investment_location"),
-                investment_strategy=data.get("investment_strategy"),
-                investment_sector=data.get("investment_sector"),
-                manager_names=data.get("manager_names"),
-                manager_profiles=data.get("manager_profiles"),
-                contact=data.get("contact"),
+                one_liner=data.get("one_liner"),
+                geo_focus=data.get("geo_focus"),
+                strategy=data.get("strategy"),
+                asset_class=data.get("asset_class"),
+                identifier=data.get("identifier"),
+                ir_name=data.get("ir_name"),
+                email=data.get("email"),
+                phone=data.get("phone"),
+                base=data.get("base"),
+                fund_inception=data.get("fund_inception"),
                 aum_size=data.get("aum_size"),
+                return_pa=data.get("return_pa"),
+                volatility_pa=data.get("volatility_pa"),
+                min_ticket=data.get("min_ticket"),
                 net_exposure=data.get("net_exposure"),
                 net_return=data.get("net_return"),
                 management_fee=data.get("management_fee"),
@@ -745,15 +930,21 @@ def offload_funds(funds: Dict[str, Fund]) -> List[Dict]:
             )
         results.append({
             "fund_name": fund.name,
-            "fund_des": getattr(fund, "fund_des", None),
+            "one_liner": getattr(fund, "one_liner", None),
             "performance": string_returns,
-            "investment_location": getattr(fund, "investment_location", None),
-            "investment_strategy": getattr(fund, "investment_strategy", None),
-            "investment_sector": getattr(fund, "investment_sector", None),
-            "manager_names": getattr(fund, "manager_names", None),
-            "manager_profiles": getattr(fund, "manager_profiles", None),
-            "contact": getattr(fund, "contact", None),
+            "geo_focus": getattr(fund, "geo_focus", None),
+            "strategy": getattr(fund, "strategy", None),
+            "asset_class": getattr(fund, "asset_class", None),
+            "identifier": getattr(fund, "identifier", None),
+            "ir_name": getattr(fund, "ir_name", None),
+            "email": getattr(fund, "email", None),
+            "phone": getattr(fund, "phone", None),
+            "base": getattr(fund, "base", None),
+            "fund_inception": getattr(fund, "fund_inception", None),
             "aum_size": getattr(fund, "aum_size", None),
+            "return_pa": getattr(fund, "return_pa", None),
+            "volatility_pa": getattr(fund, "volatility_pa", None),
+            "min_ticket": getattr(fund, "min_ticket", None),
             "net_exposure": getattr(fund, "net_exposure", None),
             "net_return": getattr(fund, "net_return", None),
             "management_fee": getattr(fund, "management_fee", None),

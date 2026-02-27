@@ -16,8 +16,20 @@ import msal
 # =========================
 # EMAIL STORAGE CONFIG
 # =========================
-# Base directory for storing emails (relative to project root)
-EMAIL_STORAGE_DIR = Path(r"Z:\Research Team\Artificial Intelligence\emails")
+# Use EMAIL_STORAGE_DIR env var if set, otherwise fall back to platform-appropriate default
+_storage_override = os.getenv("EMAIL_STORAGE_DIR")
+if _storage_override:
+    EMAIL_STORAGE_DIR = Path(_storage_override)
+elif os.name == "nt":
+    # Windows: use the Z: network drive
+    EMAIL_STORAGE_DIR = Path(r"Z:\Research Team\Artificial Intelligence\emails")
+else:
+    # Docker / Linux: use /data/emails if mounted (Synology), otherwise local output
+    _nas_path = Path("/data/emails")
+    if _nas_path.exists():
+        EMAIL_STORAGE_DIR = _nas_path
+    else:
+        EMAIL_STORAGE_DIR = Path(__file__).resolve().parent.parent.parent / "output" / "emails"
 
 # =========================
 # CONFIG (fill in from .env)
@@ -46,6 +58,7 @@ def automate_device_login(user_code: str, email: str, password: str):
     print("Selenium: Starting browser...", flush=True)
 
     options = Options()
+    options.add_argument("--headless")
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")

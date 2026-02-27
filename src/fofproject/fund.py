@@ -17,6 +17,9 @@ save_dir = current_dir.parent.parent / "output"
 if not save_dir.exists():
     save_dir.mkdir(parents=True, exist_ok=True)
 
+# Use a font that is available in this container environment.
+MEASURE_FONT_FAMILY = "DejaVu Sans"
+
 def get_font2height():
     """
     Build a lookup table mapping font sizes (1-39) to their rendered heights in inches.
@@ -37,7 +40,7 @@ def get_font2height():
             0,
             "1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ",
             fontsize=font_size,
-            fontname="Arial",
+            fontname=MEASURE_FONT_FAMILY,
         )
         # Draw the figure to ensure renderer is available
         fig.canvas.draw()
@@ -166,14 +169,20 @@ class Fund:
         self,
         name: str,
         monthly_returns: List[Dict],
-        fund_des: Optional[str] = None,
-        investment_location: Optional[List[str]] = None,
-        investment_strategy: Optional[List[str]] = None,
-        investment_sector: Optional[List[str]] = None,
-        manager_names: Optional[List[str]] = None,
-        manager_profiles: Optional[Dict[str, Dict]] = None,
-        contact: Optional[Dict[str, str]] = None,
+        one_liner: Optional[str] = None,
+        geo_focus: Optional[str] = None,
+        strategy: Optional[List[str]] = None,
+        asset_class: Optional[List[str]] = None,
+        identifier: Optional[str] = None,
+        ir_name: Optional[str] = None,
+        email: Optional[str] = None,
+        phone: Optional[str] = None,
+        base: Optional[str] = None,
+        fund_inception: Optional[str] = None,
         aum_size: Optional[float] = None,
+        return_pa: Optional[float] = None,
+        volatility_pa: Optional[float] = None,
+        min_ticket: Optional[float] = None,
         net_exposure: Optional[List[float]] = None,
         net_return: Optional[bool] = None,
         management_fee: Optional[float] = None,
@@ -194,22 +203,34 @@ class Fund:
         monthly_returns : List[Dict]
             List of dicts with 'date' (DD/MM/YYYY string) and 'value' (decimal return).
             Example: [{"date": "01/01/2024", "value": 0.05}, ...]
-        fund_des : str, optional
-            Text description of the fund's investment approach.
-        investment_location : List[str], optional
-            Geographic regions (e.g., ["China", "Hong Kong"]).
-        investment_strategy : List[str], optional
-            Strategy types (e.g., ["Long/Short Equity", "Event Driven"]).
-        investment_sector : List[str], optional
-            Sector focus (e.g., ["Technology", "Healthcare"]).
-        manager_names : List[str], optional
-            Names of portfolio managers.
-        manager_profiles : Dict[str, Dict], optional
-            Detailed manager info keyed by name.
-        contact : Dict[str, str], optional
-            Contact details with keys: 'name', 'location', 'email', 'number'.
+        one_liner : str, optional
+            Single-sentence summary of the fund.
+        geo_focus : str, optional
+            Geographic focus (e.g., "APAC", "China", "Global").
+        strategy : List[str], optional
+            Strategy types (e.g., ["Equity LS", "Systematic"]).
+        asset_class : List[str], optional
+            Asset class focus (e.g., ["Equities", "Credit"]).
+        identifier : str, optional
+            Unique identifier derived from performance data.
+        ir_name : str, optional
+            Investor relations contact name.
+        email : str, optional
+            Contact email address.
+        phone : str, optional
+            Contact phone number.
+        base : str, optional
+            Fund/manager base location (e.g., "Hong Kong", "Zurich, Switzerland").
+        fund_inception : str, optional
+            Fund inception date as ISO string "YYYY-MM-DD".
         aum_size : float, optional
             Assets under management in millions USD.
+        return_pa : float, optional
+            Annualized return as decimal (e.g., 0.125 = 12.5%).
+        volatility_pa : float, optional
+            Annualized volatility as decimal (e.g., 0.145 = 14.5%).
+        min_ticket : float, optional
+            Minimum investment in thousands USD.
         net_exposure : List[float], optional
             Range of net exposure [min, max] as decimals (e.g., [0.3, 0.7] for 30-70%).
         net_return : bool, optional
@@ -266,16 +287,22 @@ class Fund:
                     f"{name}: Monthly returns not continuous — expected {expected.date()}, found {curr.date()}"
                 )
         self.name = name
-        self.fund_des = fund_des
-        self.investment_location = investment_location 
-        self.investment_strategy = investment_strategy 
-        self.investment_sector = investment_sector 
-        self.manager_names = manager_names 
-        self.manager_profiles = manager_profiles
-        self.contact = contact
-        self.contact_info = f"{contact['name']} - Based in {contact['location']}, try reachout via email '{contact['email']}' or phone '{contact['number']}'" if contact else "No contact info"
+        self.one_liner = one_liner
+        self.geo_focus = geo_focus
+        self.strategy = strategy
+        self.asset_class = asset_class
+        self.identifier = identifier
+        self.ir_name = ir_name
+        self.email = email
+        self.phone = phone
+        self.base = base
+        self.fund_inception = fund_inception
+        self.contact_info = f"{ir_name} - Based in {base}, try reachout via email '{email}' or phone '{phone}'" if ir_name else "No contact info"
         self.aum_size = aum_size
-        self.net_exposure = net_exposure 
+        self.return_pa = return_pa
+        self.volatility_pa = volatility_pa
+        self.min_ticket = min_ticket
+        self.net_exposure = net_exposure
         self.net_exposure_info = f"Net Exposure = {min(self.net_exposure)*100}% to {max(self.net_exposure)*100}%" if self.net_exposure else "No net exposure info"
         self.net_return = net_return
         self.management_fee = management_fee
@@ -2305,7 +2332,7 @@ class Fund:
         None
             Displays all charts interactively via .show() calls.
         """
-        print(self.fund_des)
+        print(self.one_liner)
         print(f"Net Exposure = {min(self.net_exposure)*100}% to {max(self.net_exposure)*100}%") if self.net_exposure else None
         print(self.contact_info)
         endmonth_str = datetime.strftime(self.latest_date, format='%Y-%m')
@@ -2364,12 +2391,12 @@ def compare_funds(fund_dict, benchmark_fund=None):
     for name, fund in fund_dict.items():
         row = {
             "Name": fund.name,
-            "Description": fund.fund_des,
-            "Location": fund.investment_location,
-            "Strategy": fund.investment_strategy,
-            "Sector": fund.investment_sector,
-            "Managers": ", ".join(fund.manager_names) if fund.manager_names else None,
-            "Contact": fund.contact_info,
+            "One Liner": fund.one_liner,
+            "Geo Focus": fund.geo_focus,
+            "Strategy": fund.strategy,
+            "Asset Class": fund.asset_class,
+            "Identifier": fund.identifier,
+            "IR Contact": fund.contact_info,
             "AUM (in Mn USD)": fund.aum_size,
             "Net Exposure": fund.net_exposure_info,
             "Net Return": fund.net_return,

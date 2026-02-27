@@ -1,33 +1,46 @@
 {
-  "name": "Python 3",
-  // Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
-  "image": "mcr.microsoft.com/devcontainers/python:1-3.11-bookworm",
+  "name": "FOF Project (Python 3.12)",
+  "image": "mcr.microsoft.com/devcontainers/python:1-3.12-bookworm",
   "customizations": {
     "codespaces": {
       "openFiles": [
         "README.md",
-        "app.py"
+        "src/fofproject/__init__.py"
       ]
     },
     "vscode": {
-      "settings": {},
+      "settings": {
+        "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+        "python.linting.enabled": true,
+        "python.linting.pylintEnabled": false,
+        "python.formatting.provider": "none",
+        "[python]": {
+          "editor.defaultFormatter": "charliermarsh.ruff",
+          "editor.formatOnSave": true,
+          "editor.codeActionsOnSave": {
+            "source.fixAll": "explicit"
+          }
+        }
+      },
       "extensions": [
         "ms-python.python",
-        "ms-python.vscode-pylance"
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "ms-notebooks.jupyter",
+        "ms-toolsai.jupyter"
       ]
     }
   },
-  "updateContentCommand": "[ -f packages.txt ] && sudo apt update && sudo apt upgrade -y && sudo xargs apt install -y <packages.txt; [ -f requirements.txt ] && pip3 install --user -r requirements.txt; pip3 install --user streamlit; echo '✅ Packages installed and Requirements met'",
-  "postAttachCommand": {
-    "server": "streamlit run app.py --server.enableCORS false --server.enableXsrfProtection false"
-  },
+  "postCreateCommand": "sudo pip install -U pip && sudo pip install poetry && unset VIRTUAL_ENV && poetry config virtualenvs.in-project true && poetry install",
+  "updateContentCommand": "sudo rm -f /etc/apt/sources.list.d/yarn.list && sudo apt-get update && sudo apt-get install -y --no-install-recommends chromium chromium-driver",
+  "postAttachCommand": "echo '✅ Container ready! Run: poetry run jupyter lab fund_workstation.ipynb'",
   "portsAttributes": {
-    "8501": {
-      "label": "Application",
+    "8888": {
+      "label": "Jupyter Lab",
       "onAutoForward": "openPreview"
     }
   },
   "forwardPorts": [
-    8501
+    8888
   ]
 }

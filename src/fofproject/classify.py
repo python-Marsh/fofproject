@@ -1,4 +1,4 @@
-"""
+﻿"""
 Email Classification System for Hedge Fund Emails
 
 This module classifies emails using GPT API to identify hedge fund related emails
@@ -19,10 +19,11 @@ import re
 import shutil
 import time
 import base64
+from html import unescape
 from datetime import datetime
 from typing import Optional  # noqa: F401 - kept for potential future use
 from openai import OpenAI
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, parse_qsl, urlencode
 
 # Load .env from the same directory as this script
 env_path = Path(__file__).parent / ".env"
@@ -33,9 +34,10 @@ load_dotenv(dotenv_path=env_path)
 # =========================
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# Default paths (can be overridden)
-DEFAULT_EMAIL_INPUT_DIR = Path(r"C:\Users\FOF Analyst\Desktop\fofproject\output\testing\email")
-DEFAULT_OUTPUT_DIR = Path(r"C:\Users\FOF Analyst\Desktop\fofproject\output\testing\fund firm identifier")
+# Default paths (can be overridden) — resolved relative to project root
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+DEFAULT_EMAIL_INPUT_DIR = _PROJECT_ROOT / "output" / "testing" / "email"
+DEFAULT_OUTPUT_DIR = _PROJECT_ROOT / "output" / "testing" / "fund firm identifier"
 
 # File names for persistent data
 FIRM_MAPPINGS_FILE = "firm_name_mappings.json"  # Human-editable mappings
@@ -381,251 +383,860 @@ def normalize_fund_name(name: str, firm_entry: dict):
 
     return None
 
+def _resolve_from_numbered_list(user_input: str, items: list) -> str | None:
+    """
+    Resolve user input against a numbered list of items.
+
+    If user_input is a valid integer index (1-based), return the item at that index.
+    Otherwise return user_input as-is for name-based matching.
+    Returns None if index is out of range.
+    """
+    if user_input.isdigit():
+        idx = int(user_input)
+        if 1 <= idx <= len(items):
+            return items[idx - 1]
+        return None
+    return user_input
+
+
+def _interactive_firm_picker(
+    prompt: str = "Select a firm",
+    output_dir: Path = None,
+    allow_new: bool = False,
+    page_size: int = 15,
+) -> str | None:
+    """
+    Interactive paginated firm picker with search.
+
+    Shows firms in pages of `page_size`. The user can:
+      - Enter a number to select a firm from the current page
+      - Enter 'n' / 'p' to go to the next / previous page
+      - Enter 's' to search/filter firms by keyword
+      - Enter 'a' to show all (reset search filter)
+      - Type a firm name directly
+      - If allow_new, type a name that doesn't exist to use it as-is
+
+    Returns the selected firm name, or None if cancelled.
+    """
+    output_dir = output_dir or DEFAULT_OUTPUT_DIR
+    mappings = load_firm_mappings(output_dir)
+    all_firms = sorted(mappings.get("canonical_names", {}).keys())
+
+    if not all_firms and not allow_new:
+        print("No firms found in mappings.")
+        return None
+
+    filtered = all_firms
+    page = 0
+    search_term = ""
+
+    while True:
+        total = len(filtered)
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        page = min(page, total_pages - 1)
+        start = page * page_size
+        end = min(start + page_size, total)
+        page_items = filtered[start:end]
+
+        print(f"\n--- {prompt} ---")
+        if search_term:
+            print(f"  Filter: \"{search_term}\" ({total} match{'es' if total != 1 else ''})")
+        else:
+            print(f"  {total} firm(s) total")
+        print(f"  Page {page + 1}/{total_pages}")
+        print()
+
+        for i, firm in enumerate(page_items, start + 1):
+            print(f"  {i:>3}. {firm}")
+
+        print()
+        hints = ["#=select", "n=next", "p=prev", "s=search", "a=all", "q=cancel"]
+        if allow_new:
+            hints.append("or type a new name")
+        print(f"  [{' | '.join(hints)}]")
+
+        raw = input("> ").strip()
+        if not raw:
+            continue
+
+        if raw.lower() == "q":
+            return None
+        if raw.lower() == "n":
+            if page < total_pages - 1:
+                page += 1
+            else:
+                print("Already on last page.")
+            continue
+        if raw.lower() == "p":
+            if page > 0:
+                page -= 1
+            else:
+                print("Already on first page.")
+            continue
+        if raw.lower() == "a":
+            filtered = all_firms
+            search_term = ""
+            page = 0
+            continue
+        if raw.lower() == "s":
+            kw = input("Search keyword: ").strip()
+            if kw:
+                search_term = kw
+                filtered = [f for f in all_firms if kw.lower() in f.lower()]
+                page = 0
+                if not filtered:
+                    print(f"No firms matching \"{kw}\". Showing all.")
+                    filtered = all_firms
+                    search_term = ""
+            continue
+
+        # Try index selection (against the full filtered list, not just page)
+        resolved = _resolve_from_numbered_list(raw, filtered)
+        if resolved is not None and resolved in mappings.get("canonical_names", {}):
+            return resolved
+
+        # Try name match (case-insensitive)
+        for firm in all_firms:
+            if raw.lower() == firm.lower():
+                return firm
+
+        if allow_new:
+            return raw
+
+        print(f"  '{raw}' not found. Try a number, search, or exact name.")
+
+
+ASSIGNMENT_CONFIDENCE_THRESHOLD = 0.75
+FIRM_RECOVERY_CONFIDENCE_FLOOR = 0.50
+NEEDS_REVIEW_FOLDER = "_NEEDS_REVIEW"
+REASON_CODE_OTHER = "other"
+
+
+def _strip_html_tags(text: str) -> str:
+    if not text:
+        return ""
+    return re.sub(r"<[^>]+>", " ", text)
+
+
+def _truncate_text(text: str, max_len: int = 5000) -> str:
+    if not text:
+        return ""
+    return text if len(text) <= max_len else text[:max_len]
+
+
+def normalize_url(url: str, base_url: str = "") -> str:
+    """Normalize a URL for deduplication and classification context."""
+    if not url:
+        return ""
+    raw = unescape(url).strip()
+    if not raw:
+        return ""
+
+    if raw.startswith("//"):
+        raw = "https:" + raw
+
+    normalized = urljoin(base_url, raw) if base_url else raw
+    parsed = urlparse(normalized)
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return ""
+    if not parsed.netloc:
+        return ""
+
+    netloc = parsed.netloc.lower()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+
+    path = parsed.path or "/"
+    path = re.sub(r"/{2,}", "/", path)
+    if path != "/" and path.endswith("/"):
+        path = path[:-1]
+
+    tracking_params = {
+        "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+        "gclid", "fbclid", "mc_cid", "mc_eid", "mkt_tok", "trk", "spm", "ref",
+    }
+    cleaned_params = []
+    for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+        if key.lower() in tracking_params:
+            continue
+        cleaned_params.append((key, value))
+    query = urlencode(cleaned_params, doseq=True)
+
+    return f"{parsed.scheme.lower()}://{netloc}{path}" + (f"?{query}" if query else "")
+
+
+def _is_non_content_link(url: str, context_text: str = "") -> bool:
+    """Filter obvious non-content links before sending to GPT."""
+    combined = f"{url} {context_text}".lower()
+    if any(url.lower().startswith(p) for p in ("mailto:", "cid:", "javascript:", "tel:")):
+        return True
+    if any(token in combined for token in ("unsubscribe", "optout", "opt-out", "privacy", "pixel", "tracking", "track.me", "openrate")):
+        return True
+    social_domains = ("linkedin.com", "twitter.com", "x.com", "facebook.com", "instagram.com", "youtube.com")
+    if any(domain in combined for domain in social_domains):
+        return True
+    return False
+
+
+def _looks_like_homepage(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.path in ("", "/") and not parsed.query
+
+
+def _build_link_context(subject: str, body_preview: str, anchor_text: str, url: str) -> str:
+    parsed = urlparse(url)
+    path_hint = parsed.path.strip("/")[:80]
+    return " | ".join(
+        p for p in [
+            f"subject={subject}",
+            f"body_preview={body_preview}",
+            f"anchor={anchor_text}",
+            f"host={parsed.netloc.lower()}",
+            f"path_hint={path_hint}",
+        ] if p
+    )
+
+
+def extract_links_from_email_metadata(metadata: dict) -> list:
+    """Extract and dedupe links from email HTML body and text previews."""
+    subject = metadata.get("subject", "") or ""
+    body_preview = metadata.get("bodyPreview", "") or ""
+    body = metadata.get("body", {}) or {}
+    body_html = body.get("content", "") if body.get("contentType", "html").lower() == "html" else ""
+    body_text = _strip_html_tags(body_html)
+
+    candidates = []
+
+    anchor_pattern = re.compile(
+        r"<a[^>]+href\s*=\s*[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    for href, anchor_html in anchor_pattern.findall(body_html):
+        anchor_text = re.sub(r"\s+", " ", _strip_html_tags(unescape(anchor_html))).strip()
+        candidates.append({
+            "raw_url": href,
+            "anchor_text": anchor_text,
+            "source": "html_anchor",
+        })
+
+    plain_text = "\n".join([body_text, body_preview])
+    url_pattern = re.compile(r"(https?://[^\s<>\"]+)")
+    for match in url_pattern.findall(plain_text):
+        candidates.append({
+            "raw_url": match,
+            "anchor_text": "",
+            "source": "plain_text",
+        })
+
+    seen = set()
+    links = []
+    for idx, candidate in enumerate(candidates, 1):
+        normalized = normalize_url(candidate.get("raw_url", ""))
+        if not normalized:
+            continue
+
+        context = _build_link_context(
+            subject=subject,
+            body_preview=body_preview[:220],
+            anchor_text=candidate.get("anchor_text", ""),
+            url=normalized,
+        )
+        if _is_non_content_link(normalized, context):
+            continue
+        if _looks_like_homepage(normalized) and "fund" not in context.lower() and "investor" not in context.lower():
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+
+        links.append({
+            "artifact_id": f"link:{idx}",
+            "artifact_type": "link",
+            "url": normalized,
+            "anchor_text": candidate.get("anchor_text", ""),
+            "description_context": context,
+            "source": candidate.get("source", "plain_text"),
+        })
+
+    return links
+
+
+def extract_attachment_candidates(metadata: dict) -> list:
+    """Extract attachment candidates and contextual descriptions for GPT."""
+    attachments = metadata.get("attachments", []) or []
+    subject = metadata.get("subject", "") or ""
+    body_preview = metadata.get("bodyPreview", "") or ""
+
+    candidates = []
+    for idx, att in enumerate(attachments, 1):
+        attachment_id = att.get("id") or f"attachment:{idx}"
+        filename = att.get("name", "")
+        mime_type = att.get("contentType", "")
+        is_inline = bool(att.get("isInline", False))
+
+        candidates.append({
+            "artifact_id": str(attachment_id),
+            "artifact_type": "attachment",
+            "attachment_id": str(attachment_id),
+            "filename": filename,
+            "mime_type": mime_type,
+            "size": att.get("size", 0),
+            "is_inline": is_inline,
+            "description_context": " | ".join(
+                p for p in [
+                    f"subject={subject}",
+                    f"body_preview={body_preview[:220]}",
+                    f"filename={filename}",
+                    f"mime_type={mime_type}",
+                ] if p
+            ),
+        })
+
+    return candidates
+
+
+def build_artifact_candidates(metadata: dict) -> dict:
+    """Build deterministic artifact candidates from email metadata."""
+    return {
+        "attachments": extract_attachment_candidates(metadata),
+        "links": extract_links_from_email_metadata(metadata),
+    }
+
+
+def _contains_monthly_net_update(filename: str) -> bool:
+    lower = (filename or "").lower()
+    return bool(
+        re.search(r"(monthly|mtd|month[-_ ]end|factsheet|tear[-_ ]?sheet|net|nav|performance)", lower)
+    )
+
+
+def _make_empty_artifact_assignments(total_attachments: int = 0, total_links: int = 0) -> dict:
+    return {
+        "included_attachments": [],
+        "included_links": [],
+        "skipped_attachments": [],
+        "skipped_links": [],
+        "summary": {
+            "total_attachments": total_attachments,
+            "total_links": total_links,
+            "included_count": 0,
+            "skipped_count": 0,
+        },
+    }
+
+
+def _is_assignment_uncertain(confidence: float, evidence: str) -> bool:
+    evidence_lower = (evidence or "").strip().lower()
+    weak_tokens = ("unclear", "ambiguous", "guess", "not sure", "insufficient", "unknown")
+    return confidence < ASSIGNMENT_CONFIDENCE_THRESHOLD or not evidence_lower or any(t in evidence_lower for t in weak_tokens)
+
+
+def _extract_firm_from_third_party(tp_string: str, firm_mappings: dict) -> str:
+    """
+    Extract a firm name from a from_third_party string.
+
+    Examples:
+        "Rose Mac Cullagh (WMC Capital Ltd)" -> "WMC CAPITAL"
+        "investlife.com (LIFE)" -> "LIFE"
+    """
+    if not tp_string or not firm_mappings:
+        return ""
+
+    canonical_names = firm_mappings.get("canonical_names", {})
+
+    # Try parenthetical content first: "Person (Firm Name Ltd)"
+    candidates = []
+    paren_match = re.search(r'\(([^)]+)\)', tp_string)
+    if paren_match:
+        candidates.append(paren_match.group(1).strip())
+    candidates.append(tp_string.strip())
+
+    for candidate in candidates:
+        candidate_lower = candidate.lower()
+        for canonical, info in canonical_names.items():
+            if canonical.lower() in candidate_lower or candidate_lower in canonical.lower():
+                return canonical
+            for alias in info.get("aliases", []):
+                if alias.lower() in candidate_lower or candidate_lower in alias.lower():
+                    return canonical
+
+    # Fallback: normalize the parenthetical content
+    if paren_match:
+        normalized = normalize_firm_name(paren_match.group(1).strip(), firm_mappings)
+        if normalized and normalized != "UNKNOWN":
+            return normalized
+
+    return ""
+
+
+def _recover_firm_name(
+    artifact: dict,
+    all_artifacts: list,
+    email_metadata: dict,
+    firm_mappings: dict,
+) -> str:
+    """
+    Attempt to recover a firm name for an artifact whose name was blanked by uncertainty.
+
+    Recovery chain:
+    1. Sibling artifacts from the same email that have a firm name
+    2. from_third_party field on the email classification
+    3. Sender domain against domain_overrides
+    4. Sender domain hints matched against canonical names
+    5. Artifact evidence/description scanned for known firm names
+    """
+    if not firm_mappings:
+        return ""
+
+    # Strategy 1: Sibling artifact with firm name
+    for sibling in all_artifacts:
+        if sibling is artifact:
+            continue
+        sibling_firm = sibling.get("assigned_firm_name", "")
+        if sibling_firm:
+            return sibling_firm
+
+    # Strategy 2: from_third_party field
+    from_tp = email_metadata.get("_from_third_party", False)
+    if from_tp and isinstance(from_tp, str):
+        firm_from_tp = _extract_firm_from_third_party(from_tp, firm_mappings)
+        if firm_from_tp:
+            return firm_from_tp
+
+    # Strategy 3: Domain overrides
+    sender = (email_metadata.get("from", {}).get("emailAddress", {}).get("address", "") or "").lower()
+    if sender and '@' in sender:
+        domain = sender.split('@')[1]
+        domain_overrides = firm_mappings.get("domain_overrides", {})
+        for override_domain, firm in domain_overrides.items():
+            if domain == override_domain.lower():
+                return firm
+
+    # Strategy 4: Domain hints matched against canonical names
+    hints = extract_domain_hints(sender)
+    canonical_names = firm_mappings.get("canonical_names", {})
+    for hint in hints:
+        hint_lower = hint.lower()
+        for canonical, info in canonical_names.items():
+            if hint_lower in canonical.lower():
+                return canonical
+            for alias in info.get("aliases", []):
+                if hint_lower in alias.lower():
+                    return canonical
+
+    # Strategy 5: Scan evidence/description for known firm names
+    searchable_text = " ".join([
+        artifact.get("evidence", ""),
+        artifact.get("description", ""),
+        artifact.get("description_context", ""),
+        artifact.get("filename", ""),
+    ]).lower()
+    if searchable_text.strip():
+        for canonical, info in canonical_names.items():
+            if canonical.lower() in searchable_text:
+                return canonical
+            for alias in info.get("aliases", []):
+                if len(alias) > 3 and alias.lower() in searchable_text:
+                    return canonical
+
+    return ""
+
+
+def _project_legacy_fields(artifact_assignments: dict) -> tuple[list, list]:
+    legacy_attachments = []
+    legacy_links = []
+
+    for att in artifact_assignments.get("included_attachments", []):
+        legacy_attachments.append({
+            "attachment_id": att.get("attachment_id", ""),
+            "filename": att.get("filename", ""),
+            "mime_type": att.get("mime_type", ""),
+            "assigned_firm_id": att.get("assigned_firm_id", ""),
+            "assigned_fund_id": att.get("assigned_fund_id", ""),
+            "assignment": {
+                "confidence": att.get("confidence", 0.0),
+                "method": att.get("method", "email_context"),
+                "evidence": att.get("evidence", ""),
+            },
+            "contains_monthly_net_performance_update": att.get("contains_monthly_net_performance_update", False),
+        })
+
+    for link in artifact_assignments.get("included_links", []):
+        legacy_links.append({
+            "url": link.get("url", ""),
+            "description": link.get("description", ""),
+            "link_type": link.get("link_type", "other"),
+            "assigned_firm_id": link.get("assigned_firm_id", ""),
+            "assigned_fund_id": link.get("assigned_fund_id", ""),
+        })
+
+    return legacy_attachments, legacy_links
+
+
+def _default_classification(reason: str = "") -> dict:
+    return {
+        "schema_version": "2.0",
+        "email_classification": {
+            "is_hedge_fund_related": False,
+            "confidence": 0.0,
+            "email_type": "Other",
+            "from_third_party": False,
+            "source_priority": "lowest",
+            "reasoning": reason,
+        },
+        "firm_name": "",
+        "firm_name_source": "unknown",
+        "artifact_assignments": _make_empty_artifact_assignments(),
+        "attachments": [],
+        "fund_related_links": [],
+    }
+
+
+def _finalize_artifact_classification(
+    raw_result: dict,
+    candidates: dict,
+    firm_mappings: dict = None,
+    email_metadata: dict = None,
+) -> dict:
+    candidate_map = {}
+    for att in candidates.get("attachments", []):
+        candidate_map[att["artifact_id"]] = att
+    for link in candidates.get("links", []):
+        candidate_map[link["artifact_id"]] = link
+
+    included_attachments = []
+    included_links = []
+    skipped_attachments = []
+    skipped_links = []
+
+    raw_artifacts = raw_result.get("artifacts", [])
+    for record in raw_artifacts:
+        artifact_id = str(record.get("artifact_id", "")).strip()
+        artifact_type = (record.get("artifact_type", "") or "").strip().lower()
+        if artifact_id not in candidate_map or artifact_type not in {"attachment", "link"}:
+            continue
+
+        source = candidate_map[artifact_id]
+        confidence = float(record.get("confidence", 0.0) or 0.0)
+        evidence = record.get("evidence", "") or ""
+        method = record.get("method", "email_context") or "email_context"
+        reason_code = record.get("reason_code", REASON_CODE_OTHER) or REASON_CODE_OTHER
+        is_related = bool(record.get("is_hedge_fund_related", False))
+
+        firm_name = (record.get("assigned_firm_name", "") or "").strip()
+        fund_name = (record.get("assigned_fund_name", "") or "").strip()
+        original_firm_name = firm_name
+        original_fund_name = fund_name
+        if _is_assignment_uncertain(confidence, evidence):
+            firm_name = ""
+            fund_name = ""
+
+        firm_id = generate_firm_id(firm_name) if firm_name else ""
+        fund_id = generate_fund_id(fund_name) if fund_name else ""
+
+        if artifact_type == "attachment":
+            payload = {
+                "artifact_id": artifact_id,
+                "artifact_type": artifact_type,
+                "attachment_id": source.get("attachment_id", artifact_id),
+                "filename": source.get("filename", ""),
+                "mime_type": source.get("mime_type", ""),
+                "assigned_firm_name": firm_name,
+                "assigned_firm_id": firm_id,
+                "assigned_fund_name": fund_name,
+                "assigned_fund_id": fund_id,
+                "confidence": confidence,
+                "method": method,
+                "evidence": evidence,
+                "reason_code": reason_code,
+                "contains_monthly_net_performance_update": bool(
+                    record.get(
+                        "contains_monthly_net_performance_update",
+                        _contains_monthly_net_update(source.get("filename", "")),
+                    )
+                ),
+                "_original_firm_name": original_firm_name,
+                "_original_fund_name": original_fund_name,
+            }
+            if is_related:
+                included_attachments.append(payload)
+            else:
+                skipped_attachments.append({
+                    "artifact_id": artifact_id,
+                    "artifact_type": artifact_type,
+                    "attachment_id": source.get("attachment_id", artifact_id),
+                    "filename": source.get("filename", ""),
+                    "mime_type": source.get("mime_type", ""),
+                    "confidence": confidence,
+                    "reason_code": reason_code,
+                    "evidence": evidence,
+                })
+        else:
+            payload = {
+                "artifact_id": artifact_id,
+                "artifact_type": artifact_type,
+                "url": source.get("url", ""),
+                "description": record.get("description", source.get("description_context", "")),
+                "link_type": record.get("link_type", "other"),
+                "assigned_firm_name": firm_name,
+                "assigned_firm_id": firm_id,
+                "assigned_fund_name": fund_name,
+                "assigned_fund_id": fund_id,
+                "confidence": confidence,
+                "method": method,
+                "evidence": evidence,
+                "reason_code": reason_code,
+                "_original_firm_name": original_firm_name,
+                "_original_fund_name": original_fund_name,
+            }
+            if is_related:
+                included_links.append(payload)
+            else:
+                skipped_links.append({
+                    "artifact_id": artifact_id,
+                    "artifact_type": artifact_type,
+                    "url": source.get("url", ""),
+                    "description": record.get("description", source.get("description_context", "")),
+                    "link_type": record.get("link_type", "other"),
+                    "confidence": confidence,
+                    "reason_code": reason_code,
+                    "evidence": evidence,
+                })
+
+    # --- Firm name recovery pass ---
+    # For included artifacts with blank firm names, attempt to recover using context
+    if firm_mappings and email_metadata:
+        raw_email_cls_for_recovery = raw_result.get("email_classification", {}) or {}
+        recovery_metadata = dict(email_metadata) if email_metadata else {}
+        recovery_metadata["_from_third_party"] = raw_email_cls_for_recovery.get("from_third_party", False)
+
+        all_included = included_attachments + included_links
+        for item in all_included:
+            if item.get("assigned_firm_name"):
+                continue
+            if item.get("confidence", 0.0) < FIRM_RECOVERY_CONFIDENCE_FLOOR:
+                continue
+
+            recovered_firm = _recover_firm_name(
+                artifact=item,
+                all_artifacts=all_included,
+                email_metadata=recovery_metadata,
+                firm_mappings=firm_mappings,
+            )
+            if recovered_firm:
+                canonical = normalize_firm_name(recovered_firm, firm_mappings)
+                item["assigned_firm_name"] = canonical
+                item["assigned_firm_id"] = generate_firm_id(canonical)
+                item["firm_recovery_method"] = "post_classification_recovery"
+
+    assignments = {
+        "included_attachments": included_attachments,
+        "included_links": included_links,
+        "skipped_attachments": skipped_attachments,
+        "skipped_links": skipped_links,
+        "summary": {
+            "total_attachments": len(candidates.get("attachments", [])),
+            "total_links": len(candidates.get("links", [])),
+            "included_count": len(included_attachments) + len(included_links),
+            "skipped_count": len(skipped_attachments) + len(skipped_links),
+        },
+    }
+
+    if firm_mappings:
+        for item in included_attachments + included_links:
+            firm_name = item.get("assigned_firm_name", "")
+            fund_name = item.get("assigned_fund_name", "")
+            if not firm_name or not fund_name:
+                continue
+            canonical = normalize_firm_name(firm_name, firm_mappings)
+            add_firm_to_mappings(canonical, [firm_name], firm_mappings)
+            add_fund_to_firm(canonical, fund_name, [], firm_mappings)
+
+    primary_firm_name = ""
+    for item in included_attachments + included_links:
+        if item.get("assigned_firm_name"):
+            primary_firm_name = item["assigned_firm_name"]
+            break
+
+    raw_email_cls = raw_result.get("email_classification", {}) or {}
+    included_count = assignments["summary"]["included_count"]
+    is_hedge_related = included_count > 0
+    confidence = max([float(item.get("confidence", 0.0)) for item in included_attachments + included_links] or [0.0])
+
+    email_cls = {
+        "is_hedge_fund_related": is_hedge_related,
+        "confidence": confidence if is_hedge_related else float(raw_email_cls.get("confidence", 0.0) or 0.0),
+        "email_type": raw_email_cls.get("email_type", "Other"),
+        "from_third_party": raw_email_cls.get("from_third_party", False),
+        "source_priority": "highest" if is_hedge_related else raw_email_cls.get("source_priority", "lowest"),
+        "reasoning": raw_email_cls.get("reasoning", ""),
+    }
+    if is_hedge_related:
+        email_cls["reasoning"] = (
+            email_cls.get("reasoning", "")
+            + f" Artifact-based inclusion count={included_count}."
+        ).strip()
+
+    legacy_attachments, legacy_links = _project_legacy_fields(assignments)
+    return {
+        "schema_version": "2.0",
+        "email_classification": email_cls,
+        "firm_name": primary_firm_name,
+        "firm_name_source": "attachment_or_link" if primary_firm_name else "unknown",
+        "artifact_assignments": assignments,
+        "attachments": legacy_attachments,
+        "fund_related_links": legacy_links,
+    }
+
+
+def ensure_classification_schema(classification: dict) -> dict:
+    """
+    Ensure entries loaded from cache match additive v2 schema while preserving legacy fields.
+    """
+    if not classification:
+        return _default_classification()
+
+    # Migrate very old flat schema into nested email_classification
+    if "email_classification" not in classification:
+        classification = {
+            "email_classification": {
+                "is_hedge_fund_related": bool(classification.get("is_hedge_fund_related", False)),
+                "confidence": float(classification.get("confidence", 0.0) or 0.0),
+                "email_type": classification.get("email_type", "Other"),
+                "from_third_party": classification.get("is_third_party", False),
+                "source_priority": classification.get("source_priority", "lowest"),
+                "reasoning": classification.get("reasoning", ""),
+            },
+            "firm_name": classification.get("firm_name", ""),
+            "firm_name_source": classification.get("firm_name_source", "unknown"),
+            "attachments": classification.get("attachments", []),
+            "fund_related_links": classification.get("fund_related_links", []),
+        }
+
+    if "artifact_assignments" not in classification:
+        included_attachments = []
+        for att in classification.get("attachments", []):
+            included_attachments.append({
+                "artifact_id": att.get("attachment_id", ""),
+                "artifact_type": "attachment",
+                "attachment_id": att.get("attachment_id", ""),
+                "filename": att.get("filename", ""),
+                "mime_type": att.get("mime_type", ""),
+                "assigned_firm_name": "",
+                "assigned_firm_id": att.get("assigned_firm_id", ""),
+                "assigned_fund_name": "",
+                "assigned_fund_id": att.get("assigned_fund_id", ""),
+                "confidence": float(att.get("assignment", {}).get("confidence", 0.0) or 0.0),
+                "method": att.get("assignment", {}).get("method", "email_context"),
+                "evidence": att.get("assignment", {}).get("evidence", ""),
+                "reason_code": REASON_CODE_OTHER,
+                "contains_monthly_net_performance_update": bool(att.get("contains_monthly_net_performance_update", False)),
+            })
+
+        included_links = []
+        for link in classification.get("fund_related_links", []):
+            included_links.append({
+                "artifact_id": link.get("url", ""),
+                "artifact_type": "link",
+                "url": link.get("url", ""),
+                "description": link.get("description", ""),
+                "link_type": link.get("link_type", "other"),
+                "assigned_firm_name": "",
+                "assigned_firm_id": link.get("assigned_firm_id", ""),
+                "assigned_fund_name": "",
+                "assigned_fund_id": link.get("assigned_fund_id", ""),
+                "confidence": 0.0,
+                "method": "legacy_migration",
+                "evidence": "",
+                "reason_code": REASON_CODE_OTHER,
+            })
+
+        classification["artifact_assignments"] = {
+            "included_attachments": included_attachments,
+            "included_links": included_links,
+            "skipped_attachments": [],
+            "skipped_links": [],
+            "summary": {
+                "total_attachments": len(included_attachments),
+                "total_links": len(included_links),
+                "included_count": len(included_attachments) + len(included_links),
+                "skipped_count": 0,
+            },
+        }
+
+    classification["schema_version"] = "2.0"
+    classification.setdefault("attachments", [])
+    classification.setdefault("fund_related_links", [])
+    classification.setdefault("firm_name", "")
+    classification.setdefault("firm_name_source", "unknown")
+    classification.setdefault("email_classification", _default_classification()["email_classification"])
+    return classification
+
+
 def classify_email_with_gpt(
     client: OpenAI,
     email_metadata: dict,
     existing_firms: list,
-    firm_mappings: dict = None
+    firm_mappings: dict = None,
 ) -> dict:
     """
-    Use GPT to classify an email and extract firm/fund information.
-
-    Returns new-format dict with:
-    - email_classification: {is_hedge_fund_related, confidence, email_type, from_third_party, source_priority, reasoning}
-    - firm_name, firm_name_source
-    - attachments: [{attachment_id, filename, mime_type, assigned_firm_id, assigned_fund_id, assignment, contains_monthly_net_performance_update}]
-    - fund_related_links: [{url, description, link_type, assigned_firm_id, assigned_fund_id}]
+    Artifact-first GPT classification for attachments and links with additive cache v2 output.
     """
-    # Build attachment listing for the prompt
-    attachments_in_email = email_metadata.get("attachments", [])
-    attachment_listing = json.dumps([
-        {
-            "id": a.get("id", ""),
-            "filename": a.get("name", ""),
-            "contentType": a.get("contentType", ""),
-            "size": a.get("size", 0)
-        }
-        for a in attachments_in_email
-    ], indent=2) if attachments_in_email else "[]"
+    candidates = build_artifact_candidates(email_metadata)
+    attachments = candidates.get("attachments", [])
+    links = candidates.get("links", [])
 
-    # Build the prompt
-    system_prompt = """You are an analyst-classification engine specialized in hedge funds and asset management communications.
+    system_prompt = """You are a hedge-fund communications classifier.
+Classify each artifact independently and only mark hedge-fund-related artifacts as true.
+Do not guess firms or funds. If uncertain, leave assigned_firm_name and assigned_fund_name empty.
+Return strict JSON only."""
 
-Your job is to:
-1. Determine whether an email is related to a hedge fund or asset management firm.
-2. Identify the CANONICAL ASSET MANAGEMENT FIRM NAME (the management company), NOT the fund name.
-3. Identify specific FUND NAMES managed by the firm.
-4. Classify each attachment and link with firm/fund assignment.
-5. Classify the email type.
+    email_summary = {
+        "subject": email_metadata.get("subject", ""),
+        "from": email_metadata.get("from", {}).get("emailAddress", {}).get("address", ""),
+        "body_preview": email_metadata.get("bodyPreview", ""),
+        "body_text": _truncate_text(_strip_html_tags((email_metadata.get("body", {}) or {}).get("content", "")), 3000),
+    }
 
-────────────────────────────────────────
-DEFINITIONS
-────────────────────────────────────────
-Hedge fund / asset management related emails include:
-- Monthly, quarterly, or annual performance updates
-- Investor letters, newsletters, and reports
-- Factsheets and tear sheets
-- NAV estimates or statements
-- Fund marketing and fundraising materials
-- Subscription / redemption documents
-- Due diligence materials
-- Cap intro materials
+    user_prompt = f"""Classify these email artifacts.
 
-Not hedge fund related:
-- Personal emails
-- IT / system notifications
-- General broker marketing not tied to specific funds
-- Generic news with no fund or manager reference
+EMAIL_SUMMARY:
+{json.dumps(email_summary, indent=2, ensure_ascii=False)}
 
-────────────────────────────────────────
-ASSET MANAGEMENT FIRM IDENTIFICATION (CRITICAL)
-────────────────────────────────────────
-You must extract the ASSET MANAGEMENT FIRM (investment manager), not the fund.
+ATTACHMENT_CANDIDATES:
+{json.dumps(attachments, indent=2, ensure_ascii=False)}
 
-FIRM ≠ FUND
+LINK_CANDIDATES:
+{json.dumps(links, indent=2, ensure_ascii=False)}
 
-Fund names often include:
-- Strategy descriptors (e.g., Global Macro, Long/Short)
-- Structures (Master, Feeder, SP, Class A)
-- Geography or currency
+EXISTING_FIRMS:
+{json.dumps(existing_firms[:30] if existing_firms else [], indent=2, ensure_ascii=False)}
 
-Firm names are the management company and typically end with:
-Capital, Asset Management, Investment Management, Advisors, Partners, Holdings
-
-────────────────────────────────────────
-FUND IDENTIFICATION
-────────────────────────────────────────
-In addition to identifying the FIRM, you must also identify specific FUND NAMES.
-
-A single firm may manage multiple funds. Examples:
-- WMC Capital manages "Albemarle Shipping Fund" and "WMC Global Macro Fund"
-- Springs Capital manages "Springs China Alpha Fund"
-
-For each fund mentioned in the email body, subject, or attachments:
-- Extract the fund's display name
-- List any alternative names or abbreviations as aliases
-
-If no specific fund can be identified, return an empty array for funds_identified.
-
-────────────────────────────────────────
-PRIORITY HIERARCHY (MANDATORY)
-────────────────────────────────────────
-You MUST follow this hierarchy when identifying the firm:
-
-HIGHEST:
-- Explicitly stated asset management firm in the email body or attachment
-  (e.g., signature, "Managed by", letterhead)
-
-MEDIUM:
-- Fund name identified → you must verify (using the web search tool calling) which firm manages that fund
-
-MEDIUM-LOW:
-- No verification possible → infer from domain or fund naming
-
-LOWEST:
-- Not hedge fund related or insufficient information
-
-You MUST be able to explain:
-- Which priority level was used
-- What source was relied on
-- What verification or reasoning was performed
-
-────────────────────────────────────────
-THIRD-PARTY INTERMEDIARIES
-────────────────────────────────────────
-Third-party intermediaries include:
-- Cap intro firms
-- Fund administrators
-- Prime brokers
-- Data providers
-
-The email domain name may differ from the ASSET MANAGEMENT FIRM without implying a third-party intermediary (e.g., forwarded emails or simply when the AM firm name manages a materially different fund name).
-To be more certain, the following are some examples of third-party firms (exhaustive):
-- Cap Intro / Capital Introduction: - IConnections, With Intelligence, Agecroft Partners, Park Hill Group, Eaton Partners, HFM (Hedge Fund Manager)
-- Fund Administrators: - CITCO, Apex Group, ApexConnect, SS&C Technologies, NAV Consulting, Trident Trust, Custom House, Alter Domus
-- Prime Brokers (when sending cap intro or research): - Goldman Sachs (GS), Morgan Stanley (MS), Bank of America (BofA/BAML), JPMorgan, UBS, Credit Suisse, Barclays
-- Other Intermediaries: - Marex, Preqin, eVestment, Bloomberg, Refinitiv, PivotalPath, HFR (Hedge Fund Research)
-
-If an email is from a third-party intermediary and contains hedge fund content:
-- Return the THIRD-PARTY firm name in "firm_name"
-- Set from_third_party to the NAME of the third-party firm (e.g., "Morgan Stanley Client Services")
-- If NOT from a third party, set from_third_party to false
-
-────────────────────────────────────────
-NAMING RULES
-────────────────────────────────────────
-- Use canonical, industry-recognized firm names
-- Clean the "," "LLC", "Ltd.", "Inc.", "LP", "LLP", "Corporation", "Corp." suffixes when identifying the firm name, but recognize them as indicators of a firm name
-- Expand acronyms when possible (e.g., E20 → E20 Capital)
-- Do NOT guess firm names without justification
-- If no firm can be identified, return an empty string
-
-────────────────────────────────────────
-ATTACHMENT CLASSIFICATION
-────────────────────────────────────────
-For each attachment in the email metadata, classify:
-- Which firm it belongs to (use the firm name you identified)
-- Which fund it belongs to (use the fund name if identifiable)
-- Whether it contains monthly net performance data (factsheet with returns)
-- Your confidence and evidence for the assignment
-
-Base your classification on:
-- The attachment filename (e.g., "Fund_Dec_2025_Factsheet.pdf")
-- The email context (subject, body text mentioning attached documents)
-- The email sender / firm already identified
-
-────────────────────────────────────────
-LINK DETECTION
-────────────────────────────────────────
-Identify ALL fund-related links (URLs, hyperlinks) in the email that could potentially contain fund-related information.
-These include links to:
-- Performance reports or factsheets (PDF downloads)
-- Investor portals or data rooms
-- Fund documentation or presentations
-- NAV statements or account statements
-- Due diligence materials
-- Webinars or recordings that are related to the fund or firm
-
-For EACH fund-related link found, extract:
-- The actual URL
-- A brief description of what the link appears to contain
-- The link type category
-- Which firm and fund it relates to
-
-Ignore links that are:
-- Non-fund related
-- Simply linked to the asset management firm's homepage
-- Identification or 3rd party tracking website links (e.g., email tracking pixels)
-- Unsubscribe links
-- Social media profile links
-
-You must follow these rules exactly."""
-
-    user_prompt = f"""Analyze the following email metadata and return the classification.
-
-EMAIL METADATA:
-{json.dumps(email_metadata, indent=2, default=str)}
-
-ATTACHMENTS IN THIS EMAIL:
-{attachment_listing}
-
-EXISTING FIRMS (for de-duplication only):
-{json.dumps(existing_firms[:20] if existing_firms else [], indent=2)}
-
-OUTPUT REQUIREMENTS:
-Return a STRICT JSON object with EXACTLY the following structure:
-
+Return exactly this structure:
 {{
   "email_classification": {{
-    "is_hedge_fund_related": true or false,
-    "confidence": number between 0 and 1,
-    "email_type": "Monthly performance update" |
-                  "Quarterly performance update" |
-                  "Annual report" |
-                  "Investor letter / newsletter" |
-                  "Factsheet / tear sheet" |
-                  "Marketing / fundraising" |
-                  "Webinar / event invitation" |
-                  "Subscription / redemption" |
-                  "Due diligence" |
-                  "Cap intro" |
-                  "Other",
-    "from_third_party": "Name of third-party firm" or false,
+    "email_type": "Monthly performance update" | "Quarterly performance update" | "Annual report" | "Investor letter / newsletter" | "Factsheet / tear sheet" | "Marketing / fundraising" | "Webinar / event invitation" | "Subscription / redemption" | "Due diligence" | "Cap intro" | "Other",
+    "from_third_party": "Name" or false,
     "source_priority": "highest" | "medium" | "medium_low" | "lowest",
-    "reasoning": "brief explanation following the priority hierarchy"
+    "reasoning": "brief reason"
   }},
-  "firm_name": "string",
-  "firm_name_source": "email_content" | "attachment" | "web search" | "email_address" | "subject" | "unknown",
-  "funds_identified": [
+  "artifacts": [
     {{
-      "fund_name": "Full Fund Display Name",
-      "fund_aliases": ["alias1", "alias2"]
-    }}
-  ],
-  "attachments": [
-    {{
-      "attachment_id": "the attachment id from metadata",
-      "filename": "the filename",
-      "assigned_firm_name": "the firm name",
-      "assigned_fund_name": "the fund name or empty string",
-      "confidence": number between 0 and 1,
-      "method": "attachment_content" | "email_context" | "filename_match",
-      "evidence": "brief explanation",
-      "contains_monthly_net_performance_update": true or false
-    }}
-  ],
-  "fund_related_links": [
-    {{
-      "url": "the actual URL",
-      "description": "brief description of link content",
+      "artifact_id": "exact artifact id from candidates",
+      "artifact_type": "attachment" | "link",
+      "is_hedge_fund_related": true or false,
+      "reason_code": "fund_document" | "investor_update" | "cap_intro_manager_material" | "tracking_or_system" | "non_fund_marketing" | "other",
+      "assigned_firm_name": "string or empty",
+      "assigned_fund_name": "string or empty",
+      "confidence": 0.0,
+      "method": "attachment_content" | "email_context" | "filename_match" | "link_context",
+      "evidence": "brief evidence",
       "link_type": "performance_report" | "factsheet" | "investor_portal" | "presentation" | "nav_statement" | "due_diligence" | "webinar" | "other",
-      "assigned_firm_name": "the firm name",
-      "assigned_fund_name": "the fund name or empty string"
+      "description": "optional, mainly for links",
+      "contains_monthly_net_performance_update": true or false
     }}
   ]
 }}
-
-Return JSON only. No commentary.
 """
 
     try:
@@ -637,98 +1248,16 @@ Return JSON only. No commentary.
                 {"role": "user", "content": user_prompt},
             ],
         )
-
-        raw_result = json.loads(response.output[0].content[0].text)
-
-        # Post-process: convert human-readable names to IDs
-        firm_name = raw_result.get("firm_name", "")
-        firm_id = generate_firm_id(firm_name) if firm_name else ""
-
-        # Register funds if firm_mappings provided
-        if firm_mappings and firm_name:
-            canonical = normalize_firm_name(firm_name, firm_mappings)
-            if canonical in firm_mappings.get("canonical_names", {}):
-                for fund_info in raw_result.get("funds_identified", []):
-                    fund_display = fund_info.get("fund_name", "")
-                    fund_aliases = fund_info.get("fund_aliases", [])
-                    if fund_display:
-                        add_fund_to_firm(canonical, fund_display, fund_aliases, firm_mappings)
-
-        # Build attachment metadata with IDs
-        processed_attachments = []
-        for att in raw_result.get("attachments", []):
-            att_firm_name = att.get("assigned_firm_name", firm_name)
-            att_fund_name = att.get("assigned_fund_name", "")
-
-            # Look up mime_type from original email metadata
-            mime_type = ""
-            for orig_att in attachments_in_email:
-                if orig_att.get("id") == att.get("attachment_id") or orig_att.get("name") == att.get("filename"):
-                    mime_type = orig_att.get("contentType", "")
-                    break
-
-            processed_attachments.append({
-                "attachment_id": att.get("attachment_id", ""),
-                "filename": att.get("filename", ""),
-                "mime_type": mime_type,
-                "assigned_firm_id": generate_firm_id(att_firm_name) if att_firm_name else firm_id,
-                "assigned_fund_id": generate_fund_id(att_fund_name) if att_fund_name else "",
-                "assignment": {
-                    "confidence": att.get("confidence", 0.0),
-                    "method": att.get("method", "email_context"),
-                    "evidence": att.get("evidence", "")
-                },
-                "contains_monthly_net_performance_update": att.get("contains_monthly_net_performance_update", False)
-            })
-
-        # Build links with IDs
-        processed_links = []
-        for link in raw_result.get("fund_related_links", []):
-            link_firm_name = link.get("assigned_firm_name", firm_name)
-            link_fund_name = link.get("assigned_fund_name", "")
-            processed_links.append({
-                "url": link.get("url", ""),
-                "description": link.get("description", ""),
-                "link_type": link.get("link_type", "other"),
-                "assigned_firm_id": generate_firm_id(link_firm_name) if link_firm_name else firm_id,
-                "assigned_fund_id": generate_fund_id(link_fund_name) if link_fund_name else ""
-            })
-
-        # Build final result in new format
-        result = {
-            "email_classification": raw_result.get("email_classification", {
-                "is_hedge_fund_related": False,
-                "confidence": 0.0,
-                "email_type": "Other",
-                "from_third_party": False,
-                "source_priority": "lowest",
-                "reasoning": ""
-            }),
-            "firm_name": firm_name,
-            "firm_name_source": raw_result.get("firm_name_source", "unknown"),
-            "attachments": processed_attachments,
-            "fund_related_links": processed_links
-        }
-
-        return result
-
+        raw_text = response.output[0].content[0].text
+        raw_result = json.loads(raw_text)
+        return _finalize_artifact_classification(raw_result, candidates, firm_mappings=firm_mappings, email_metadata=email_metadata)
     except Exception as e:
         print(f"GPT classification error: {e}")
-        return {
-            "email_classification": {
-                "is_hedge_fund_related": False,
-                "confidence": 0.0,
-                "email_type": "Other",
-                "from_third_party": False,
-                "source_priority": "lowest",
-                "reasoning": f"Classification error: {str(e)}"
-            },
-            "firm_name": "",
-            "firm_name_source": "error",
-            "attachments": [],
-            "fund_related_links": []
-        }
-
+        result = _default_classification(reason=f"Classification error: {str(e)}")
+        result["artifact_assignments"] = _make_empty_artifact_assignments(
+            total_attachments=len(attachments), total_links=len(links)
+        )
+        return result
 
 def load_classification_cache(output_dir: Path) -> dict:
     """Load cached classifications to avoid re-processing."""
@@ -778,6 +1307,237 @@ def copy_email_to_firm_folder(
     return dest_folder
 
 
+# --- Entity-based artifact organization ---
+
+
+def _resolve_artifact_dest_dir(
+    firm_name: str,
+    fund_name: str,
+    output_dir: Path,
+    firm_mappings: dict,
+) -> Path:
+    """
+    Resolve destination directory for an individual artifact.
+
+    - Firm + fund → output_dir/FIRM/FUND/
+    - Firm only  → output_dir/FIRM/
+    - No firm    → output_dir/_NEEDS_REVIEW/
+    """
+    if firm_name:
+        canonical = normalize_firm_name(firm_name, firm_mappings)
+        canonical = apply_folder_reassignment(canonical, firm_mappings)
+        safe_firm = sanitize_folder_name(canonical)
+        if fund_name:
+            safe_fund = sanitize_folder_name(fund_name)
+            return output_dir / safe_firm / safe_fund
+        else:
+            return output_dir / safe_firm
+    else:
+        return output_dir / NEEDS_REVIEW_FOLDER
+
+
+def _find_attachment_file(
+    email_folder: Path,
+    attachment_artifact: dict,
+    email_metadata: dict,
+) -> Path | None:
+    """
+    Locate the actual attachment file in the email folder.
+
+    Checks: attachments/ subfolder (primary), then root folder, then fuzzy match.
+    """
+    filename = attachment_artifact.get("filename", "")
+
+    if filename:
+        # Primary: attachments subfolder (standard layout)
+        candidate = email_folder / "attachments" / filename
+        if candidate.exists():
+            return candidate
+
+        # Fallback: root of email folder
+        candidate = email_folder / filename
+        if candidate.exists():
+            return candidate
+
+        # Fuzzy match (case-insensitive)
+        attachments_dir = email_folder / "attachments"
+        search_dirs = [attachments_dir, email_folder] if attachments_dir.is_dir() else [email_folder]
+        for search_dir in search_dirs:
+            for f in search_dir.iterdir():
+                if f.is_file() and f.name.lower() == filename.lower():
+                    return f
+
+    return None
+
+
+def _create_link_proxy_file(
+    link_artifact: dict,
+    email_metadata: dict,
+    dest_dir: Path,
+    date_prefix: str,
+) -> Path:
+    """
+    Create a .link.json proxy file for a link artifact.
+
+    Contains URL, description, firm/fund assignment, and source email info.
+    """
+    description = link_artifact.get("description", "") or ""
+    url = link_artifact.get("url", "")
+    if description:
+        slug = re.sub(r'[^a-zA-Z0-9]+', '_', description)[:60].strip('_').lower()
+    else:
+        parsed = urlparse(url)
+        slug = re.sub(r'[^a-zA-Z0-9]+', '_', parsed.path)[:60].strip('_').lower() or "link"
+
+    filename = f"{date_prefix}_link_{slug}.link.json"
+
+    proxy_data = {
+        "proxy_version": "1.0",
+        "url": url,
+        "description": description,
+        "link_type": link_artifact.get("link_type", "other"),
+        "assigned_firm_name": link_artifact.get("assigned_firm_name", ""),
+        "assigned_firm_id": link_artifact.get("assigned_firm_id", ""),
+        "assigned_fund_name": link_artifact.get("assigned_fund_name", ""),
+        "assigned_fund_id": link_artifact.get("assigned_fund_id", ""),
+        "confidence": link_artifact.get("confidence", 0.0),
+        "evidence": link_artifact.get("evidence", ""),
+        "reason_code": link_artifact.get("reason_code", ""),
+        "source_email": {
+            "email_id": email_metadata.get("id", ""),
+            "subject": email_metadata.get("subject", ""),
+            "from": email_metadata.get("from", {}).get("emailAddress", {}).get("address", ""),
+            "date": email_metadata.get("receivedDateTime", ""),
+        },
+        "created_at": datetime.now().isoformat(),
+    }
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    filepath = dest_dir / filename
+    with open(filepath, 'w', encoding='utf-8') as f:
+        json.dump(proxy_data, f, indent=2, ensure_ascii=False)
+
+    return filepath
+
+
+def _write_needs_review_context(
+    dest_dir: Path,
+    artifact: dict,
+    email_metadata: dict,
+    date_prefix: str,
+) -> None:
+    """
+    Write a .review.json companion file for artifacts routed to _NEEDS_REVIEW.
+    """
+    identifier = artifact.get("filename", artifact.get("url", "unknown"))
+    slug = re.sub(r'[^a-zA-Z0-9]+', '_', identifier)[:40].strip('_').lower()
+    review_path = dest_dir / f"{date_prefix}_{slug}.review.json"
+
+    context = {
+        "artifact_id": artifact.get("artifact_id", ""),
+        "artifact_type": artifact.get("artifact_type", ""),
+        "filename": artifact.get("filename", ""),
+        "url": artifact.get("url", ""),
+        "description": artifact.get("description", ""),
+        "evidence": artifact.get("evidence", ""),
+        "confidence": artifact.get("confidence", 0.0),
+        "reason_code": artifact.get("reason_code", ""),
+        "gpt_suggested_firm": artifact.get("_original_firm_name", ""),
+        "gpt_suggested_fund": artifact.get("_original_fund_name", ""),
+        "source_email": {
+            "email_id": email_metadata.get("id", ""),
+            "subject": email_metadata.get("subject", ""),
+            "from": email_metadata.get("from", {}).get("emailAddress", {}).get("address", ""),
+            "date": email_metadata.get("receivedDateTime", ""),
+        },
+    }
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    with open(review_path, 'w', encoding='utf-8') as f:
+        json.dump(context, f, indent=2, ensure_ascii=False)
+
+
+def organize_artifacts_to_folders(
+    classification: dict,
+    email_folder: Path,
+    email_metadata: dict,
+    output_dir: Path,
+    firm_mappings: dict,
+) -> dict:
+    """
+    Organize individual artifacts into FIRM/FUND/ folders.
+
+    Attachments: copied individually. Links: .link.json proxy files created.
+    Unresolvable artifacts routed to _NEEDS_REVIEW/ with .review.json context.
+
+    Returns dict with organized_count, needs_review_count, destinations.
+    """
+    assignments = classification.get("artifact_assignments", {})
+    included_attachments = assignments.get("included_attachments", [])
+    included_links = assignments.get("included_links", [])
+
+    # Extract date prefix for filenames
+    received_date = email_metadata.get("receivedDateTime", "")
+    if received_date:
+        try:
+            dt = datetime.fromisoformat(received_date.replace("Z", "+00:00"))
+            date_prefix = dt.strftime("%Y-%m-%d")
+        except (ValueError, TypeError):
+            date_prefix = datetime.now().strftime("%Y-%m-%d")
+    else:
+        date_prefix = datetime.now().strftime("%Y-%m-%d")
+
+    result = {
+        "organized_count": 0,
+        "needs_review_count": 0,
+        "destinations": [],
+    }
+
+    # Process attachments
+    for att in included_attachments:
+        firm_name = att.get("assigned_firm_name", "")
+        fund_name = att.get("assigned_fund_name", "")
+        filename = att.get("filename", "")
+
+        dest_dir = _resolve_artifact_dest_dir(firm_name, fund_name, output_dir, firm_mappings)
+
+        source_file = _find_attachment_file(email_folder, att, email_metadata)
+        if source_file and source_file.exists():
+            safe_filename = sanitize_folder_name(filename) if filename else source_file.name
+            dest_filename = f"{date_prefix}_{safe_filename}"
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest_path = dest_dir / dest_filename
+            shutil.copy2(str(source_file), str(dest_path))
+            result["destinations"].append(str(dest_path))
+        else:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+
+        is_needs_review = NEEDS_REVIEW_FOLDER in str(dest_dir)
+        if is_needs_review:
+            _write_needs_review_context(dest_dir, att, email_metadata, date_prefix)
+            result["needs_review_count"] += 1
+        else:
+            result["organized_count"] += 1
+
+    # Process links
+    for link in included_links:
+        firm_name = link.get("assigned_firm_name", "")
+        fund_name = link.get("assigned_fund_name", "")
+
+        dest_dir = _resolve_artifact_dest_dir(firm_name, fund_name, output_dir, firm_mappings)
+
+        proxy_path = _create_link_proxy_file(link, email_metadata, dest_dir, date_prefix)
+        result["destinations"].append(str(proxy_path))
+
+        is_needs_review = NEEDS_REVIEW_FOLDER in str(dest_dir)
+        if is_needs_review:
+            result["needs_review_count"] += 1
+        else:
+            result["organized_count"] += 1
+
+    return result
+
+
 def classify_and_organize_emails(
     email_input_dir: Path = None,
     output_dir: Path = None,
@@ -803,6 +1563,9 @@ def classify_and_organize_emails(
     # Load existing data
     firm_mappings = load_firm_mappings(output_dir)
     classification_cache = {} if force_reclassify else load_classification_cache(output_dir)
+    if not force_reclassify:
+        for cache_key, cache_value in list(classification_cache.items()):
+            classification_cache[cache_key] = ensure_classification_schema(cache_value)
 
     # Initialize OpenAI client
     client = get_openai_client()
@@ -853,7 +1616,9 @@ def classify_and_organize_emails(
         if override_firm:
             override_source = "email_override" if from_address.lower() in [e.lower() for e in firm_mappings.get("email_overrides", {}).keys()] else "domain_override"
             override_detail = 'email: ' + from_address if override_source == "email_override" else ('domain: ' + from_address.split('@')[1] if '@' in from_address else 'unknown')
+            candidates = build_artifact_candidates(metadata)
             classification = {
+                "schema_version": "2.0",
                 "email_classification": {
                     "is_hedge_fund_related": True,
                     "confidence": 1.0,
@@ -864,13 +1629,17 @@ def classify_and_organize_emails(
                 },
                 "firm_name": override_firm,
                 "firm_name_source": override_source,
+                "artifact_assignments": _make_empty_artifact_assignments(
+                    total_attachments=len(candidates.get("attachments", [])),
+                    total_links=len(candidates.get("links", [])),
+                ),
                 "attachments": [],
                 "fund_related_links": []
             }
             print(f"[{i+1}/{len(email_folders)}] (override) {subject[:50]}...")
         # Check cache
         elif email_id in classification_cache:
-            classification = classification_cache[email_id]
+            classification = ensure_classification_schema(classification_cache[email_id])
             print(f"[{i+1}/{len(email_folders)}] (cached) {subject[:50]}...")
         else:
             # Classify with GPT
@@ -881,18 +1650,18 @@ def classify_and_organize_emails(
                 existing_firms,
                 firm_mappings
             )
-
-            # Apply attachment/link rule: force hedge fund related if attachments or links exist
-            email_cls = classification.get("email_classification", {})
-            if metadata.get("hasAttachments") or classification.get("fund_related_links"):
-                email_cls["is_hedge_fund_related"] = True
-                classification["email_classification"] = email_cls
+            classification = ensure_classification_schema(classification)
 
             # Cache the result
             classification_cache[email_id] = classification
 
         # Process classification result
+        classification = ensure_classification_schema(classification)
         email_cls = classification.get("email_classification", {})
+        included_count = classification.get("artifact_assignments", {}).get("summary", {}).get("included_count", 0)
+        if included_count > 0:
+            email_cls["is_hedge_fund_related"] = True
+            classification["email_classification"] = email_cls
         classification_entry = {
             "email_id": email_id,
             "email_folder": email_folder.name,
@@ -904,22 +1673,14 @@ def classify_and_organize_emails(
         if email_cls.get("is_hedge_fund_related"):
             report["hedge_fund_related"] += 1
 
-            # Get the firm name (single string)
+            # Register firm/fund in mappings from email-level firm_name
             raw_firm_name = classification.get("firm_name", "")
             from_third_party = email_cls.get("from_third_party", False)
 
             if raw_firm_name:
-                # Normalize the firm name
                 canonical_name = normalize_firm_name(raw_firm_name, firm_mappings)
-
-                # Apply folder reassignment if configured
-                pre_reassign_name = canonical_name
                 canonical_name = apply_folder_reassignment(canonical_name, firm_mappings)
-                reassignment = None
-                if canonical_name != pre_reassign_name:
-                    reassignment = {pre_reassign_name: canonical_name}
 
-                # Add to mappings if new (only add domain hints for non-third-party emails)
                 if not from_third_party:
                     domain_hints = extract_domain_hints(
                         metadata.get("from", {}).get("emailAddress", {}).get("address", "")
@@ -929,11 +1690,9 @@ def classify_and_organize_emails(
                     aliases = [raw_firm_name]
                 add_firm_to_mappings(canonical_name, aliases, firm_mappings)
 
-                # Update existing firms list for future classifications
                 if canonical_name not in existing_firms:
                     existing_firms.append(canonical_name)
 
-                # Track firm in report
                 if canonical_name not in report["firms_found"]:
                     report["firms_found"][canonical_name] = {
                         "email_count": 0,
@@ -945,20 +1704,29 @@ def classify_and_organize_emails(
                     "folder": email_folder.name,
                     "subject": subject
                 })
-
                 classification_entry["canonical_firm_name"] = canonical_name
-                if reassignment:
-                    classification_entry["reassignment"] = reassignment
 
-                # Copy to firm folder
-                dest = copy_email_to_firm_folder(email_folder, canonical_name, output_dir)
-                classification_entry["destination"] = str(dest)
-                folder_display = sanitize_folder_name(canonical_name)
-                print(f"    -> Copied to: {folder_display}/")
-            else:
-                report["hedge_fund_related"] -= 1  # Correction: no firm name found
-                report["non_hedge_fund"] += 1
-                print(f"    -> Hedge fund related but no firm name identified")
+            # Organize individual artifacts to firm/fund folders
+            org_result = organize_artifacts_to_folders(
+                classification=classification,
+                email_folder=email_folder,
+                email_metadata=metadata,
+                output_dir=output_dir,
+                firm_mappings=firm_mappings,
+            )
+            classification_entry["destinations"] = org_result["destinations"]
+            classification_entry["organized_count"] = org_result["organized_count"]
+            classification_entry["needs_review_count"] = org_result["needs_review_count"]
+
+            if org_result["organized_count"] > 0:
+                print(f"    -> Organized {org_result['organized_count']} artifact(s) to firm folders")
+            if org_result["needs_review_count"] > 0:
+                print(f"    -> {org_result['needs_review_count']} artifact(s) sent to {NEEDS_REVIEW_FOLDER}/")
+            if org_result["organized_count"] == 0 and org_result["needs_review_count"] == 0:
+                if not raw_firm_name:
+                    report["hedge_fund_related"] -= 1
+                    report["non_hedge_fund"] += 1
+                print(f"    -> Hedge fund related but no artifacts could be organized")
         else:
             report["non_hedge_fund"] += 1
             print(f"    -> Not hedge fund related (confidence: {email_cls.get('confidence', 0):.2f})")
@@ -1050,6 +1818,8 @@ def classify_new_emails(
 
     firm_mappings = load_firm_mappings(output_dir)
     classification_cache = load_classification_cache(output_dir)
+    for cache_key, cache_value in list(classification_cache.items()):
+        classification_cache[cache_key] = ensure_classification_schema(cache_value)
     client = get_openai_client()
     existing_firms = list(firm_mappings.get("canonical_names", {}).keys())
 
@@ -1073,7 +1843,9 @@ def classify_new_emails(
         override_firm = check_email_override(from_address, firm_mappings)
         if override_firm:
             override_source = "email_override" if from_address.lower() in [e.lower() for e in firm_mappings.get("email_overrides", {}).keys()] else "domain_override"
+            candidates = build_artifact_candidates(metadata)
             classification = {
+                "schema_version": "2.0",
                 "email_classification": {
                     "is_hedge_fund_related": True,
                     "confidence": 1.0,
@@ -1084,6 +1856,10 @@ def classify_new_emails(
                 },
                 "firm_name": override_firm,
                 "firm_name_source": override_source,
+                "artifact_assignments": _make_empty_artifact_assignments(
+                    total_attachments=len(candidates.get("attachments", [])),
+                    total_links=len(candidates.get("links", [])),
+                ),
                 "attachments": [],
                 "fund_related_links": []
             }
@@ -1091,56 +1867,69 @@ def classify_new_emails(
         else:
             # Classify with GPT
             print(f"[{i+1}/{len(new_folders)}] Classifying: {subject[:50]}...")
-            classification = classify_email_with_gpt(client, metadata, existing_firms, firm_mappings)
-
-            # Apply attachment/link rule: force hedge fund related if attachments or links exist
-            email_cls = classification.get("email_classification", {})
-            if metadata.get("hasAttachments") or classification.get("fund_related_links"):
-                email_cls["is_hedge_fund_related"] = True
-                classification["email_classification"] = email_cls
-
+            classification = ensure_classification_schema(
+                classify_email_with_gpt(client, metadata, existing_firms, firm_mappings)
+            )
             classification_cache[email_id] = classification
 
         # Process result
+        classification = ensure_classification_schema(classification)
         email_cls = classification.get("email_classification", {})
+        included_count = classification.get("artifact_assignments", {}).get("summary", {}).get("included_count", 0)
+        if included_count > 0:
+            email_cls["is_hedge_fund_related"] = True
+            classification["email_classification"] = email_cls
         raw_firm_name = classification.get("firm_name", "")
         from_third_party = email_cls.get("from_third_party", False)
 
-        if email_cls.get("is_hedge_fund_related") and raw_firm_name:
-            canonical_name = normalize_firm_name(raw_firm_name, firm_mappings)
-            canonical_name = apply_folder_reassignment(canonical_name, firm_mappings)
+        if email_cls.get("is_hedge_fund_related"):
+            # Register firm in mappings if available
+            if raw_firm_name:
+                canonical_name = normalize_firm_name(raw_firm_name, firm_mappings)
+                canonical_name = apply_folder_reassignment(canonical_name, firm_mappings)
 
-            # Add to mappings (only add domain hints for non-third-party emails)
-            if not from_third_party:
-                domain_hints = extract_domain_hints(from_address)
-                aliases = [raw_firm_name] + domain_hints
+                if not from_third_party:
+                    domain_hints = extract_domain_hints(from_address)
+                    aliases = [raw_firm_name] + domain_hints
+                else:
+                    aliases = [raw_firm_name]
+                add_firm_to_mappings(canonical_name, aliases, firm_mappings)
+
+                if canonical_name not in existing_firms:
+                    existing_firms.append(canonical_name)
             else:
-                aliases = [raw_firm_name]
-            add_firm_to_mappings(canonical_name, aliases, firm_mappings)
+                canonical_name = None
 
-            if canonical_name not in existing_firms:
-                existing_firms.append(canonical_name)
+            # Organize individual artifacts to firm/fund folders
+            org_result = organize_artifacts_to_folders(
+                classification=classification,
+                email_folder=email_folder,
+                email_metadata=metadata,
+                output_dir=output_dir,
+                firm_mappings=firm_mappings,
+            )
 
-            # Copy to firm folder
-            dest = copy_email_to_firm_folder(email_folder, canonical_name, output_dir)
-            folder_display = sanitize_folder_name(canonical_name)
-            print(f"    -> Copied to: {folder_display}/")
+            if org_result["organized_count"] > 0:
+                print(f"    -> Organized {org_result['organized_count']} artifact(s) to firm folders")
+            if org_result["needs_review_count"] > 0:
+                print(f"    -> {org_result['needs_review_count']} artifact(s) sent to {NEEDS_REVIEW_FOLDER}/")
 
             results.append({
                 "email_folder": email_folder.name,
                 "subject": subject,
                 "firm": canonical_name,
-                "destination": str(dest),
-                "from_third_party": from_third_party
+                "destinations": org_result["destinations"],
+                "organized_count": org_result["organized_count"],
+                "needs_review_count": org_result["needs_review_count"],
+                "from_third_party": from_third_party,
             })
         else:
-            reason = "Not hedge fund related" if not email_cls.get("is_hedge_fund_related") else "No firm name identified"
-            print(f"    -> Skipped: {reason}")
+            print(f"    -> Skipped: Not hedge fund related")
             results.append({
                 "email_folder": email_folder.name,
                 "subject": subject,
                 "firm": None,
-                "reason": reason
+                "reason": "Not hedge fund related",
             })
 
     # Save updated data
@@ -1678,14 +2467,20 @@ def manage_firm_aliases(output_dir: Path = None):
         print("No firms found in mappings.")
         return
 
+    sorted_firms = sorted(canonical_names.keys())
     print("\nAvailable firms:")
-    for i, firm in enumerate(sorted(canonical_names.keys()), 1):
+    for i, firm in enumerate(sorted_firms, 1):
         alias_count = len(canonical_names[firm].get("aliases", []))
         print(f"  {i}. {firm} ({alias_count} aliases)")
 
-    firm_name = input("\nEnter firm name to manage aliases: ").strip()
-    if not firm_name:
+    raw_input = input("\nEnter firm name or number: ").strip()
+    if not raw_input:
         print("No firm name provided.")
+        return
+
+    firm_name = _resolve_from_numbered_list(raw_input, sorted_firms)
+    if firm_name is None:
+        print(f"Invalid selection: {raw_input}")
         return
 
     # List aliases for the firm
@@ -1708,9 +2503,13 @@ def manage_firm_aliases(output_dir: Path = None):
         if not aliases:
             print("No aliases to delete.")
             return
-        alias_to_delete = input("Enter alias to delete: ").strip()
+        alias_to_delete = input("Enter alias name or number to delete: ").strip()
         if alias_to_delete:
-            delete_firm_alias(firm_name, alias_to_delete, output_dir)
+            resolved = _resolve_from_numbered_list(alias_to_delete, aliases)
+            if resolved is None:
+                print(f"Invalid selection: {alias_to_delete}")
+                return
+            delete_firm_alias(firm_name, resolved, output_dir)
         else:
             print("No alias provided.")
     elif choice == "3":
@@ -1741,14 +2540,14 @@ def list_firm_funds(firm_name: str, output_dir: Path = None) -> dict:
     print(f"\nFunds under '{firm_key}':")
     print("-" * 40)
     if funds:
-        for fund_id, fund_info in funds.items():
-            print(f"\n  {fund_info['display_name']}")
-            print(f"    ID: {fund_id}")
+        for i, (fund_id, fund_info) in enumerate(funds.items(), 1):
+            print(f"\n  {i}. {fund_info['display_name']}")
+            print(f"     ID: {fund_id}")
             fund_aliases = fund_info.get("aliases", [])
             if fund_aliases:
-                print(f"    Aliases: {', '.join(fund_aliases)}")
+                print(f"     Aliases: {', '.join(fund_aliases)}")
             else:
-                print(f"    Aliases: (none)")
+                print(f"     Aliases: (none)")
     else:
         print("  (No funds registered)")
 
@@ -1843,23 +2642,35 @@ def manage_fund_aliases(output_dir: Path = None):
         return
 
     # Show firms with fund counts
+    sorted_firms = sorted(canonical_names.keys())
     print("\nAvailable firms:")
-    for i, firm in enumerate(sorted(canonical_names.keys()), 1):
+    for i, firm in enumerate(sorted_firms, 1):
         fund_count = len(canonical_names[firm].get("funds", {}))
         print(f"  {i}. {firm} ({fund_count} funds)")
 
-    firm_name = input("\nEnter firm name: ").strip()
-    if not firm_name:
+    raw_input = input("\nEnter firm name or number: ").strip()
+    if not raw_input:
         print("No firm name provided.")
+        return
+
+    firm_name = _resolve_from_numbered_list(raw_input, sorted_firms)
+    if firm_name is None:
+        print(f"Invalid selection: {raw_input}")
         return
 
     funds = list_firm_funds(firm_name, output_dir)
     if not funds:
         return
 
-    fund_id = input("\nEnter fund ID to manage: ").strip()
-    if not fund_id or fund_id not in funds:
-        print("Invalid fund ID.")
+    fund_ids = list(funds.keys())
+    raw_fund = input("\nEnter fund ID or number: ").strip()
+    if not raw_fund:
+        print("No fund provided.")
+        return
+
+    fund_id = _resolve_from_numbered_list(raw_fund, fund_ids)
+    if fund_id is None or fund_id not in funds:
+        print(f"Invalid fund selection: {raw_fund}")
         return
 
     print("\nOptions:")
@@ -1876,9 +2687,20 @@ def manage_fund_aliases(output_dir: Path = None):
         else:
             print("No alias provided.")
     elif choice == "2":
-        alias_to_delete = input("Enter alias to delete: ").strip()
+        fund_aliases = funds[fund_id].get("aliases", [])
+        if not fund_aliases:
+            print("No aliases to delete for this fund.")
+            return
+        print("\nFund aliases:")
+        for i, alias in enumerate(fund_aliases, 1):
+            print(f"  {i}. {alias}")
+        alias_to_delete = input("Enter alias name or number to delete: ").strip()
         if alias_to_delete:
-            delete_fund_alias_from_firm(firm_name, fund_id, alias_to_delete, output_dir)
+            resolved = _resolve_from_numbered_list(alias_to_delete, fund_aliases)
+            if resolved is None:
+                print(f"Invalid selection: {alias_to_delete}")
+                return
+            delete_fund_alias_from_firm(firm_name, fund_id, resolved, output_dir)
         else:
             print("No alias provided.")
     elif choice == "3":
@@ -1901,7 +2723,7 @@ MARQUEE_USERNAME = os.getenv("MARQUEE_USERNAME", "")
 MARQUEE_PASSWORD = os.getenv("MARQUEE_PASSWORD", "")
 
 # Download directory
-DEFAULT_DOWNLOAD_DIR = Path(r"C:\Users\FOF Analyst\Desktop\fofproject\output\testing\downloads")
+DEFAULT_DOWNLOAD_DIR = _PROJECT_ROOT / "output" / "testing" / "downloads"
 
 
 def setup_selenium_driver(download_dir: Path, headless: bool = False):
@@ -2425,6 +3247,7 @@ def download_fund_links(
     links_to_process = []
 
     for email_id, classification in cache.items():
+        classification = ensure_classification_schema(classification)
         email_cls = classification.get("email_classification", {})
         if not email_cls.get("is_hedge_fund_related"):
             continue
@@ -2521,10 +3344,10 @@ def download_fund_links(
             if result["status"] == "success":
                 report["successful"] += 1
                 download_history["downloaded_urls"].append(url)
-                print(f"    ✓ Downloaded: {len(result.get('downloaded_files', []))} file(s)")
+                print(f"    ??Downloaded: {len(result.get('downloaded_files', []))} file(s)")
             elif result["status"] == "failed":
                 report["failed"] += 1
-                print(f"    ✗ Failed: {result.get('message', 'Unknown error')}")
+                print(f"    ??Failed: {result.get('message', 'Unknown error')}")
             else:
                 report["errors"] += 1
                 print(f"    ? {result['status']}: {result.get('message', '')}")
@@ -2595,6 +3418,7 @@ def list_pending_links(output_dir: Path = None, download_dir: Path = None) -> li
     print("=" * 60)
 
     for email_id, classification in cache.items():
+        classification = ensure_classification_schema(classification)
         email_cls = classification.get("email_classification", {})
         if not email_cls.get("is_hedge_fund_related"):
             continue
@@ -2672,6 +3496,7 @@ def get_all_undownloaded_links(output_dir: Path = None, download_dir: Path = Non
     undownloaded = []
 
     for email_id, classification in cache.items():
+        classification = ensure_classification_schema(classification)
         email_cls = classification.get("email_classification", {})
         if not email_cls.get("is_hedge_fund_related"):
             continue
@@ -2832,7 +3657,7 @@ def interactive_download_manager(
                 # Save immediately
                 with open(download_history_path, 'w', encoding='utf-8') as f:
                     json.dump(download_history, f, indent=2)
-                print(f"✓ Marked as downloaded")
+                print(f"??Marked as downloaded")
                 downloaded += 1
                 processed += 1
                 i += 1
@@ -2840,7 +3665,7 @@ def interactive_download_manager(
 
             elif action == 's':
                 # Skip - don't update anything
-                print("→ Skipped (will show again next time)")
+                print("??Skipped (will show again next time)")
                 skipped += 1
                 i += 1
                 break
@@ -2856,7 +3681,7 @@ def interactive_download_manager(
                 })
                 with open(download_history_path, 'w', encoding='utf-8') as f:
                     json.dump(download_history, f, indent=2)
-                print("✗ Marked as failed")
+                print("??Marked as failed")
                 failed += 1
                 processed += 1
                 i += 1
@@ -2875,7 +3700,7 @@ def interactive_download_manager(
                 })
                 with open(download_history_path, 'w', encoding='utf-8') as f:
                     json.dump(download_history, f, indent=2)
-                print("⊘ Marked as ignored (won't appear again)")
+                print("??Marked as ignored (won't appear again)")
                 ignored += 1
                 processed += 1
                 i += 1
@@ -2891,7 +3716,7 @@ def interactive_download_manager(
 
             elif action == 'n':
                 # Next without marking
-                print("→ Moving to next link")
+                print("??Moving to next link")
                 i += 1
                 break
 
@@ -2984,7 +3809,7 @@ def batch_mark_downloaded(
                 "method": "batch_manual"
             })
             marked_count += 1
-            print(f"✓ {url[:60]}...")
+            print(f"??{url[:60]}...")
 
     with open(download_history_path, 'w', encoding='utf-8') as f:
         json.dump(download_history, f, indent=2)
@@ -3019,6 +3844,7 @@ def show_download_status(output_dir: Path = None, download_dir: Path = None):
     by_firm = {}
 
     for email_id, classification in cache.items():
+        classification = ensure_classification_schema(classification)
         email_cls = classification.get("email_classification", {})
         if not email_cls.get("is_hedge_fund_related"):
             continue
@@ -3143,12 +3969,18 @@ def main():
         else:
             print("Domain and firm name are required.")
     elif mode == "7":
-        old_firm = input("Enter old firm name to reassign/remove: ").strip()
-        new_firm = input("Enter new firm name (will be created if doesn't exist): ").strip()
-        if old_firm and new_firm:
-            reassign_firm(old_firm, new_firm)
+        old_firm = _interactive_firm_picker("Select OLD firm to reassign/remove")
+        if not old_firm:
+            print("No firm selected.")
         else:
-            print("Both firm names are required.")
+            new_firm = _interactive_firm_picker(
+                "Select NEW firm (target)",
+                allow_new=True,
+            )
+            if not new_firm:
+                print("No target firm provided.")
+            else:
+                reassign_firm(old_firm, new_firm)
     elif mode == "8":
         interval = input("Poll interval in seconds (default 30): ").strip()
         interval = int(interval) if interval.isdigit() else 30
@@ -3223,3 +4055,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
