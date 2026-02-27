@@ -19,7 +19,9 @@ tests/fixtures/**
 !tests/fixtures/.gitkeep
 
 # IDE and local tool settings
-.claude/
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
 .vscode/
 
 # Test and build caches/artifacts
