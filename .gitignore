@@ -6,9 +6,24 @@ __pycache__/
 *.png
 output/
 input/
+.venv/
 *.env
 RETURN DATA.csv
 MANUAL INPUTS.csv
 
 # Streamlit secrets (contains password)
 .streamlit/secrets.toml
+
+# Private test fixtures (PDFs/expected outputs)
+tests/fixtures/**
+!tests/fixtures/.gitkeep
+
+# IDE and local tool settings
+.claude/
+.vscode/
+
+# Test and build caches/artifacts
+.pytest_cache/
+*.egg-info/
+dist/
+build/
