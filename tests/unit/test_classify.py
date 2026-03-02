@@ -18,9 +18,20 @@ from fofproject.classify import (
     apply_folder_reassignment,
     extract_domain_hints,
     classify_and_organize_emails,
-    generate_firm_id,
-    generate_fund_id,
     add_fund_to_firm,
+    _parse_firm_fund_from_path,
+    _build_destination_index,
+    sync_moved_artifacts,
+    extract_links_with_filter_log,
+    _finalize_artifact_classification,
+    _condense_skipped_artifact,
+    _blank_link_artifact,
+    _blank_attachment_artifact,
+    NEEDS_REVIEW_FOLDER,
+    CLASSIFICATION_CACHE_FILE,
+    CLASSIFICATION_REPORT_FILE,
+    FIRM_MAPPINGS_FILE,
+    REASON_CODE_OTHER,
 )
 
 
@@ -121,6 +132,97 @@ class TestNormalizeFirmName:
         """Should return uppercase cleaned name when no canonical match found."""
         assert normalize_firm_name('New Firm Name', empty_mappings) == 'NEW FIRM NAME'
         assert normalize_firm_name('  spaced name  ', empty_mappings) == 'SPACED NAME'
+
+    def test_substring_matches_existing_canonical(self):
+        """Shorter input should match longer canonical via substring."""
+        mappings = {
+            "canonical_names": {
+                "SG CAPITAL MANAGEMENT": {"aliases": [], "funds": {}},
+            },
+            "email_overrides": {},
+            "domain_overrides": {},
+            "folder_reassignments": {},
+        }
+        assert normalize_firm_name('SG Capital', mappings) == 'SG CAPITAL MANAGEMENT'
+
+    def test_canonical_substring_of_input(self):
+        """Longer input (after suffix strip) should match shorter canonical."""
+        mappings = {
+            "canonical_names": {
+                "SG CAPITAL": {"aliases": [], "funds": {}},
+            },
+            "email_overrides": {},
+            "domain_overrides": {},
+            "folder_reassignments": {},
+        }
+        assert normalize_firm_name('SG Capital Management Ltd', mappings) == 'SG CAPITAL'
+
+    def test_generic_words_skip_substring_match(self):
+        """All-generic-word names should not substring-match."""
+        mappings = {
+            "canonical_names": {
+                "SG CAPITAL MANAGEMENT": {"aliases": [], "funds": {}},
+            },
+            "email_overrides": {},
+            "domain_overrides": {},
+            "folder_reassignments": {},
+        }
+        # "Capital" is all-generic → should NOT match "SG CAPITAL MANAGEMENT"
+        assert normalize_firm_name('Capital', mappings) == 'CAPITAL'
+        # "Capital Management" is all-generic → should NOT match
+        assert normalize_firm_name('Capital Management', mappings) == 'CAPITAL MANAGEMENT'
+
+    def test_unique_single_word_substring_matches(self):
+        """Unique single-word name should substring-match existing canonical."""
+        mappings = {
+            "canonical_names": {
+                "CITADEL SECURITIES": {"aliases": [], "funds": {}},
+            },
+            "email_overrides": {},
+            "domain_overrides": {},
+            "folder_reassignments": {},
+        }
+        assert normalize_firm_name('Citadel', mappings) == 'CITADEL SECURITIES'
+
+    def test_longest_overlap_wins(self):
+        """When multiple canonicals match, longest overlap should win."""
+        mappings = {
+            "canonical_names": {
+                "SG CAPITAL MANAGEMENT": {"aliases": [], "funds": {}},
+                "SG CAPITAL": {"aliases": [], "funds": {}},
+            },
+            "email_overrides": {},
+            "domain_overrides": {},
+            "folder_reassignments": {},
+        }
+        # "SG Capital Management Group" contains both canonicals;
+        # "SG CAPITAL MANAGEMENT" (21 chars) has longer overlap than "SG CAPITAL" (10 chars)
+        assert normalize_firm_name('SG Capital Management Group', mappings) == 'SG CAPITAL MANAGEMENT'
+
+    def test_no_substring_match_for_unrelated(self):
+        """Unrelated names should not substring-match."""
+        mappings = {
+            "canonical_names": {
+                "SG CAPITAL MANAGEMENT": {"aliases": [], "funds": {}},
+            },
+            "email_overrides": {},
+            "domain_overrides": {},
+            "folder_reassignments": {},
+        }
+        assert normalize_firm_name('ABC Capital Partners', mappings) == 'ABC CAPITAL PARTNERS'
+
+    def test_substring_matches_via_alias(self):
+        """Substring match should also check aliases."""
+        mappings = {
+            "canonical_names": {
+                "SPRINGS CAPITAL": {"aliases": ["Springs Cap HK"], "funds": {}},
+            },
+            "email_overrides": {},
+            "domain_overrides": {},
+            "folder_reassignments": {},
+        }
+        # "Springs Cap" is substring of alias "Springs Cap HK"
+        assert normalize_firm_name('Springs Cap', mappings) == 'SPRINGS CAPITAL'
 
 
 # =============================================================================
@@ -249,7 +351,7 @@ class TestClassifyAndOrganizeEmails:
             "folder_reassignments": {},
             "_metadata": {"created": "2025-01-01"},
         }
-        mappings_file = output_dir / "firm_name_mappings.json"
+        mappings_file = output_dir / "firm_fund_mappings.json"
         mappings_file.write_text(json.dumps(mappings))
 
         # Run classification
@@ -282,17 +384,30 @@ class TestClassifyAndOrganizeEmails:
         }
         create_email_folder(email_input_dir, "email_cached", metadata)
 
-        # Pre-populate cache with old-format classification (will be auto-migrated)
+        # Pre-populate cache with classification
         cache = {
             "cached-email-123": {
-                "is_hedge_fund_related": True,
-                "confidence": 0.95,
-                "is_third_party": False,
+                "email_classification": {
+                    "is_hedge_fund_related": True,
+                    "confidence": 0.95,
+                    "from_third_party": False,
+                    "source_priority": "highest",
+                    "reasoning": "From cache",
+                    "email_type": "other",
+                },
                 "firm_name": "CACHED FIRM",
-                "firm_name_source": "cache",
-                "source_priority": "highest",
-                "reasoning": "From cache",
-                "email_type": "other",
+                "artifact_assignments": {
+                    "included_attachments": [],
+                    "included_links": [],
+                    "skipped_attachments": [],
+                    "skipped_links": [],
+                    "summary": {
+                        "total_attachments": 0,
+                        "total_links": 0,
+                        "included_count": 0,
+                        "skipped_count": 0,
+                    },
+                },
             }
         }
         cache_file = output_dir / "classification_cache.json"
@@ -308,7 +423,7 @@ class TestClassifyAndOrganizeEmails:
         # Assert: GPT was NOT called (cache used)
         patch_classify_email_with_gpt.assert_not_called()
 
-        # Assert: Email was copied using cached firm name (flat structure)
+        # Assert: Email was copied using cached firm name
         firm_folder = output_dir / "CACHED FIRM"
         assert firm_folder.exists()
 
@@ -461,35 +576,6 @@ class TestClassifyAndOrganizeEmails:
 # Tests for new utility functions
 # =============================================================================
 
-class TestGenerateFirmId:
-    """Tests for generate_firm_id function."""
-
-    def test_basic_conversion(self):
-        assert generate_firm_id("WMC CAPITAL") == "firm_wmc_capital"
-
-    def test_strips_special_characters(self):
-        assert generate_firm_id("Firm (HK) Ltd.") == "firm_firm_hk_ltd"
-
-    def test_empty_input(self):
-        assert generate_firm_id("") == "firm_unknown"
-
-
-class TestGenerateFundId:
-    """Tests for generate_fund_id function."""
-
-    def test_basic_conversion(self):
-        assert generate_fund_id("Albemarle Shipping Fund") == "fund_albemarle_shipping"
-
-    def test_strips_fund_suffix(self):
-        assert generate_fund_id("China Alpha Fund") == "fund_china_alpha"
-
-    def test_strips_strategy_suffix(self):
-        assert generate_fund_id("Global Macro Strategy") == "fund_global_macro"
-
-    def test_empty_input(self):
-        assert generate_fund_id("") == "fund_unknown"
-
-
 class TestAddFundToFirm:
     """Tests for add_fund_to_firm function."""
 
@@ -524,3 +610,661 @@ class TestAddFundToFirm:
             sample_mappings
         )
         assert fund_id == ""
+
+
+# =============================================================================
+# Tests for _parse_firm_fund_from_path()
+# =============================================================================
+
+class TestParseFirmFundFromPath:
+    def test_firm_only(self, tmp_path):
+        file_path = tmp_path / "SPRINGS CAPITAL" / "2026-02-28_report.pdf"
+        firm, fund = _parse_firm_fund_from_path(file_path, tmp_path)
+        assert firm == "SPRINGS CAPITAL"
+        assert fund == ""
+
+    def test_firm_and_fund(self, tmp_path):
+        file_path = tmp_path / "SPRINGS CAPITAL" / "CHINA ALPHA" / "report.pdf"
+        firm, fund = _parse_firm_fund_from_path(file_path, tmp_path)
+        assert firm == "SPRINGS CAPITAL"
+        assert fund == "CHINA ALPHA"
+
+    def test_needs_review(self, tmp_path):
+        file_path = tmp_path / NEEDS_REVIEW_FOLDER / "report.pdf"
+        firm, fund = _parse_firm_fund_from_path(file_path, tmp_path)
+        assert firm == ""
+        assert fund == ""
+
+    def test_root_file(self, tmp_path):
+        file_path = tmp_path / "some_file.json"
+        firm, fund = _parse_firm_fund_from_path(file_path, tmp_path)
+        assert firm == ""
+        assert fund == ""
+
+    def test_outside_output_dir(self, tmp_path):
+        file_path = Path("/totally/different/path/file.pdf")
+        firm, fund = _parse_firm_fund_from_path(file_path, tmp_path)
+        assert firm == ""
+        assert fund == ""
+
+
+# =============================================================================
+# Tests for _build_destination_index()
+# =============================================================================
+
+class TestBuildDestinationIndex:
+    def test_builds_index_from_report(self):
+        report = {
+            "classifications": [
+                {
+                    "email_id": "email_001",
+                    "destinations": ["/out/FIRM_A/2026-02-28_report.pdf"],
+                    "artifact_assignments": {
+                        "included_attachments": [
+                            {"artifact_id": "att_1", "filename": "report.pdf"}
+                        ],
+                        "included_links": [],
+                    },
+                }
+            ]
+        }
+        index = _build_destination_index(report)
+        assert "/out/FIRM_A/2026-02-28_report.pdf" in index["by_path"]
+        record = index["by_path"]["/out/FIRM_A/2026-02-28_report.pdf"]
+        assert record["email_id"] == "email_001"
+        assert record["list_key"] == "included_attachments"
+        assert record["idx"] == 0
+
+    def test_indexes_both_attachments_and_links(self):
+        report = {
+            "classifications": [
+                {
+                    "email_id": "email_002",
+                    "destinations": [
+                        "/out/FIRM/att.pdf",
+                        "/out/FIRM/link.link.json",
+                    ],
+                    "artifact_assignments": {
+                        "included_attachments": [
+                            {"artifact_id": "att_1", "filename": "att.pdf"}
+                        ],
+                        "included_links": [
+                            {"artifact_id": "link:1", "url": "https://example.com"}
+                        ],
+                    },
+                }
+            ]
+        }
+        index = _build_destination_index(report)
+        assert index["by_path"]["/out/FIRM/att.pdf"]["list_key"] == "included_attachments"
+        assert index["by_path"]["/out/FIRM/link.link.json"]["list_key"] == "included_links"
+
+    def test_empty_report(self):
+        index = _build_destination_index({"classifications": []})
+        assert index["by_path"] == {}
+        assert index["by_filename"] == {}
+
+    def test_filename_index_built(self):
+        report = {
+            "classifications": [
+                {
+                    "email_id": "email_003",
+                    "destinations": ["/out/FIRM/2026-02-28_report.pdf"],
+                    "artifact_assignments": {
+                        "included_attachments": [
+                            {"artifact_id": "att_1", "filename": "report.pdf"}
+                        ],
+                        "included_links": [],
+                    },
+                }
+            ]
+        }
+        index = _build_destination_index(report)
+        assert "2026-02-28_report.pdf" in index["by_filename"]
+        assert len(index["by_filename"]["2026-02-28_report.pdf"]) == 1
+
+
+# =============================================================================
+# Tests for sync_moved_artifacts()
+# =============================================================================
+
+class TestSyncMovedArtifacts:
+    def _setup_output_dir(self, tmp_path):
+        """Create a minimal output dir with cache, report, mappings, and one artifact."""
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        firm_dir = output_dir / "FIRM_A"
+        firm_dir.mkdir()
+
+        # Create an artifact file
+        artifact_file = firm_dir / "2026-02-28_report.pdf"
+        artifact_file.write_text("fake pdf content")
+
+        # Classification cache
+        cache = {
+            "email_001": {
+                "email_classification": {
+                    "is_hedge_fund_related": True,
+                    "confidence": 0.9,
+                    "email_type": "Monthly performance update",
+                    "from_third_party": False,
+                    "source_priority": "highest",
+                    "reasoning": "test",
+                },
+                "firm_name": "FIRM_A",
+                "artifact_assignments": {
+                    "included_attachments": [
+                        {
+                            "artifact_id": "att_1",
+                            "filename": "report.pdf",
+                            "mime_type": "application/pdf",
+                            "assigned_firm_name": "FIRM_A",
+                            "assigned_fund_name": "",
+                            "confidence": 0.9,
+                            "method": "email_context",
+                            "evidence": "test evidence",
+                            "reason_code": "fund_document",
+                            "contains_monthly_net_performance_update": False,
+                            "_original_firm_name": "FIRM_A",
+                            "_original_fund_name": "",
+                            "firm_recovery_method": "",
+                        }
+                    ],
+                    "included_links": [],
+                    "skipped_attachments": [],
+                    "skipped_links": [],
+                    "summary": {
+                        "total_attachments": 1,
+                        "total_links": 0,
+                        "included_count": 1,
+                        "skipped_count": 0,
+                    },
+                },
+            }
+        }
+        (output_dir / CLASSIFICATION_CACHE_FILE).write_text(
+            json.dumps(cache, indent=2)
+        )
+
+        # Report
+        report = {
+            "classifications": [
+                {
+                    "email_id": "email_001",
+                    "email_folder": "folder_001",
+                    "subject": "Test Email",
+                    "from": "test@example.com",
+                    **cache["email_001"],
+                    "destinations": [str(artifact_file)],
+                    "organized_count": 1,
+                    "needs_review_count": 0,
+                }
+            ]
+        }
+        (output_dir / CLASSIFICATION_REPORT_FILE).write_text(
+            json.dumps(report, indent=2)
+        )
+
+        # Firm mappings
+        mappings = {
+            "canonical_names": {
+                "FIRM_A": {
+                    "aliases": [],
+                    "description": "",
+                    "funds": {},
+                }
+            },
+            "email_overrides": {},
+            "domain_overrides": {},
+            "folder_reassignments": {},
+            "_metadata": {"created": "2026-01-01", "last_updated": "2026-01-01"},
+        }
+        (output_dir / FIRM_MAPPINGS_FILE).write_text(
+            json.dumps(mappings, indent=2)
+        )
+
+        return output_dir, artifact_file
+
+    def test_no_moves_detected(self, tmp_path):
+        output_dir, _ = self._setup_output_dir(tmp_path)
+        result = sync_moved_artifacts(output_dir)
+        assert result["moved"] == []
+        assert result["errors"] == []
+
+    def test_move_to_different_firm(self, tmp_path):
+        output_dir, artifact_file = self._setup_output_dir(tmp_path)
+
+        # Move the file to FIRM_B
+        firm_b_dir = output_dir / "FIRM_B"
+        firm_b_dir.mkdir()
+        new_path = firm_b_dir / artifact_file.name
+        artifact_file.rename(new_path)
+
+        result = sync_moved_artifacts(output_dir)
+        assert len(result["moved"]) == 1
+        assert result["moved"][0]["firm"] == "FIRM_B"
+        assert result["moved"][0]["from"] == "FIRM_A"
+        assert result["moved"][0]["to"] == "FIRM_B"
+
+        # Verify cache was updated
+        cache = json.loads((output_dir / CLASSIFICATION_CACHE_FILE).read_text())
+        att = cache["email_001"]["artifact_assignments"]["included_attachments"][0]
+        assert att["assigned_firm_name"] == "FIRM_B"
+        assert att["method"] == "manual_reassignment"
+
+        # Verify firm_mappings was updated
+        mappings = json.loads((output_dir / FIRM_MAPPINGS_FILE).read_text())
+        assert "FIRM_B" in mappings["canonical_names"]
+
+    def test_move_to_firm_and_fund(self, tmp_path):
+        output_dir, artifact_file = self._setup_output_dir(tmp_path)
+
+        # Move file to FIRM_B/FUND_X/
+        fund_dir = output_dir / "FIRM_B" / "FUND_X"
+        fund_dir.mkdir(parents=True)
+        new_path = fund_dir / artifact_file.name
+        artifact_file.rename(new_path)
+
+        result = sync_moved_artifacts(output_dir)
+        assert len(result["moved"]) == 1
+        assert result["moved"][0]["firm"] == "FIRM_B"
+        assert result["moved"][0]["fund"] == "FUND_X"
+
+        cache = json.loads((output_dir / CLASSIFICATION_CACHE_FILE).read_text())
+        att = cache["email_001"]["artifact_assignments"]["included_attachments"][0]
+        assert att["assigned_firm_name"] == "FIRM_B"
+        assert att["assigned_fund_name"] == "FUND_X"
+
+    def test_move_to_needs_review(self, tmp_path):
+        output_dir, artifact_file = self._setup_output_dir(tmp_path)
+
+        # Move to _NEEDS_REVIEW
+        review_dir = output_dir / NEEDS_REVIEW_FOLDER
+        review_dir.mkdir()
+        new_path = review_dir / artifact_file.name
+        artifact_file.rename(new_path)
+
+        result = sync_moved_artifacts(output_dir)
+        assert len(result["moved"]) == 1
+        assert result["moved"][0]["to"] == "_NEEDS_REVIEW"
+        assert result["moved"][0]["firm"] == ""
+
+        # Verify cache was blanked
+        cache = json.loads((output_dir / CLASSIFICATION_CACHE_FILE).read_text())
+        att = cache["email_001"]["artifact_assignments"]["included_attachments"][0]
+        assert att["assigned_firm_name"] == ""
+        assert att["method"] == "manual_rejection"
+
+        # Verify .review.json was created
+        review_files = list(review_dir.glob("*.review.json"))
+        assert len(review_files) == 1
+
+    def test_move_out_of_needs_review(self, tmp_path):
+        output_dir, artifact_file = self._setup_output_dir(tmp_path)
+
+        # First move to _NEEDS_REVIEW
+        review_dir = output_dir / NEEDS_REVIEW_FOLDER
+        review_dir.mkdir()
+        review_path = review_dir / artifact_file.name
+        artifact_file.rename(review_path)
+        sync_moved_artifacts(output_dir)  # Process the rejection
+
+        # Now move out to FIRM_C
+        firm_c_dir = output_dir / "FIRM_C"
+        firm_c_dir.mkdir()
+        final_path = firm_c_dir / review_path.name
+        review_path.rename(final_path)
+
+        result = sync_moved_artifacts(output_dir)
+        assert len(result["moved"]) == 1
+        assert result["moved"][0]["firm"] == "FIRM_C"
+        assert result["moved"][0]["from"] == "_NEEDS_REVIEW"
+
+        # Verify .review.json was cleaned up
+        review_files = list(review_dir.glob("*.review.json"))
+        assert len(review_files) == 0
+
+
+# =============================================================================
+# Tests for extract_links_with_filter_log()
+# =============================================================================
+
+class TestExtractLinksWithFilterLog:
+    """Tests for extract_links_with_filter_log function."""
+
+    def _make_email(self, body_html="", body_preview=""):
+        return {
+            "subject": "Test Subject",
+            "bodyPreview": body_preview,
+            "body": {"contentType": "html", "content": body_html},
+        }
+
+    def test_returns_candidates_and_filter_log(self):
+        """Should return a tuple of (candidates, filter_log)."""
+        metadata = self._make_email(
+            body_html='<a href="https://example.com/report">Report</a>'
+        )
+        candidates, filter_log = extract_links_with_filter_log(metadata)
+        assert isinstance(candidates, list)
+        assert isinstance(filter_log, list)
+
+    def test_valid_link_becomes_candidate(self):
+        """A valid non-filtered link should appear in candidates, not filter_log."""
+        metadata = self._make_email(
+            body_html='<a href="https://fundreport.com/data">Fund Report</a>'
+        )
+        candidates, filter_log = extract_links_with_filter_log(metadata)
+        assert len(candidates) == 1
+        assert candidates[0]["url"] == "https://fundreport.com/data"
+        assert len(filter_log) == 0
+
+    def test_non_content_link_logged(self):
+        """Unsubscribe/social links should appear in filter_log with reason."""
+        metadata = self._make_email(
+            body_html='<a href="https://example.com/unsubscribe">Unsubscribe</a>'
+        )
+        candidates, filter_log = extract_links_with_filter_log(metadata)
+        assert len(candidates) == 0
+        assert len(filter_log) == 1
+        assert filter_log[0]["reason"] == "non_content_link"
+
+    def test_social_media_link_logged(self):
+        """Social media links should be filtered as non_content_link."""
+        metadata = self._make_email(
+            body_html='<a href="https://linkedin.com/in/user">LinkedIn</a>'
+        )
+        candidates, filter_log = extract_links_with_filter_log(metadata)
+        assert len(candidates) == 0
+        assert len(filter_log) == 1
+        assert filter_log[0]["reason"] == "non_content_link"
+
+    def test_homepage_link_logged(self):
+        """A bare homepage without fund/investor context should be filtered."""
+        metadata = self._make_email(
+            body_html='<a href="https://example.com/">Example</a>',
+            body_preview="Some generic text",
+        )
+        candidates, filter_log = extract_links_with_filter_log(metadata)
+        assert len(candidates) == 0
+        assert len(filter_log) == 1
+        assert filter_log[0]["reason"] == "homepage_filtered"
+
+    def test_duplicate_link_logged(self):
+        """Duplicate normalized URLs should produce one candidate and one filter entry."""
+        metadata = self._make_email(
+            body_html=(
+                '<a href="https://example.com/report">Report</a>'
+                '<a href="https://www.example.com/report">Report Again</a>'
+            )
+        )
+        candidates, filter_log = extract_links_with_filter_log(metadata)
+        assert len(candidates) == 1
+        assert len(filter_log) == 1
+        assert filter_log[0]["reason"] == "duplicate"
+
+    def test_invalid_url_logged(self):
+        """A javascript: URL should be filtered as invalid_url."""
+        metadata = self._make_email(
+            body_html='<a href="javascript:void(0)">Click</a>'
+        )
+        candidates, filter_log = extract_links_with_filter_log(metadata)
+        assert len(candidates) == 0
+        assert len(filter_log) == 1
+        assert filter_log[0]["reason"] == "invalid_url"
+
+    def test_gap_free_artifact_ids(self):
+        """Artifact IDs should be sequential with no gaps."""
+        metadata = self._make_email(
+            body_html=(
+                '<a href="https://linkedin.com/in/user">LinkedIn</a>'
+                '<a href="https://fundreport.com/a">A</a>'
+                '<a href="https://fundreport.com/b">B</a>'
+            )
+        )
+        candidates, filter_log = extract_links_with_filter_log(metadata)
+        assert len(candidates) == 2
+        assert candidates[0]["artifact_id"] == "link:1"
+        assert candidates[1]["artifact_id"] == "link:2"
+
+
+# =============================================================================
+# Tests for _finalize_artifact_classification reconciliation
+# =============================================================================
+
+class TestReconciliation:
+    """Tests for the reconciliation pass in _finalize_artifact_classification."""
+
+    def _make_candidates(self):
+        return {
+            "attachments": [],
+            "links": [
+                {
+                    "artifact_id": "link:1",
+                    "url": "https://fund-a.com/report",
+                    "anchor_text": "Report A",
+                    "description_context": "subject=Test | host=fund-a.com",
+                    "source": "html_anchor",
+                },
+                {
+                    "artifact_id": "link:2",
+                    "url": "https://fund-b.com/factsheet",
+                    "anchor_text": "Factsheet B",
+                    "description_context": "subject=Test | host=fund-b.com",
+                    "source": "html_anchor",
+                },
+            ],
+        }
+
+    def test_omitted_link_creates_skipped_entry(self):
+        """When LLM omits a link, it should appear in skipped_links."""
+        candidates = self._make_candidates()
+        raw_result = {
+            "email_classification": {
+                "email_type": "Other",
+                "from_third_party": False,
+                "source_priority": "medium",
+                "reasoning": "test",
+            },
+            "artifacts": [
+                {
+                    "artifact_id": "link:1",
+                    "artifact_type": "link",
+                    "is_hedge_fund_related": True,
+                    "reason_code": "fund_document",
+                    "assigned_firm_name": "FUND A",
+                    "assigned_fund_name": "",
+                    "confidence": 0.9,
+                    "method": "link_context",
+                    "evidence": "Fund report link",
+                },
+                # link:2 is omitted by LLM
+            ],
+        }
+        result = _finalize_artifact_classification(raw_result, candidates)
+        assignments = result["artifact_assignments"]
+
+        assert len(assignments["included_links"]) == 1
+        assert assignments["included_links"][0]["artifact_id"] == "link:1"
+
+        # link:2 should be in skipped (condensed format)
+        skipped = assignments["skipped_links"]
+        assert len(skipped) == 1
+        assert skipped[0]["artifact_id"] == "link:2"
+        assert skipped[0]["method"] == "llm_omitted"
+
+        assert assignments["summary"]["llm_omitted_count"] == 1
+
+    def test_all_candidates_returned_no_omitted(self):
+        """When LLM returns all candidates, llm_omitted_count should be 0."""
+        candidates = self._make_candidates()
+        raw_result = {
+            "email_classification": {
+                "email_type": "Other",
+                "from_third_party": False,
+                "source_priority": "medium",
+                "reasoning": "test",
+            },
+            "artifacts": [
+                {
+                    "artifact_id": "link:1",
+                    "artifact_type": "link",
+                    "is_hedge_fund_related": True,
+                    "reason_code": "fund_document",
+                    "assigned_firm_name": "FUND A",
+                    "assigned_fund_name": "",
+                    "confidence": 0.9,
+                    "method": "link_context",
+                    "evidence": "Fund report link",
+                },
+                {
+                    "artifact_id": "link:2",
+                    "artifact_type": "link",
+                    "is_hedge_fund_related": False,
+                    "reason_code": "non_fund_marketing",
+                    "assigned_firm_name": "",
+                    "assigned_fund_name": "",
+                    "confidence": 0.8,
+                    "method": "link_context",
+                    "evidence": "Marketing page",
+                },
+            ],
+        }
+        result = _finalize_artifact_classification(raw_result, candidates)
+        assignments = result["artifact_assignments"]
+
+        assert len(assignments["included_links"]) == 1
+        assert len(assignments["skipped_links"]) == 1
+        assert assignments["summary"]["llm_omitted_count"] == 0
+
+    def test_omitted_attachment_creates_skipped_entry(self):
+        """When LLM omits an attachment, it should appear in skipped_attachments."""
+        candidates = {
+            "attachments": [
+                {
+                    "artifact_id": "att:1",
+                    "filename": "report.pdf",
+                    "mime_type": "application/pdf",
+                    "description_context": "subject=Test | filename=report.pdf",
+                },
+            ],
+            "links": [],
+        }
+        raw_result = {
+            "email_classification": {
+                "email_type": "Other",
+                "from_third_party": False,
+                "source_priority": "lowest",
+                "reasoning": "test",
+            },
+            "artifacts": [],  # LLM returned nothing
+        }
+        result = _finalize_artifact_classification(raw_result, candidates)
+        assignments = result["artifact_assignments"]
+
+        skipped = assignments["skipped_attachments"]
+        assert len(skipped) == 1
+        assert skipped[0]["artifact_id"] == "att:1"
+        assert skipped[0]["method"] == "llm_omitted"
+        assert skipped[0]["filename"] == "report.pdf"
+        assert assignments["summary"]["llm_omitted_count"] == 1
+
+    def test_skipped_links_are_condensed(self):
+        """Skipped links should be in condensed format (5 fields)."""
+        candidates = self._make_candidates()
+        raw_result = {
+            "email_classification": {
+                "email_type": "Other",
+                "from_third_party": False,
+                "source_priority": "medium",
+                "reasoning": "test",
+            },
+            "artifacts": [
+                {
+                    "artifact_id": "link:1",
+                    "artifact_type": "link",
+                    "is_hedge_fund_related": False,
+                    "reason_code": "non_fund_marketing",
+                    "assigned_firm_name": "",
+                    "assigned_fund_name": "",
+                    "confidence": 0.7,
+                    "method": "link_context",
+                    "evidence": "Marketing page",
+                },
+                {
+                    "artifact_id": "link:2",
+                    "artifact_type": "link",
+                    "is_hedge_fund_related": False,
+                    "reason_code": "other",
+                    "assigned_firm_name": "",
+                    "assigned_fund_name": "",
+                    "confidence": 0.5,
+                    "method": "link_context",
+                    "evidence": "Generic link",
+                },
+            ],
+        }
+        result = _finalize_artifact_classification(raw_result, candidates)
+        skipped = result["artifact_assignments"]["skipped_links"]
+        assert len(skipped) == 2
+        for entry in skipped:
+            assert set(entry.keys()) == {"artifact_id", "reason", "method", "evidence", "url"}
+
+
+# =============================================================================
+# Tests for _condense_skipped_artifact()
+# =============================================================================
+
+class TestCondenseSkippedArtifact:
+    """Tests for _condense_skipped_artifact function."""
+
+    def test_link_condensed_format(self):
+        """A full link artifact should condense to 5 fields with url."""
+        full = _blank_link_artifact()
+        full.update({
+            "artifact_id": "link:3",
+            "url": "https://example.com/report",
+            "reason_code": "non_fund_marketing",
+            "method": "link_context",
+            "evidence": "Not fund related",
+        })
+        condensed = _condense_skipped_artifact(full)
+        assert condensed == {
+            "artifact_id": "link:3",
+            "reason": "non_fund_marketing",
+            "method": "link_context",
+            "evidence": "Not fund related",
+            "url": "https://example.com/report",
+        }
+
+    def test_attachment_condensed_format(self):
+        """A full attachment artifact should condense to 5 fields with filename."""
+        full = _blank_attachment_artifact()
+        full.update({
+            "artifact_id": "att:1",
+            "filename": "report.pdf",
+            "reason_code": "other",
+            "method": "llm_omitted",
+            "evidence": "LLM did not return this artifact",
+        })
+        condensed = _condense_skipped_artifact(full)
+        assert condensed == {
+            "artifact_id": "att:1",
+            "reason": "other",
+            "method": "llm_omitted",
+            "evidence": "LLM did not return this artifact",
+            "filename": "report.pdf",
+        }
+
+    def test_does_not_include_extra_fields(self):
+        """Condensed output should not contain fields like assigned_firm_name."""
+        full = _blank_link_artifact()
+        full.update({
+            "artifact_id": "link:1",
+            "assigned_firm_name": "ACME",
+            "assigned_fund_name": "FUND X",
+            "confidence": 0.9,
+        })
+        condensed = _condense_skipped_artifact(full)
+        assert "assigned_firm_name" not in condensed
+        assert "assigned_fund_name" not in condensed
+        assert "confidence" not in condensed

@@ -71,16 +71,9 @@ def minimum_variance_analysis(funds: dict, mode="Minimum Variance", target_retur
         ann_rtn[key] = value
     
     mu = pd.Series(ann_rtn)
-    mask = filtered.notna().astype(int)
-    overlap = mask.T @ mask  # n_ij = count of months present in both i and j
-    corr = filtered.corr(method="pearson")
 
-    # Ensure diagonals look tidy
-    for c in corr.columns:
-        corr.loc[c, c] = 1.0
-        overlap.loc[c, c] = mask[c].sum()
-
-    S = corr
+    # Annualized covariance matrix: sample covariance of monthly returns × 12
+    S = filtered.cov() * 12
     
     # Step 3: Optimize portfolios
     # Minimum Variance

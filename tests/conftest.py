@@ -120,9 +120,6 @@ def mock_gpt_hedge_fund_response():
             "reasoning": "Identified from email signature",
         },
         "firm_name": "TEST CAPITAL",
-        "firm_name_source": "email_content",
-        "attachments": [],
-        "fund_related_links": [],
     }
 
 
@@ -139,9 +136,6 @@ def mock_gpt_third_party_response():
             "reasoning": "Cap intro from prime broker",
         },
         "firm_name": "GOLDMAN SACHS",
-        "firm_name_source": "email_content",
-        "attachments": [],
-        "fund_related_links": [],
     }
 
 
@@ -158,9 +152,6 @@ def mock_gpt_not_hedge_fund_response():
             "reasoning": "Generic marketing email, not fund related",
         },
         "firm_name": "",
-        "firm_name_source": "unknown",
-        "attachments": [],
-        "fund_related_links": [],
     }
 
 

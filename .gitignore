@@ -11,8 +11,11 @@ input/
 RETURN DATA.csv
 MANUAL INPUTS.csv
 
-# Streamlit secrets (contains password)
+# Streamlit secrets (contains password and shared folder path)
 .streamlit/secrets.toml
+
+# Local data folder
+data/
 
 # Private test fixtures (PDFs/expected outputs)
 tests/fixtures/**
