@@ -27,8 +27,7 @@ def sample_mappings():
                 "aliases": ["springs-capital", "Springs Capital HK", "Springs Capital (Hong Kong) Limited"],
                 "description": "China-focused hedge fund",
                 "funds": {
-                    "fund_springs_china_alpha": {
-                        "display_name": "Springs China Alpha Fund",
+                    "Springs China Alpha Fund": {
                         "aliases": ["China Alpha"],
                         "auto_added": "2026-02-24T00:00:00",
                     }
@@ -114,7 +113,6 @@ def mock_gpt_hedge_fund_response():
         "email_classification": {
             "is_hedge_fund_related": True,
             "confidence": 0.95,
-            "email_type": "Monthly performance update",
             "from_third_party": False,
             "source_priority": "highest",
             "reasoning": "Identified from email signature",
@@ -130,7 +128,6 @@ def mock_gpt_third_party_response():
         "email_classification": {
             "is_hedge_fund_related": True,
             "confidence": 0.90,
-            "email_type": "Cap intro",
             "from_third_party": "Goldman Sachs Client Services",
             "source_priority": "highest",
             "reasoning": "Cap intro from prime broker",
@@ -146,7 +143,6 @@ def mock_gpt_not_hedge_fund_response():
         "email_classification": {
             "is_hedge_fund_related": False,
             "confidence": 0.85,
-            "email_type": "Other",
             "from_third_party": False,
             "source_priority": "lowest",
             "reasoning": "Generic marketing email, not fund related",
