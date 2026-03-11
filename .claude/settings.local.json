@@ -20,7 +20,12 @@
       "WebFetch(domain:developers.notion.com)",
       "Bash(cd:*)",
       "Bash(1:*)",
-      "Bash(python -c \"import app; print\\(''Import OK''\\)\")"
+      "Bash(python -c \"import app; print\\(''Import OK''\\)\")",
+      "Bash(poetry run pip install python-docx python-pptx)",
+      "Bash(poetry run python3 -c \":*)",
+      "Bash(python3 -c \":*)",
+      "Bash(poetry add python-docx python-pptx)",
+      "Bash(python3:*)"
     ]
   }
 }

@@ -18,6 +18,7 @@ import json
 import re
 import shutil
 import time
+import uuid
 from html import unescape
 from datetime import datetime
 from typing import Optional  # noqa: F401 - kept for potential future use
@@ -49,10 +50,7 @@ DEFAULT_OUTPUT_DIR = _PROJECT_ROOT / "output" / "testing" / "fund firm identifie
 
 # File names for persistent data
 FIRM_MAPPINGS_FILE = "firm_fund_mappings.json"  # Human-editable mappings
-CLASSIFICATION_CACHE_FILE = "classification_cache.json"  # Cache of GPT classifications
-CLASSIFICATION_REPORT_FILE = (
-    "classification_report.json"  # Full report of all classifications
-)
+CLASSIFICATION_REPORT_FILE = "classification_report.json"  # Full report of all classifications (single source of truth)
 
 _GENERIC_FIRM_WORDS = frozenset(
     {
@@ -82,6 +80,26 @@ _GENERIC_FIRM_WORDS = frozenset(
     }
 )
 
+# Our own firm names / domains — must never be added as aliases to external firms.
+_OWN_FIRM_NAMES = frozenset(
+    {
+        "river delta wealth management",
+        "river delta",
+        "riverdeltawm",
+        "river delta global frontier fund",
+        "rdgff",
+    }
+)
+
+
+def _is_own_firm(name: str) -> bool:
+    """Return True if *name* matches one of our own firm identifiers."""
+    lowered = name.strip().lower()
+    if lowered in _OWN_FIRM_NAMES:
+        return True
+    # Also catch partial domain hits like "riverdeltawm"
+    return any(own in lowered or lowered in own for own in _OWN_FIRM_NAMES)
+
 
 def get_openai_client() -> OpenAI:
     """Get OpenAI client instance."""
@@ -99,12 +117,22 @@ def load_firm_mappings(output_dir: Path) -> dict:
         "canonical_names": {
             "SPRINGS CAPITAL": {
                 "aliases": ["Springs Capital", "springs-capital", "Springs Capital (Hong Kong) Limited"],
-                "description": "China-focused hedge fund",
+                "identifier": "0011223344",  // 10-digit text or null
                 "funds": {
                     "Springs China Alpha Fund": {
                         "aliases": ["China Alpha"],
-                        "auto_added": "2026-02-24T..."
+                        "artifacts": {
+                            "<artifact_id>": {
+                                "file_name": "2025-01-15_factsheet.pdf",
+                                "identifier": "0011223344",  // 10-digit text or null
+                                "contains_monthly_net_performance_update": true,
+                                "processed": false
+                            }
+                        }
                     }
+                },
+                "artifacts": {
+                    // artifacts directly under firm, not belonging to a specific fund
                 }
             }
         },
@@ -142,7 +170,7 @@ def load_firm_mappings(output_dir: Path) -> dict:
 def save_firm_mappings(mappings: dict, output_dir: Path):
     """Save firm name mappings to file."""
     mappings_path = output_dir / FIRM_MAPPINGS_FILE
-    mappings["_metadata"]["last_updated"] = datetime.now().isoformat()
+    mappings.setdefault("_metadata", {})["last_updated"] = datetime.now().isoformat()
 
     with open(mappings_path, "w", encoding="utf-8") as f:
         json.dump(mappings, f, indent=2, ensure_ascii=False)
@@ -298,6 +326,8 @@ def normalize_firm_name(name: str, mappings: dict) -> str:
         name,
         flags=re.IGNORECASE,
     )
+    # Strip trailing commas and other punctuation left over from LLM output
+    cleaned = re.sub(r"[,;]+$", "", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     cleaned_upper = cleaned.upper() if cleaned else name_upper
 
@@ -347,17 +377,25 @@ def add_firm_to_mappings(firm_name: str, aliases: list, mappings: dict) -> str:
     if canonical not in mappings["canonical_names"]:
         mappings["canonical_names"][canonical] = {
             "aliases": [],
-            "description": "",
+            "identifier": None,
             "funds": {},
-            "auto_added": datetime.now().isoformat(),
+            "artifacts": {},
         }
 
-    # Add new aliases
+    # Add new aliases, rejecting purely generic terms like "capital"
     existing_aliases = set(
         a.lower() for a in mappings["canonical_names"][canonical]["aliases"]
     )
     for alias in aliases:
-        if alias.lower() not in existing_aliases:
+        alias_words = alias.strip().split()
+        all_generic = alias_words and all(
+            w.lower() in _GENERIC_FIRM_WORDS for w in alias_words
+        )
+        if (
+            not all_generic
+            and not _is_own_firm(alias)
+            and alias.lower() not in existing_aliases
+        ):
             mappings["canonical_names"][canonical]["aliases"].append(alias)
 
     return canonical
@@ -386,14 +424,20 @@ def extract_domain_hints(email_address: str) -> list:
     # Split by common separators
     parts = re.split(r"[-_.]", domain_parts)
     for part in parts:
-        if len(part) > 2 and part not in [
-            "mail",
-            "email",
-            "info",
-            "contact",
-            "admin",
-            "www",
-        ]:
+        if (
+            len(part) > 2
+            and part
+            not in [
+                "mail",
+                "email",
+                "info",
+                "contact",
+                "admin",
+                "www",
+            ]
+            and part not in _GENERIC_FIRM_WORDS
+            and not _is_own_firm(part)
+        ):
             hints.append(part)
 
     return hints
@@ -441,7 +485,8 @@ def add_fund_to_firm(
     # Create new fund entry
     firm_entry["funds"][fund_display_name] = {
         "aliases": [a for a in aliases if a.lower() != fund_display_name.lower()],
-        "auto_added": datetime.now().isoformat(),
+        "identifier": None,
+        "artifacts": {},
     }
 
     return fund_display_name
@@ -466,6 +511,16 @@ def normalize_fund_name(name: str, firm_entry: dict):
                 return fund_name
 
     return None
+
+
+def _lookup_firm_for_fund(fund_name: str, firm_mappings: dict) -> str:
+    """Check if any firm in mappings already has this fund registered."""
+    if not fund_name or not firm_mappings:
+        return ""
+    for canonical, info in firm_mappings.get("canonical_names", {}).items():
+        if normalize_fund_name(fund_name, info):
+            return canonical
+    return ""
 
 
 def _resolve_from_numbered_list(user_input: str, items: list) -> str | None:
@@ -847,10 +902,10 @@ def extract_links_with_filter_log(
         seen.add(normalized)
 
         link_idx += 1
-        prefix = f"{email_id[-8:]}:" if email_id else ""
+        prefix = f"{email_id[-8:]}_" if email_id else ""
         links.append(
             {
-                "artifact_id": f"{prefix}link:{link_idx}",
+                "artifact_id": f"{prefix}link_{link_idx}",
                 "url": normalized,
                 "anchor_text": anchor_text,
                 "description_context": context,
@@ -867,7 +922,7 @@ def extract_attachment_candidates(metadata: dict, email_id: str = "") -> list:
     subject = metadata.get("subject", "") or ""
     body_preview = metadata.get("bodyPreview", "") or ""
 
-    prefix = f"{email_id[-8:]}:" if email_id else ""
+    prefix = f"{email_id[-8:]}_" if email_id else ""
     candidates = []
     for idx, att in enumerate(attachments, 1):
         filename = att.get("name", "")
@@ -876,7 +931,7 @@ def extract_attachment_candidates(metadata: dict, email_id: str = "") -> list:
 
         candidates.append(
             {
-                "artifact_id": f"{prefix}att:{idx}",
+                "artifact_id": f"{prefix}att_{idx}",
                 "filename": filename,
                 "mime_type": mime_type,
                 "size": att.get("size", 0),
@@ -1126,21 +1181,23 @@ def _recover_firm_name(
             if sibling_firm:
                 return sibling_firm
 
-    # Strategy 2: Domain hints matched against canonical names
-    sender = (
-        email_metadata.get("from", {}).get("emailAddress", {}).get("address", "") or ""
-    ).lower()
+    # Strategy 2: Domain hints matched against canonical names (skip if email is from a third party)
+    if not from_tp:
+        sender = (
+            email_metadata.get("from", {}).get("emailAddress", {}).get("address", "")
+            or ""
+        ).lower()
 
-    hints = extract_domain_hints(sender)
-    canonical_names = firm_mappings.get("canonical_names", {})
-    for hint in hints:
-        hint_lower = hint.lower()
-        for canonical, info in canonical_names.items():
-            if hint_lower in canonical.lower():
-                return canonical
-            for alias in info.get("aliases", []):
-                if hint_lower in alias.lower():
+        hints = extract_domain_hints(sender)
+        canonical_names = firm_mappings.get("canonical_names", {})
+        for hint in hints:
+            hint_lower = hint.lower()
+            for canonical, info in canonical_names.items():
+                if hint_lower in canonical.lower():
                     return canonical
+                for alias in info.get("aliases", []):
+                    if hint_lower in alias.lower():
+                        return canonical
 
     # Strategy 3: Scan evidence/description for known firm names
     searchable_text = " ".join(
@@ -1151,6 +1208,7 @@ def _recover_firm_name(
             artifact.get("filename", ""),
         ]
     ).lower()
+    canonical_names = firm_mappings.get("canonical_names", {})
     if searchable_text.strip():
         for canonical, info in canonical_names.items():
             if canonical.lower() in searchable_text:
@@ -1211,8 +1269,8 @@ def _web_search_firm_for_fund(
         if not ws_result.firm_name or ws_result.firm_name.upper() == "UNKNOWN":
             return empty
 
-        # Clean up the result — remove trailing punctuation, quotes, periods
-        clean_name = ws_result.firm_name.strip(".\"'")
+        # Clean up the result — remove trailing punctuation, quotes, periods, commas
+        clean_name = ws_result.firm_name.strip(".\"',")
         clean_name = clean_name.split("\n")[0].strip()
 
         if len(clean_name) > 100 or len(clean_name) < 2:
@@ -1335,6 +1393,12 @@ def _finalize_artifact_classification(
                     "_recovery": _recovery_info,
                 }
             )
+            if payload.get("artifact_type") in (
+                "performance_report",
+                "factsheet",
+                "presentation",
+            ):
+                payload["contains_monthly_net_performance_update"] = True
             if is_related:
                 included_attachments.append(payload)
             else:
@@ -1364,6 +1428,12 @@ def _finalize_artifact_classification(
                     "_recovery": _recovery_info,
                 }
             )
+            if payload.get("artifact_type") in (
+                "performance_report",
+                "factsheet",
+                "presentation",
+            ):
+                payload["contains_monthly_net_performance_update"] = True
             if is_related:
                 included_links.append(payload)
             else:
@@ -1439,16 +1509,27 @@ def _finalize_artifact_classification(
                 recovery["reason"] = "empty firm name"
             item["_recovery"] = recovery
 
-            recovery_reason = recovery["reason"]
-
             WEB_SEARCH_CONFIDENCE_THRESHOLD = 50
             MAX_WEB_SEARCH_ATTEMPTS = 2
 
             if item.get("assigned_fund_name"):
-                # Fund name known — try web search with retry on low confidence
+                fund_name = item["assigned_fund_name"]
+
+                # Check mappings first — skip web search if fund→firm already known
+                known_firm = _lookup_firm_for_fund(fund_name, firm_mappings)
+                if known_firm:
+                    item["assigned_firm_name"] = known_firm
+                    recovery["mappings_lookup"] = {
+                        "result": known_firm,
+                        "success": True,
+                    }
+                    recovery["final_method"] = "mappings_lookup"
+                    continue
+
+                # Fund not in mappings — do web search with retry
                 web_result = None
                 for attempt in range(MAX_WEB_SEARCH_ATTEMPTS):
-                    web_result = _web_search_firm_for_fund(item["assigned_fund_name"])
+                    web_result = _web_search_firm_for_fund(fund_name)
                     if (
                         web_result.firm_name
                         and web_result.confidence >= WEB_SEARCH_CONFIDENCE_THRESHOLD
@@ -1460,7 +1541,15 @@ def _finalize_artifact_classification(
                     and web_result.confidence >= WEB_SEARCH_CONFIDENCE_THRESHOLD
                 ):
                     canonical = normalize_firm_name(web_result.firm_name, firm_mappings)
+                    canonical = apply_folder_reassignment(canonical, firm_mappings)
                     item["assigned_firm_name"] = canonical
+
+                    # Immediately register in mappings so subsequent artifacts skip search
+                    add_firm_to_mappings(
+                        canonical, [web_result.firm_name], firm_mappings
+                    )
+                    add_fund_to_firm(canonical, fund_name, [], firm_mappings)
+
                     recovery["web_search"] = {
                         "attempted": True,
                         "result": web_result.firm_name,
@@ -1488,6 +1577,26 @@ def _finalize_artifact_classification(
             )
             if recovered_firm:
                 canonical = normalize_firm_name(recovered_firm, firm_mappings)
+                # If recovery returned the intermediary itself, label it as
+                # third-party so downstream routing can distinguish it.
+                if recovery.get("reason") == "third party intermediary":
+                    tp_name = recovery_metadata.get("_from_third_party", "")
+                    if (
+                        isinstance(tp_name, str)
+                        and tp_name
+                        and (
+                            canonical.lower() in tp_name.lower()
+                            or tp_name.lower() in canonical.lower()
+                        )
+                    ):
+                        item["assigned_firm_name"] = f"third_party {canonical}"
+                        recovery["post_classification"] = {
+                            "attempted": True,
+                            "result": recovered_firm,
+                            "success": False,
+                        }
+                        recovery["final_method"] = "post_classification"
+                        continue
                 item["assigned_firm_name"] = canonical
                 recovery["post_classification"] = {
                     "attempted": True,
@@ -1502,6 +1611,21 @@ def _finalize_artifact_classification(
                     "success": False,
                 }
                 recovery["final_method"] = "post_classification"
+                # If the artifact was flagged as third-party intermediary and
+                # all recovery attempts failed, clear the firm name so the
+                # artifact routes to NEEDS_REVIEW instead of the intermediary's folder.
+                if recovery.get("reason") == "third party intermediary" and item.get(
+                    "assigned_fund_name"
+                ):
+                    item["assigned_firm_name"] = ""
+                # Third-party intermediary with no fund name — preserve the
+                # intermediary identity with a prefix so it can be routed.
+                elif recovery.get(
+                    "reason"
+                ) == "third party intermediary" and not item.get("assigned_fund_name"):
+                    original_firm = item.get("assigned_firm_name", "")
+                    if original_firm:
+                        item["assigned_firm_name"] = f"third_party {original_firm}"
 
     # --- Condense skipped artifacts for cache efficiency ---
     llm_omitted_count = len(
@@ -1553,7 +1677,7 @@ def _finalize_artifact_classification(
     if is_hedge_related:
         email_cls["reasoning"] = (
             email_cls.get("reasoning", "")
-            + f"Number of artifacts that are hedge fund related is {included_count}."
+            + f" Number of artifacts that are hedge fund related is {included_count}."
         ).strip()
 
     return {
@@ -1609,17 +1733,18 @@ Hedge fund related artifacts include materials concerning a specific hedge fund 
 
 Hedge fund strategies include (but are not limited to):
 
-long/short equity  
-global macro  
-event-driven  
-relative value  
-CTA / managed futures  
-multi-strategy  
-credit  
-distressed  
-quantitative  
-market-neutral  
-arbitrage  
+• Long/Short Equity (LS equity, EQ L/S, equity L-S, long-short equities)
+• Global Macro (macro, discretionary macro, macro trading)
+• Sector Specialists (biotech, healthcare, energy, financials, consumer, technology, industrials, TMT etc.)
+• Event-Driven (special sits, special situations, corporate events, merger arb, activist)
+• Relative Value (RV, RV arb, relative value arb, basis trading)
+• CTA / Managed Futures (CTA, managed futures, trend, trend-following, systematic futures)
+• Multi-Strategy (multi-strat, multi strategy, platform, pod shop, diversified alpha)
+• Credit (credit L/S, credit opportunities, opportunistic credit, structured credit, performing credit)
+• Distressed (distressed debt, distressed credit, stressed credit, restructuring, turnaround)
+• Quantitative (quant, systematic, model-driven, systematic equities)
+• Market Neutral (EMN, equity market neutral, equity neutral)
+• Arbitrage (arb, stat arb, index arb, statistical arbitrage, risk arb)
 
 Also include:
 
@@ -1634,9 +1759,6 @@ NOT hedge fund related
 
 Do NOT classify as hedge-fund-related if the artifact is:
 
-• private equity / venture capital / private credit
-• mutual funds / ETFs / retail funds
-• bank research or market commentary
 • broker newsletters
 • regulatory notices
 • technology vendor marketing
@@ -1644,6 +1766,28 @@ Do NOT classify as hedge-fund-related if the artifact is:
 • generic corporate links
 • email signatures
 • homepages
+
+------------------------------------------------
+Third party intermediary
+------------------------------------------------
+
+A third party intermediary is a firm that distributes or forwards hedge fund materials on behalf of a manager, rather than the manager sending them directly.
+
+Third party categories:
+• fund administrators (e.g., CITCO, APEX FUND SERVICES)
+• prime brokers / securities services (e.g., GOLDMAN SACHS, MORGAN STANLEY, BNP PARIBAS)
+• cap intro desks (e.g., MAREX)
+• sell-side distribution
+• hedge fund marketing agents / placement agents (e.g., AGECROFT)
+• distributors and IR consultants
+• derivatives brokers 
+
+Rules:
+• If the email is from a known third party, 
+    - set from_third_party to the intermediary firm name
+    - assign the asset manager firm name at assigned_firm_name at the artifact level 
+• A forwarded email is NOT automatically third party — only classify as third party if the sender is an intermediary firm
+• When unsure, default to false — do not invent a third party relationship
 
 ------------------------------------------------
 EVIDENCE HIERARCHY
@@ -1686,25 +1830,6 @@ assigned_fund_name = detected fund
 Never guess firm names.
 
 ------------------------------------------------
-INTERMEDIARY RULE
-------------------------------------------------
-
-Emails may come from:
-
-• administrators
-• cap intro desks
-• placement agents
-• distributors
-• IR consultants
-• bank platforms
-
-These intermediaries may distribute hedge fund materials.
-
-If the manager firm is explicitly identified, assign it.
-
-Otherwise leave assigned_firm_name empty.
-
-------------------------------------------------
 LINK CLASSIFICATION RULE
 ------------------------------------------------
 
@@ -1719,22 +1844,25 @@ Generic links such as:
 are NOT hedge-fund-related unless the email clearly states the link points to hedge fund materials.
 
 ------------------------------------------------
-MONTHLY PERFORMANCE DETECTION
+MONTHLY NET PERFORMANCE DETECTION
 ------------------------------------------------
 
 Set contains_monthly_net_performance_update = true if the artifact appears to be:
 
 • a monthly factsheet
 • a monthly performance report
-• a document labeled "monthly", "MTD", or "factsheet"
+• a monthly presentation that is related and could potentiall contain performance
+• a monthly newsletter that does not appear to be an actual letter from the manager 
+• a quartely or annually report can sometimes contain monthly performance updates as well
 
-Even if "net" is not explicitly visible.
+Even if "net" and "performance" are not explicitly visible.
 
 Set false if clearly:
 
-• quarterly
-• annual
-• presentation/webinar without performance tables.
+• webinar 
+• DDQ or operational materials
+• subscription/redemption docs
+• a commentary or an actual letter regarding a matter other than performance.
 
 ------------------------------------------------
 CONFIDENCE
@@ -1796,7 +1924,7 @@ IMPORTANT: You received {len(attachments)} attachment candidate(s) and {len(link
                     "type": "object",
                     "properties": {
                         "from_third_party": {
-                            "description": "Name of third-party intermediary, or false if direct",
+                            "description": "Name of third-party intermediary, or false if not sent via third-party",
                             "anyOf": [{"type": "string"}, {"type": "boolean"}],
                         },
                         "reasoning": {
@@ -1915,23 +2043,29 @@ IMPORTANT: You received {len(attachments)} attachment candidate(s) and {len(link
         return result
 
 
-def load_classification_cache(output_dir: Path) -> dict:
-    """Load cached classifications to avoid re-processing."""
-    cache_path = output_dir / CLASSIFICATION_CACHE_FILE
+def _load_classification_lookup(output_dir: Path) -> dict:
+    """Build {email_id: classification} lookup from the classification report.
 
-    if cache_path.exists():
-        with open(cache_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+    Used to skip GPT calls for already-classified emails. Returns only the
+    classification-relevant fields (email_classification, artifact_assignments)
+    so the caller gets the same shape as a fresh GPT result.
+    """
+    report_path = output_dir / CLASSIFICATION_REPORT_FILE
+    if not report_path.exists():
+        return {}
 
-    return {}
+    with open(report_path, "r", encoding="utf-8") as f:
+        report = json.load(f)
 
-
-def save_classification_cache(cache: dict, output_dir: Path):
-    """Save classification cache."""
-    cache_path = output_dir / CLASSIFICATION_CACHE_FILE
-
-    with open(cache_path, "w", encoding="utf-8") as f:
-        json.dump(cache, f, indent=2, ensure_ascii=False)
+    lookup = {}
+    for entry in report.get("classifications", []):
+        email_id = entry.get("email_id", "")
+        if email_id:
+            lookup[email_id] = {
+                "email_classification": entry.get("email_classification", {}),
+                "artifact_assignments": entry.get("artifact_assignments", {}),
+            }
+    return lookup
 
 
 def copy_email_to_firm_folder(
@@ -1985,6 +2119,14 @@ def _resolve_artifact_dest_dir(
         safe_firm = sanitize_folder_name(canonical)
         if fund_name:
             safe_fund = sanitize_folder_name(fund_name)
+            # Include identifier in folder name if stored in mappings
+            firm_entry = firm_mappings.get("canonical_names", {}).get(canonical, {})
+            matched_fund = normalize_fund_name(fund_name, firm_entry)
+            if matched_fund:
+                fund_data = firm_entry.get("funds", {}).get(matched_fund, {})
+                fund_identifier = fund_data.get("identifier")
+                if fund_identifier:
+                    safe_fund = f"{safe_fund} - {fund_identifier}"
             return output_dir / safe_firm / safe_fund
         else:
             return output_dir / safe_firm
@@ -2015,26 +2157,98 @@ def _find_attachment_file(
         if candidate.exists():
             return candidate
 
-        # Fuzzy match (case-insensitive)
+        # Fuzzy match (case-insensitive, then normalized separators)
         attachments_dir = email_folder / "attachments"
         search_dirs = (
             [attachments_dir, email_folder]
             if attachments_dir.is_dir()
             else [email_folder]
         )
+
+        def _normalize_name(n: str) -> str:
+            """Collapse spaces, hyphens, underscores for comparison."""
+            return re.sub(r"[\s\-_]+", "", n).lower()
+
+        target_lower = filename.lower()
+        target_normalized = _normalize_name(filename)
+
         for search_dir in search_dirs:
             for f in search_dir.iterdir():
-                if f.is_file() and f.name.lower() == filename.lower():
+                if not f.is_file():
+                    continue
+                # Exact case-insensitive
+                if f.name.lower() == target_lower:
+                    return f
+                # Normalized (ignore space/hyphen/underscore differences)
+                if _normalize_name(f.name) == target_normalized:
                     return f
 
     return None
+
+
+def _embed_artifact_id_in_filename(filename: str, artifact_id: str) -> str:
+    """Embed artifact_id into a filename before the extension.
+
+    Example: 'factsheet.pdf' + 'EHI5AAA=_att_1' -> 'factsheet - EHI5AAA=_att_1.pdf'
+    For compound extensions like '.link.json': 'slug.link.json' -> 'slug - id.link.json'
+    """
+    if not artifact_id:
+        return filename
+
+    # Handle .link.json compound extension
+    if filename.endswith(".link.json"):
+        base = filename[: -len(".link.json")]
+        return f"{base} - {artifact_id}.link.json"
+
+    path = Path(filename)
+    stem = path.stem
+    ext = path.suffix
+    return f"{stem} - {artifact_id}{ext}"
+
+
+def _parse_artifact_id_from_filename(filename: str) -> str:
+    """Extract artifact_id from a filename that follows the ' - {artifact_id}.ext' convention.
+
+    Returns empty string if no artifact_id is found.
+    """
+    # Handle .link.json compound extension
+    if filename.endswith(".link.json"):
+        base = filename[: -len(".link.json")]
+    else:
+        base = Path(filename).stem
+
+    match = re.search(r" - ([a-zA-Z0-9=_]+)$", base)
+    return match.group(1) if match else ""
+
+
+def _strip_artifact_id_from_filename(filename: str) -> str:
+    """Strip the artifact_id suffix from a filename, returning the base name.
+
+    Example: 'factsheet - art002.pdf' -> 'factsheet.pdf'
+             'link_report - link001.link.json' -> 'link_report.link.json'
+    Returns the filename unchanged if no artifact_id pattern is found.
+    """
+    art_id = _parse_artifact_id_from_filename(filename)
+    if not art_id:
+        return filename
+    # Remove the ' - {artifact_id}' portion
+    suffix_pattern = f" - {re.escape(art_id)}"
+    if filename.endswith(".link.json"):
+        base = filename[: -len(".link.json")]
+        base = re.sub(re.escape(suffix_pattern) + r"$", "", base)
+        return f"{base}.link.json"
+    else:
+        path = Path(filename)
+        stem = path.stem
+        ext = path.suffix
+        stem = re.sub(re.escape(suffix_pattern) + r"$", "", stem)
+        return f"{stem}{ext}"
 
 
 def _create_link_proxy_file(
     link_artifact: dict,
     email_metadata: dict,
     dest_dir: Path,
-    date_prefix: str,
 ) -> Path:
     """
     Create a .link.json proxy file for a link artifact.
@@ -2051,7 +2265,9 @@ def _create_link_proxy_file(
             re.sub(r"[^a-zA-Z0-9]+", "_", parsed.path)[:60].strip("_").lower() or "link"
         )
 
-    filename = f"{date_prefix}_link_{slug}.link.json"
+    artifact_id = link_artifact.get("artifact_id", "")
+    filename = f"link_{slug}.link.json"
+    filename = _embed_artifact_id_in_filename(filename, artifact_id)
 
     proxy_data = {
         "proxy_version": "1.0",
@@ -2124,6 +2340,50 @@ def _write_needs_review_context(
         json.dump(context, f, indent=2, ensure_ascii=False)
 
 
+def _register_artifact_in_mappings(
+    artifact: dict,
+    firm_name: str,
+    fund_name: str,
+    dest_filename: str,
+    firm_mappings: dict,
+):
+    """Register an artifact in the firm_fund_mappings under the appropriate firm/fund.
+
+    Adds the artifact entry keyed by artifact_id with file_name, identifier,
+    contains_monthly_net_performance_update, and processed fields.
+    """
+    artifact_id = artifact.get("artifact_id", "")
+    if not artifact_id or not firm_name:
+        return
+
+    canonical = normalize_firm_name(firm_name, firm_mappings)
+    canonical_names = firm_mappings.get("canonical_names", {})
+    if canonical not in canonical_names:
+        return
+
+    firm_entry = canonical_names[canonical]
+    artifact_record = {
+        "file_name": _strip_artifact_id_from_filename(dest_filename),
+        "identifier": None,
+        "contains_monthly_net_performance_update": bool(
+            artifact.get("contains_monthly_net_performance_update", False)
+        ),
+        "processed": False,
+    }
+
+    if fund_name:
+        # Try to find the fund in the firm's funds
+        matched_fund = normalize_fund_name(fund_name, firm_entry)
+        if matched_fund and matched_fund in firm_entry.get("funds", {}):
+            firm_entry["funds"][matched_fund].setdefault("artifacts", {})
+            firm_entry["funds"][matched_fund]["artifacts"][artifact_id] = artifact_record
+            return
+
+    # No fund match or no fund_name — store at firm level
+    firm_entry.setdefault("artifacts", {})
+    firm_entry["artifacts"][artifact_id] = artifact_record
+
+
 def organize_artifacts_to_folders(
     classification: dict,
     email_folder: Path,
@@ -2175,7 +2435,8 @@ def organize_artifacts_to_folders(
             safe_filename = (
                 sanitize_folder_name(filename) if filename else source_file.name
             )
-            dest_filename = f"{date_prefix}_{safe_filename}"
+            artifact_id = att.get("artifact_id", "")
+            dest_filename = _embed_artifact_id_in_filename(safe_filename, artifact_id)
             dest_dir.mkdir(parents=True, exist_ok=True)
             dest_path = dest_dir / dest_filename
             shutil.copy2(str(source_file), str(dest_path))
@@ -2188,6 +2449,11 @@ def organize_artifacts_to_folders(
             _write_needs_review_context(dest_dir, att, email_metadata, date_prefix)
             result["needs_review_count"] += 1
         else:
+            _register_artifact_in_mappings(
+                att, firm_name, fund_name,
+                dest_filename if source_file and source_file.exists() else filename,
+                firm_mappings,
+            )
             result["organized_count"] += 1
 
     # Process links
@@ -2200,7 +2466,7 @@ def organize_artifacts_to_folders(
         )
 
         proxy_path = _create_link_proxy_file(
-            link, email_metadata, dest_dir, date_prefix
+            link, email_metadata, dest_dir
         )
         result["destinations"].append(str(proxy_path))
 
@@ -2208,7 +2474,11 @@ def organize_artifacts_to_folders(
         if is_needs_review:
             result["needs_review_count"] += 1
         else:
-            result["organized_count"] += 1
+            _register_artifact_in_mappings(
+                link, firm_name, fund_name,
+                proxy_path.name if proxy_path else "",
+                firm_mappings,
+            )
 
     return result
 
@@ -2220,12 +2490,12 @@ def _classify_single_email(
     from_address: str,
     existing_firms: list,
     firm_mappings: dict,
-    classification_cache: dict,
-    use_cache: bool = True,
+    classification_lookup: dict,
+    use_lookup: bool = True,
     progress_label: str = "",
 ):
     """
-    Classify a single email: override check -> cache check -> GPT call.
+    Classify a single email: override check -> report lookup -> GPT call.
 
     Returns classification dict, or None on GPT error.
     """
@@ -2265,14 +2535,10 @@ def _classify_single_email(
         print(f"{progress_label} (override) {subject[:50]}...")
         return classification
 
-    # Check cache (skip error'd entries so GPT is re-called)
-    if (
-        use_cache
-        and email_id in classification_cache
-        and not classification_cache[email_id].get("_error")
-    ):
+    # Check report lookup (skip GPT for already-classified emails)
+    if use_lookup and email_id in classification_lookup:
         print(f"{progress_label} (cached) {subject[:50]}...")
-        return classification_cache[email_id]
+        return classification_lookup[email_id]
 
     # Classify with GPT
     print(f"{progress_label} Classifying: {subject[:50]}...")
@@ -2284,7 +2550,7 @@ def _classify_single_email(
         print("    -> GPT error, will retry next run")
         return None
 
-    classification_cache[email_id] = classification
+    classification_lookup[email_id] = classification
     return classification
 
 
@@ -2362,7 +2628,9 @@ def _process_classified_email(
             output_dir=output_dir,
             firm_mappings=firm_mappings,
         )
-        classification_entry["destinations"] = org_result["destinations"]
+        classification_entry["destinations"] = list(
+            dict.fromkeys(org_result["destinations"])
+        )
         classification_entry["organized_count"] = org_result["organized_count"]
         classification_entry["needs_review_count"] = org_result["needs_review_count"]
 
@@ -2403,8 +2671,8 @@ def classify_and_organize_emails(
 
     # Load existing data
     firm_mappings = load_firm_mappings(output_dir)
-    classification_cache = (
-        {} if force_reclassify else load_classification_cache(output_dir)
+    classification_lookup = (
+        {} if force_reclassify else _load_classification_lookup(output_dir)
     )
     # Initialize OpenAI client
     client = get_openai_client()
@@ -2460,8 +2728,8 @@ def classify_and_organize_emails(
             from_address,
             existing_firms,
             firm_mappings,
-            classification_cache,
-            use_cache=True,
+            classification_lookup,
+            use_lookup=True,
             progress_label=f"[{i + 1}/{len(email_folders)}]",
         )
         if classification is None:
@@ -2514,9 +2782,8 @@ def classify_and_organize_emails(
 
     # Save updated data
     save_firm_mappings(firm_mappings, output_dir)
-    save_classification_cache(classification_cache, output_dir)
 
-    # Save report
+    # Save report (single source of truth — no separate cache file)
     report_path = output_dir / CLASSIFICATION_REPORT_FILE
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
@@ -2543,8 +2810,8 @@ def classify_and_organize_emails(
 def get_processed_folders(output_dir: Path) -> set:
     """
     Get set of email folder names that have already been processed.
-    Reads from classification report and cross-checks the cache to exclude
-    error'd entries (so they get retried on the next run).
+    Reads from classification report. Error'd emails never reach the report
+    (they are skipped during classification), so they are automatically retried.
     """
     report_path = output_dir / CLASSIFICATION_REPORT_FILE
     processed = set()
@@ -2558,29 +2825,6 @@ def get_processed_folders(output_dir: Path) -> set:
                         processed.add(entry["email_folder"])
         except Exception:
             pass
-
-    if not processed:
-        return processed
-
-    # Exclude emails whose cache entry is flagged as an error
-    cache = load_classification_cache(output_dir)
-    if cache:
-        # Build email_id -> folder_name lookup from report
-        id_to_folder = {}
-        try:
-            with open(report_path, "r", encoding="utf-8") as f:
-                report = json.load(f)
-                for entry in report.get("classifications", []):
-                    eid = entry.get("email_id", "")
-                    folder = entry.get("email_folder", "")
-                    if eid and folder:
-                        id_to_folder[eid] = folder
-        except Exception:
-            pass
-
-        for email_id, cached_entry in cache.items():
-            if cached_entry.get("_error") and email_id in id_to_folder:
-                processed.discard(id_to_folder[email_id])
 
     return processed
 
@@ -2618,7 +2862,7 @@ def classify_new_emails(email_input_dir: Path = None, output_dir: Path = None) -
     output_dir.mkdir(parents=True, exist_ok=True)
 
     firm_mappings = load_firm_mappings(output_dir)
-    classification_cache = load_classification_cache(output_dir)
+    classification_lookup = _load_classification_lookup(output_dir)
     client = get_openai_client()
     existing_firms = list(firm_mappings.get("canonical_names", {}).keys())
 
@@ -2647,8 +2891,8 @@ def classify_new_emails(email_input_dir: Path = None, output_dir: Path = None) -
             from_address,
             existing_firms,
             firm_mappings,
-            classification_cache,
-            use_cache=False,
+            classification_lookup,
+            use_lookup=False,
             progress_label=f"[{i + 1}/{len(new_folders)}]",
         )
         if classification is None:
@@ -2675,7 +2919,6 @@ def classify_new_emails(email_input_dir: Path = None, output_dir: Path = None) -
 
     # Save updated data
     save_firm_mappings(firm_mappings, output_dir)
-    save_classification_cache(classification_cache, output_dir)
 
     # Update the report with new classifications
     report_path = output_dir / CLASSIFICATION_REPORT_FILE
@@ -2694,74 +2937,536 @@ def classify_new_emails(email_input_dir: Path = None, output_dir: Path = None) -
     return {"new_folders_found": len(new_folders), "classifications": results}
 
 
-def monitor_and_classify(
-    email_input_dir: Path = None,
-    output_dir: Path = None,
-    poll_interval: int = 30,
-    run_once: bool = False,
-):
+def _generate_artifact_id() -> str:
+    """Generate a random artifact_id for newly discovered artifacts."""
+    return uuid.uuid4().hex[:12]
+
+
+def _parse_folder_identifier(folder_name: str) -> tuple[str, str]:
+    """Parse a folder name like 'FundName - identifier' into (name, identifier).
+
+    Returns (folder_name, "") if no identifier separator is found.
     """
-    Continuously monitor for new email folders and classify them automatically.
+    match = re.match(r"^(.+?)\s+-\s+(.+)$", folder_name)
+    if match:
+        return match.group(1).strip(), match.group(2).strip()
+    return folder_name, ""
 
-    Args:
-        email_input_dir: Directory to monitor for new email folders
-        output_dir: Directory for organized firm folders
-        poll_interval: Seconds between checks (default: 30)
-        run_once: If True, check once and exit. If False, run continuously.
+
+def _build_registry_index(mappings: dict) -> dict:
+    """Build lookup indexes from the current firm_fund_mappings.
+
+    Returns:
+        {
+            "artifact_ids": {artifact_id: (canonical_firm, fund_name_or_None)},
+            "firm_folders": {sanitized_folder_name_upper: canonical_firm},
+            "fund_identifiers": {identifier: (canonical_firm, fund_name)},
+            "artifact_filenames": {(canonical_firm, fund_name_or_None, base_filename): artifact_id},
+        }
     """
-    email_input_dir = email_input_dir or DEFAULT_EMAIL_INPUT_DIR
-    output_dir = output_dir or DEFAULT_OUTPUT_DIR
+    canonical_names = mappings.get("canonical_names", {})
+    artifact_ids = {}
+    firm_folders = {}
+    fund_identifiers = {}
+    artifact_filenames = {}
 
-    print("=" * 60)
-    print("EMAIL FOLDER MONITOR")
-    print("=" * 60)
-    print(f"Monitoring: {email_input_dir}")
-    print(f"Output to:  {output_dir}")
-    print(f"Poll interval: {poll_interval} seconds")
-    if not run_once:
-        print("Press Ctrl+C to stop monitoring")
-    print("-" * 60)
+    for canonical, firm_data in canonical_names.items():
+        # Map firm folder name
+        safe = sanitize_folder_name(canonical).upper()
+        firm_folders[safe] = canonical
 
-    try:
-        while True:
-            # Check for new folders
-            result = classify_new_emails(email_input_dir, output_dir)
+        # Also map aliases
+        for alias in firm_data.get("aliases", []):
+            firm_folders[sanitize_folder_name(alias).upper()] = canonical
 
-            if result["new_folders_found"] > 0:
-                print(
-                    f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                    f"Processed {result['new_folders_found']} new email(s)"
-                )
+        # Firm-level artifacts
+        for art_id, art_data in firm_data.get("artifacts", {}).items():
+            artifact_ids[art_id] = (canonical, None)
+            fn = art_data.get("file_name", "") if isinstance(art_data, dict) else ""
+            if fn:
+                artifact_filenames[(canonical, None, fn)] = art_id
 
-                # Summary of what was classified
-                for item in result["classifications"]:
-                    firm = item.get("firm")
-                    if firm:
-                        print(f"  + {item['subject'][:40]}... -> {firm}")
+        # Funds
+        for fund_name, fund_data in firm_data.get("funds", {}).items():
+            for art_id, art_data in fund_data.get("artifacts", {}).items():
+                artifact_ids[art_id] = (canonical, fund_name)
+                fn = art_data.get("file_name", "") if isinstance(art_data, dict) else ""
+                if fn:
+                    artifact_filenames[(canonical, fund_name, fn)] = art_id
+            # Index fund identifiers for identifier-based matching
+            fund_id = fund_data.get("identifier")
+            if fund_id:
+                fund_identifiers[str(fund_id)] = (canonical, fund_name)
+
+    return {
+        "artifact_ids": artifact_ids,
+        "firm_folders": firm_folders,
+        "fund_identifiers": fund_identifiers,
+        "artifact_filenames": artifact_filenames,
+    }
+
+
+def _scan_disk_state(output_dir: Path) -> dict:
+    """Scan the output directory and return the current disk state.
+
+    Returns:
+        {
+            "firms": {
+                folder_name: {
+                    "path": Path,
+                    "funds": {
+                        folder_name: {
+                            "path": Path,
+                            "name": str,  # parsed name (without identifier)
+                            "identifier": str,
+                            "artifacts": {artifact_id: filename, ...},
+                            "untagged_files": [filename, ...],
+                        }
+                    },
+                    "artifacts": {artifact_id: filename, ...},
+                    "untagged_files": [filename, ...],
+                }
+            }
+        }
+    """
+    state = {"firms": {}}
+
+    for child in sorted(output_dir.iterdir()):
+        if not child.is_dir():
+            continue
+        if child.name.startswith(".") or child.name in SYSTEM_FILES:
+            continue
+        if child.name == NEEDS_REVIEW_FOLDER:
+            continue
+
+        firm_entry = {
+            "path": child,
+            "funds": {},
+            "artifacts": {},
+            "untagged_files": [],
+        }
+
+        # Scan direct files under firm
+        for f in sorted(child.iterdir()):
+            if f.is_file() and not f.name.startswith(".") and f.name not in SYSTEM_FILES:
+                art_id = _parse_artifact_id_from_filename(f.name)
+                if art_id:
+                    firm_entry["artifacts"][art_id] = f.name
+                else:
+                    firm_entry["untagged_files"].append(f.name)
+
+        # Scan fund subfolders
+        for subfolder in sorted(child.iterdir()):
+            if not subfolder.is_dir() or subfolder.name.startswith("."):
+                continue
+
+            fund_name, identifier = _parse_folder_identifier(subfolder.name)
+            fund_entry = {
+                "path": subfolder,
+                "name": fund_name,
+                "identifier": identifier,
+                "artifacts": {},
+                "untagged_files": [],
+            }
+
+            for f in sorted(subfolder.rglob("*")):
+                if f.is_file() and not f.name.startswith(".") and f.name not in SYSTEM_FILES:
+                    if f.name.endswith(".review.json"):
+                        continue
+                    art_id = _parse_artifact_id_from_filename(f.name)
+                    if art_id:
+                        fund_entry["artifacts"][art_id] = f.name
                     else:
-                        print(
-                            f"  - {item['subject'][:40]}... ({item.get('reason', 'skipped')})"
-                        )
-            else:
-                print(
-                    f"[{datetime.now().strftime('%H:%M:%S')}] No new emails found",
-                    end="\r",
+                        fund_entry["untagged_files"].append(f.name)
+
+            firm_entry["funds"][subfolder.name] = fund_entry
+
+        state["firms"][child.name] = firm_entry
+
+    return state
+
+
+def sync_moved_artifacts(output_dir: Path = None) -> dict:
+    """Sync the firm_fund_mappings registry with the actual disk state.
+
+    Detects:
+    - New firms/funds/artifacts on disk not in registry -> registers them
+    - Firms/funds/artifacts in registry but missing from disk -> soft-deletes
+    - Artifacts moved between firms/funds -> updates registry location
+    - Fund identifier changes from folder renames -> updates registry
+
+    Matching strategy:
+    - Artifacts matched by artifact_id embedded in filename suffix
+    - Fund folders matched by identifier in folder name (fund_name - identifier)
+    - Firm folders matched by folder name against aliases
+
+    Returns dict with: moved, new_folders, removed_folders, new_artifacts,
+    deleted_artifacts, errors.
+    """
+    output_dir = output_dir or DEFAULT_OUTPUT_DIR
+    if not output_dir.exists():
+        return {"moved": [], "new_folders": [], "removed_folders": [],
+                "new_artifacts": [], "deleted_artifacts": [], "errors": []}
+
+    mappings = load_firm_mappings(output_dir)
+    canonical_names = mappings.get("canonical_names", {})
+    registry_index = _build_registry_index(mappings)
+    disk_state = _scan_disk_state(output_dir)
+
+    result = {
+        "moved": [],
+        "new_folders": [],
+        "removed_folders": [],
+        "new_artifacts": [],
+        "deleted_artifacts": [],
+        "errors": [],
+    }
+
+    _registry_dirty = False  # Track metadata-only changes (e.g. identifier updates)
+
+    # Track which registry firms/funds/artifacts are seen on disk
+    seen_firms = set()
+    seen_funds = {}  # (canonical_firm, fund_name) -> True
+    seen_artifacts = set()  # artifact_ids found on disk
+
+    # --- Pass 1: Walk disk state and reconcile with registry ---
+    for firm_folder_name, firm_disk in disk_state["firms"].items():
+        # Match firm folder to registry
+        matched_canonical = registry_index["firm_folders"].get(
+            firm_folder_name.upper()
+        )
+
+        if not matched_canonical:
+            # New firm — register it
+            new_canonical = firm_folder_name.upper()
+            canonical_names[new_canonical] = {
+                "aliases": [firm_folder_name],
+                "identifier": None,
+                "funds": {},
+                "artifacts": {},
+            }
+            registry_index["firm_folders"][firm_folder_name.upper()] = new_canonical
+            matched_canonical = new_canonical
+            result["new_folders"].append({
+                "folder": firm_folder_name,
+                "firm": new_canonical,
+                "type": "firm",
+            })
+
+        seen_firms.add(matched_canonical)
+        firm_entry = canonical_names[matched_canonical]
+
+        # --- Firm-level artifacts ---
+        firm_entry.setdefault("artifacts", {})
+
+        # Check tagged artifacts at firm level
+        for art_id, filename in firm_disk["artifacts"].items():
+            file_name = _strip_artifact_id_from_filename(filename)
+            seen_artifacts.add(art_id)
+            prev_location = registry_index["artifact_ids"].get(art_id)
+
+            if prev_location is None:
+                # New artifact (tagged but not in registry)
+                firm_entry["artifacts"][art_id] = {
+                    "file_name": file_name,
+                    "identifier": None,
+                    "contains_monthly_net_performance_update": False,
+                    "processed": False,
+                }
+                result["new_artifacts"].append({
+                    "artifact_id": art_id,
+                    "firm": matched_canonical,
+                    "fund": None,
+                    "file_name": file_name,
+                })
+            elif prev_location != (matched_canonical, None):
+                # Moved from another location
+                old_firm, old_fund = prev_location
+                _remove_artifact_from_registry(
+                    art_id, old_firm, old_fund, canonical_names
                 )
+                firm_entry["artifacts"][art_id] = {
+                    "file_name": file_name,
+                    "identifier": None,
+                    "contains_monthly_net_performance_update": False,
+                    "processed": False,
+                }
+                result["moved"].append({
+                    "artifact_id": art_id,
+                    "old_file": file_name,
+                    "from": old_firm + (f"/{old_fund}" if old_fund else ""),
+                    "to": matched_canonical,
+                    "firm": matched_canonical,
+                    "fund": None,
+                    "new_path": str(firm_disk["path"] / filename),
+                })
+            else:
+                # Same location — update file_name if changed
+                if art_id in firm_entry["artifacts"]:
+                    old_stored = firm_entry["artifacts"][art_id].get("file_name", "")
+                    if old_stored != file_name:
+                        firm_entry["artifacts"][art_id]["file_name"] = file_name
+                        _registry_dirty = True
 
-            if run_once:
-                print("\nSingle check completed.")
-                break
+        # Register untagged firm-level files
+        for filename in firm_disk["untagged_files"]:
+            # Fallback: check if this filename matches an existing artifact
+            # whose artifact_id was changed/lost
+            existing_art_id = registry_index["artifact_filenames"].get(
+                (matched_canonical, None, filename)
+            )
+            if existing_art_id and existing_art_id not in seen_artifacts:
+                new_id = existing_art_id
+            else:
+                new_id = _generate_artifact_id()
+            firm_entry["artifacts"][new_id] = {
+                "file_name": filename,
+                "identifier": None,
+                "contains_monthly_net_performance_update": False,
+                "processed": False,
+            }
+            # Rename file on disk to include artifact_id
+            old_path = firm_disk["path"] / filename
+            new_filename = _embed_artifact_id_in_filename(filename, new_id)
+            new_path = firm_disk["path"] / new_filename
+            try:
+                old_path.rename(new_path)
+            except OSError as e:
+                result["errors"].append(
+                    f"Failed to tag artifact {filename}: {e}"
+                )
+            seen_artifacts.add(new_id)
+            result["new_artifacts"].append({
+                "artifact_id": new_id,
+                "firm": matched_canonical,
+                "fund": None,
+                "file_name": filename,
+            })
 
-            # Wait before next check
-            time.sleep(poll_interval)
+        # --- Fund subfolders ---
+        for fund_folder_name, fund_disk in firm_disk["funds"].items():
+            fund_name = fund_disk["name"]
+            identifier = fund_disk["identifier"]
 
-    except KeyboardInterrupt:
-        print("\n\nMonitoring stopped by user.")
+            # Match fund to registry — prefer identifier, fall back to name
+            matched_fund = None
 
-    return result if run_once else None
+            if identifier:
+                # Primary: match by identifier (stable across renames)
+                id_lookup = registry_index["fund_identifiers"].get(str(identifier))
+                if id_lookup and id_lookup[0] == matched_canonical:
+                    matched_fund = id_lookup[1]
+                    # Fund name may have changed (folder rename) — update if needed
+                    if fund_name and fund_name != matched_fund:
+                        fund_data = firm_entry.get("funds", {}).get(matched_fund, {})
+                        existing_aliases = [a.lower() for a in fund_data.get("aliases", [])]
+                        if matched_fund.lower() not in existing_aliases:
+                            fund_data.setdefault("aliases", []).append(matched_fund)
+                        # Re-key the fund under the new name
+                        firm_entry["funds"][fund_name] = firm_entry["funds"].pop(matched_fund)
+                        matched_fund = fund_name
+                        _registry_dirty = True
+
+            if not matched_fund:
+                # Fallback: match by fund name or aliases
+                matched_fund = normalize_fund_name(fund_name, firm_entry)
+            if not matched_fund:
+                # Also try the full folder name
+                matched_fund = normalize_fund_name(fund_folder_name, firm_entry)
+
+            if not matched_fund:
+                # New fund — register it
+                firm_entry.setdefault("funds", {})
+                firm_entry["funds"][fund_name] = {
+                    "aliases": [],
+                    "identifier": identifier or None,
+                    "artifacts": {},
+                }
+                matched_fund = fund_name
+                result["new_folders"].append({
+                    "folder": fund_folder_name,
+                    "firm": matched_canonical,
+                    "type": "fund",
+                })
+            else:
+                # Update identifier if newly provided from folder name
+                fund_entry_ref = firm_entry.get("funds", {}).get(matched_fund, {})
+                if identifier and fund_entry_ref.get("identifier") != identifier:
+                    fund_entry_ref["identifier"] = identifier
+                    _registry_dirty = True
+
+            seen_funds[(matched_canonical, matched_fund)] = True
+            fund_entry = firm_entry["funds"][matched_fund]
+            fund_entry.setdefault("artifacts", {})
+
+            # Check tagged artifacts under fund
+            for art_id, filename in fund_disk["artifacts"].items():
+                file_name = _strip_artifact_id_from_filename(filename)
+                seen_artifacts.add(art_id)
+                prev_location = registry_index["artifact_ids"].get(art_id)
+
+                if prev_location is None:
+                    fund_entry["artifacts"][art_id] = {
+                        "file_name": file_name,
+                        "identifier": None,
+                        "contains_monthly_net_performance_update": False,
+                        "processed": False,
+                    }
+                    result["new_artifacts"].append({
+                        "artifact_id": art_id,
+                        "firm": matched_canonical,
+                        "fund": matched_fund,
+                        "file_name": file_name,
+                    })
+                elif prev_location != (matched_canonical, matched_fund):
+                    old_firm, old_fund = prev_location
+                    _remove_artifact_from_registry(
+                        art_id, old_firm, old_fund, canonical_names
+                    )
+                    fund_entry["artifacts"][art_id] = {
+                        "file_name": file_name,
+                        "identifier": None,
+                        "contains_monthly_net_performance_update": False,
+                        "processed": False,
+                    }
+                    result["moved"].append({
+                        "artifact_id": art_id,
+                        "old_file": file_name,
+                        "from": old_firm + (f"/{old_fund}" if old_fund else ""),
+                        "to": f"{matched_canonical}/{matched_fund}",
+                        "firm": matched_canonical,
+                        "fund": matched_fund,
+                        "new_path": str(fund_disk["path"] / filename),
+                    })
+                else:
+                    # Same location — update file_name if changed
+                    if art_id in fund_entry["artifacts"]:
+                        old_stored = fund_entry["artifacts"][art_id].get("file_name", "")
+                        if old_stored != file_name:
+                            fund_entry["artifacts"][art_id]["file_name"] = file_name
+                            _registry_dirty = True
+
+            # Register untagged fund-level files
+            for filename in fund_disk["untagged_files"]:
+                # Fallback: check if this filename matches an existing artifact
+                # whose artifact_id was changed/lost
+                existing_art_id = registry_index["artifact_filenames"].get(
+                    (matched_canonical, matched_fund, filename)
+                )
+                if existing_art_id and existing_art_id not in seen_artifacts:
+                    new_id = existing_art_id
+                else:
+                    new_id = _generate_artifact_id()
+                fund_entry["artifacts"][new_id] = {
+                    "file_name": filename,
+                    "identifier": None,
+                    "contains_monthly_net_performance_update": False,
+                    "processed": False,
+                }
+                old_path = fund_disk["path"] / filename
+                new_filename = _embed_artifact_id_in_filename(filename, new_id)
+                new_path = fund_disk["path"] / new_filename
+                try:
+                    old_path.rename(new_path)
+                except OSError as e:
+                    result["errors"].append(
+                        f"Failed to tag artifact {filename}: {e}"
+                    )
+                seen_artifacts.add(new_id)
+                result["new_artifacts"].append({
+                    "artifact_id": new_id,
+                    "firm": matched_canonical,
+                    "fund": matched_fund,
+                    "file_name": filename,
+                })
+
+    # --- Pass 2: Soft-delete registry entries not found on disk ---
+    now = datetime.now().isoformat()
+
+    for canonical, firm_data in canonical_names.items():
+        # Check if firm folder exists on disk
+        if canonical not in seen_firms and not firm_data.get("_deleted_at"):
+            # Check if firm has any non-deleted content
+            has_content = (
+                any(not a.get("_deleted_at") for a in firm_data.get("artifacts", {}).values())
+                or any(
+                    not f.get("_deleted_at")
+                    for f in firm_data.get("funds", {}).values()
+                )
+            )
+            if has_content:
+                firm_data["_deleted_at"] = now
+                result["removed_folders"].append({
+                    "folder": sanitize_folder_name(canonical),
+                    "firm": canonical,
+                    "type": "firm",
+                })
+
+        # Check funds
+        for fund_name, fund_data in firm_data.get("funds", {}).items():
+            if (
+                (canonical, fund_name) not in seen_funds
+                and not fund_data.get("_deleted_at")
+                and canonical in seen_firms
+            ):
+                fund_data["_deleted_at"] = now
+                result["removed_folders"].append({
+                    "folder": fund_name,
+                    "firm": canonical,
+                    "type": "fund",
+                })
+
+            # Check artifacts in this fund
+            for art_id, art_data in fund_data.get("artifacts", {}).items():
+                if art_id not in seen_artifacts and not art_data.get("_deleted_at"):
+                    art_data["_deleted_at"] = now
+                    result["deleted_artifacts"].append({
+                        "artifact_id": art_id,
+                        "firm": canonical,
+                        "fund": fund_name,
+                        "file_name": art_data.get("file_name", ""),
+                    })
+
+        # Check firm-level artifacts
+        for art_id, art_data in firm_data.get("artifacts", {}).items():
+            if art_id not in seen_artifacts and not art_data.get("_deleted_at"):
+                art_data["_deleted_at"] = now
+                result["deleted_artifacts"].append({
+                    "artifact_id": art_id,
+                    "firm": canonical,
+                    "fund": None,
+                    "file_name": art_data.get("file_name", ""),
+                })
+
+    # Save updated mappings
+    if (
+        result["moved"]
+        or result["new_folders"]
+        or result["removed_folders"]
+        or result["new_artifacts"]
+        or result["deleted_artifacts"]
+        or _registry_dirty
+    ):
+        save_firm_mappings(mappings, output_dir)
+
+    return result
 
 
-def monitor_and_classify_with_moves(
+def _remove_artifact_from_registry(
+    artifact_id: str, firm: str, fund: str | None, canonical_names: dict
+):
+    """Remove an artifact entry from its old location in the registry."""
+    if firm not in canonical_names:
+        return
+    firm_data = canonical_names[firm]
+    if fund:
+        fund_data = firm_data.get("funds", {}).get(fund, {})
+        fund_data.get("artifacts", {}).pop(artifact_id, None)
+    else:
+        firm_data.get("artifacts", {}).pop(artifact_id, None)
+
+
+def monitoring(
     email_input_dir: Path = None,
     output_dir: Path = None,
     poll_interval: int = 30,
@@ -2814,7 +3519,8 @@ def monitor_and_classify_with_moves(
                 )
                 for m in move_result["moved"]:
                     print(
-                        f"  ~ {m.get('file', '?')} : {m.get('from', '?')} -> {m.get('firm', '?')}"
+                        f"  ~ {m.get('old_file', '?')} [{m.get('artifact_id', '')}]"
+                        f" : {m.get('from', '?')} -> {m.get('to', '?')}"
                     )
 
             if move_result.get("new_folders"):
@@ -2825,6 +3531,31 @@ def monitor_and_classify_with_moves(
                 for nf in move_result["new_folders"]:
                     print(f"  + {nf['folder']} -> {nf['firm']}")
 
+            if move_result.get("new_artifacts"):
+                print(
+                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                    f"Tagged {len(move_result['new_artifacts'])} new artifact(s)"
+                )
+                for na in move_result["new_artifacts"]:
+                    loc = na["firm"] + (f"/{na['fund']}" if na.get("fund") else "")
+                    print(f"  + {na['file_name']} [{na['artifact_id']}] -> {loc}")
+
+            if move_result.get("removed_folders"):
+                print(
+                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                    f"Soft-deleted {len(move_result['removed_folders'])} folder(s)"
+                )
+                for rf in move_result["removed_folders"]:
+                    print(f"  - {rf['folder']} ({rf['type']} under {rf['firm']})")
+
+            if move_result.get("deleted_artifacts"):
+                print(
+                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                    f"Soft-deleted {len(move_result['deleted_artifacts'])} artifact(s)"
+                )
+                for da in move_result["deleted_artifacts"]:
+                    print(f"  - {da['file_name']} [{da['artifact_id']}]")
+
             if move_result["errors"]:
                 for err in move_result["errors"]:
                     print(f"  ERROR: {err}")
@@ -2833,6 +3564,9 @@ def monitor_and_classify_with_moves(
                 not classify_result["new_folders_found"]
                 and not move_result["moved"]
                 and not move_result.get("new_folders")
+                and not move_result.get("new_artifacts")
+                and not move_result.get("removed_folders")
+                and not move_result.get("deleted_artifacts")
             ):
                 print(
                     f"[{datetime.now().strftime('%H:%M:%S')}] No new emails or moves",
@@ -2856,390 +3590,10 @@ def monitor_and_classify_with_moves(
 # =========================
 
 # System files at the output_dir root that should never be scanned as artifacts
-_SYSTEM_FILES = {
+SYSTEM_FILES = {
     FIRM_MAPPINGS_FILE,
-    CLASSIFICATION_CACHE_FILE,
-    "classification_report.json",
+    CLASSIFICATION_REPORT_FILE,
 }
-
-
-def _parse_firm_fund_from_path(file_path: Path, output_dir: Path) -> tuple[str, str]:
-    """
-    Reverse of _resolve_artifact_dest_dir(). Given a file under output_dir,
-    extract the firm and optional fund folder names from its location.
-
-    Returns:
-        (firm_name, fund_name) where firm_name="" means _NEEDS_REVIEW or root.
-
-    Examples:
-        output_dir/FIRM/file.pdf          → ("FIRM", "")
-        output_dir/FIRM/FUND/file.pdf     → ("FIRM", "FUND")
-        output_dir/_NEEDS_REVIEW/file.pdf → ("", "")
-    """
-    try:
-        rel = file_path.resolve().relative_to(output_dir.resolve())
-    except ValueError:
-        return ("", "")
-
-    parts = rel.parts  # e.g. ("FIRM", "FUND", "file.pdf") or ("FIRM", "file.pdf")
-
-    if len(parts) < 2:
-        # File is directly in output_dir root — not in any firm folder
-        return ("", "")
-
-    firm_folder = parts[0]
-    if firm_folder == NEEDS_REVIEW_FOLDER:
-        return ("", "")
-
-    if len(parts) == 2:
-        # output_dir/FIRM/file
-        return (firm_folder, "")
-    else:
-        # output_dir/FIRM/FUND/file (or deeper — treat second level as fund)
-        return (firm_folder, parts[1])
-
-
-def _build_destination_index(
-    report: dict,
-) -> dict:
-    """
-    Build reverse index from the classification report:
-      destination_path → {email_id, artifact_index, list_key}
-
-    Scans report["classifications"] for entries that have "destinations".
-    Also builds a filename-based fallback index for moved-file matching.
-
-    Returns dict with two keys:
-        "by_path": {abs_path_str: {email_id, list_key, idx}}
-        "by_filename": {filename_str: [{email_id, list_key, idx, old_path}]}
-    """
-    by_path = {}
-    by_filename = {}
-
-    for entry in report.get("classifications", []):
-        email_id = entry.get("email_id", "")
-        if not email_id:
-            continue
-
-        destinations = entry.get("destinations", [])
-        assignments = entry.get("artifact_assignments", {})
-
-        # Map each destination to its artifact
-        # Destinations are ordered: first all attachments, then all links
-        # (matching organize_artifacts_to_folders output order)
-        included_atts = assignments.get("included_attachments", [])
-        included_links = assignments.get("included_links", [])
-
-        dest_idx = 0
-        for i, att in enumerate(included_atts):
-            if dest_idx < len(destinations):
-                path_str = destinations[dest_idx]
-                record = {
-                    "email_id": email_id,
-                    "list_key": "included_attachments",
-                    "idx": i,
-                }
-                by_path[path_str] = record
-
-                fname = Path(path_str).name
-                by_filename.setdefault(fname, []).append(
-                    {**record, "old_path": path_str}
-                )
-                dest_idx += 1
-
-        for i, link in enumerate(included_links):
-            if dest_idx < len(destinations):
-                path_str = destinations[dest_idx]
-                record = {
-                    "email_id": email_id,
-                    "list_key": "included_links",
-                    "idx": i,
-                }
-                by_path[path_str] = record
-
-                fname = Path(path_str).name
-                by_filename.setdefault(fname, []).append(
-                    {**record, "old_path": path_str}
-                )
-                dest_idx += 1
-
-    return {"by_path": by_path, "by_filename": by_filename}
-
-
-def sync_moved_artifacts(output_dir: Path = None) -> dict:
-    """
-    Detect artifacts that were manually moved between firm/fund folders
-    and new firm folders created by the user, then update the
-    classification cache, report, and firm mappings accordingly.
-
-    Returns:
-        {"moved": [{"file": str, "from": str, "to": str, "firm": str, "fund": str}],
-         "new_folders": [{"folder": str, "firm": str}],
-         "errors": [str]}
-    """
-    output_dir = output_dir or DEFAULT_OUTPUT_DIR
-    result = {"moved": [], "new_folders": [], "errors": []}
-
-    # Load all persistent state
-    report_path = output_dir / CLASSIFICATION_REPORT_FILE
-    if not report_path.exists():
-        return result
-
-    with open(report_path, "r", encoding="utf-8") as f:
-        report = json.load(f)
-
-    classification_cache = load_classification_cache(output_dir)
-    firm_mappings = load_firm_mappings(output_dir)
-
-    # Build index from report
-    index = _build_destination_index(report)
-    by_path = index["by_path"]
-
-    # Collect all known destination paths (for detecting what's missing)
-    known_paths = set(by_path.keys())
-
-    # Scan all artifact files currently on disk
-    disk_files = set()
-    for dirpath, _dirnames, filenames in os.walk(str(output_dir)):
-        dir_p = Path(dirpath)
-        # Skip output_dir root-level system files
-        for fname in filenames:
-            if dir_p == output_dir and fname in _SYSTEM_FILES:
-                continue
-            # Skip .review.json files — they are companion metadata, not artifacts
-            if fname.endswith(".review.json"):
-                continue
-            disk_files.add(str(dir_p / fname))
-
-    # Find files on disk that are NOT at their known destination
-    files_not_at_known = disk_files - known_paths
-
-    # Find known destinations that no longer exist on disk (file was moved away)
-    missing_from_known = known_paths - disk_files
-
-    # For each file not at a known path, try to match by filename
-    # to a missing known destination
-    missing_filenames = {}
-    for missing_path in missing_from_known:
-        fname = Path(missing_path).name
-        missing_filenames.setdefault(fname, []).append(missing_path)
-
-    moves = []  # List of (new_path, old_path, index_record)
-    for new_path_str in files_not_at_known:
-        fname = Path(new_path_str).name
-        if fname not in missing_filenames:
-            continue  # File was not moved from a known location
-
-        # Match: this filename disappeared from one place and appeared here
-        old_paths = missing_filenames[fname]
-        if not old_paths:
-            continue
-
-        old_path = old_paths.pop(0)  # Take first match
-        if not old_paths:
-            del missing_filenames[fname]
-
-        # Find the index record for the old path
-        record = by_path.get(old_path)
-        if record:
-            moves.append((new_path_str, old_path, record))
-
-    # Process each detected move
-    modified_email_ids = set()
-    for new_path_str, old_path_str, record in moves:
-        email_id = record["email_id"]
-        list_key = record["list_key"]
-        idx = record["idx"]
-
-        new_path = Path(new_path_str)
-        firm_folder, fund_folder = _parse_firm_fund_from_path(new_path, output_dir)
-
-        old_firm, old_fund = _parse_firm_fund_from_path(Path(old_path_str), output_dir)
-
-        # Skip if firm/fund hasn't actually changed
-        if firm_folder == old_firm and fund_folder == old_fund:
-            continue
-
-        # Determine new firm/fund assignment
-        is_rejection = firm_folder == ""  # Moved to _NEEDS_REVIEW or root
-
-        if is_rejection:
-            new_firm_name = ""
-            new_fund_name = ""
-            new_method = "manual_rejection"
-        else:
-            new_firm_name = firm_folder  # Folder name IS the firm name
-            new_fund_name = fund_folder
-            new_method = "manual_reassignment"
-
-        # --- Update classification cache ---
-        cache_entry = classification_cache.get(email_id)
-        if cache_entry:
-            artifacts = cache_entry.get("artifact_assignments", {}).get(list_key, [])
-            if idx < len(artifacts):
-                artifact = artifacts[idx]
-                artifact["assigned_firm_name"] = new_firm_name
-                artifact["assigned_fund_name"] = new_fund_name
-                artifact["method"] = new_method
-                artifact.setdefault("_recovery", {})["final_method"] = new_method
-
-                classification_cache[email_id] = cache_entry
-                modified_email_ids.add(email_id)
-
-        # --- Update report entry destinations ---
-        for entry in report.get("classifications", []):
-            if entry.get("email_id") != email_id:
-                continue
-            dests = entry.get("destinations", [])
-            for i, d in enumerate(dests):
-                if d == old_path_str:
-                    dests[i] = new_path_str
-                    break
-
-            # Also update the artifact in the report's artifact_assignments
-            report_artifacts = entry.get("artifact_assignments", {}).get(list_key, [])
-            if idx < len(report_artifacts):
-                report_artifacts[idx]["assigned_firm_name"] = new_firm_name
-                report_artifacts[idx]["assigned_fund_name"] = new_fund_name
-                report_artifacts[idx]["method"] = new_method
-                report_artifacts[idx].setdefault("_recovery", {})["final_method"] = (
-                    new_method
-                )
-            break
-
-        # --- Register new firm/fund in mappings ---
-        if new_firm_name:
-            canonical = normalize_firm_name(new_firm_name, firm_mappings)
-            canonical = apply_folder_reassignment(canonical, firm_mappings)
-            add_firm_to_mappings(canonical, [new_firm_name], firm_mappings)
-            if new_fund_name:
-                add_fund_to_firm(canonical, new_fund_name, [], firm_mappings)
-
-        # --- Handle _NEEDS_REVIEW context files ---
-        if is_rejection:
-            # Write a .review.json for the rejected artifact
-            artifact_data = {}
-            if cache_entry:
-                cache_artifacts = cache_entry.get("artifact_assignments", {}).get(
-                    list_key, []
-                )
-                if idx < len(cache_artifacts):
-                    artifact_data = cache_artifacts[idx]
-
-            date_prefix = new_path.name[:10]  # Extract YYYY-MM-DD from filename
-            if not re.match(r"\d{4}-\d{2}-\d{2}", date_prefix):
-                date_prefix = datetime.now().strftime("%Y-%m-%d")
-
-            review_dir = output_dir / NEEDS_REVIEW_FOLDER
-            review_dir.mkdir(parents=True, exist_ok=True)
-            identifier = artifact_data.get(
-                "filename", artifact_data.get("url", new_path.name)
-            )
-            slug = re.sub(r"[^a-zA-Z0-9]+", "_", identifier)[:40].strip("_").lower()
-            review_path = review_dir / f"{date_prefix}_{slug}.review.json"
-            context = {
-                "artifact_id": artifact_data.get("artifact_id", ""),
-                "filename": artifact_data.get("filename", ""),
-                "url": artifact_data.get("url", ""),
-                "description": artifact_data.get("description", ""),
-                "assigned_firm_name": "",
-                "assigned_fund_name": "",
-                "confidence": artifact_data.get("confidence", 0.0),
-                "method": "manual_rejection",
-                "evidence": artifact_data.get("evidence", ""),
-                "reason_code": artifact_data.get("reason_code", ""),
-                "_recovery": {
-                    "needed": True,
-                    "reason": "manual_rejection",
-                    "original_firm_name": old_firm,
-                    "original_fund_name": old_fund,
-                    "final_method": "manual_rejection",
-                },
-                "moved_from": old_path_str,
-                "source_email": {"email_id": email_id},
-            }
-            with open(review_path, "w", encoding="utf-8") as f:
-                json.dump(context, f, indent=2, ensure_ascii=False)
-
-        if not is_rejection and old_firm == "":
-            # Moved OUT of _NEEDS_REVIEW — clean up companion .review.json
-            old_dir = Path(old_path_str).parent
-            for review_file in old_dir.glob("*.review.json"):
-                try:
-                    with open(review_file, "r", encoding="utf-8") as f:
-                        review_data = json.load(f)
-                    if review_data.get("source_email", {}).get("email_id") == email_id:
-                        review_file.unlink()
-                        break
-                except (json.JSONDecodeError, OSError):
-                    continue
-
-        # --- Update .link.json proxy file if it's a link ---
-        if new_path.name.endswith(".link.json"):
-            try:
-                with open(new_path, "r", encoding="utf-8") as f:
-                    proxy_data = json.load(f)
-                proxy_data["assigned_firm_name"] = new_firm_name
-                proxy_data["assigned_fund_name"] = new_fund_name
-                proxy_data["method"] = new_method
-                proxy_data.setdefault("_recovery", {})["final_method"] = new_method
-                with open(new_path, "w", encoding="utf-8") as f:
-                    json.dump(proxy_data, f, indent=2, ensure_ascii=False)
-            except (json.JSONDecodeError, OSError) as e:
-                result["errors"].append(f"Failed to update link proxy {new_path}: {e}")
-
-        from_desc = f"{old_firm}/{old_fund}" if old_firm else "_NEEDS_REVIEW"
-        to_desc = f"{firm_folder}/{fund_folder}" if firm_folder else "_NEEDS_REVIEW"
-        result["moved"].append(
-            {
-                "file": new_path.name,
-                "from": from_desc.rstrip("/"),
-                "to": to_desc.rstrip("/"),
-                "firm": new_firm_name,
-                "fund": new_fund_name,
-            }
-        )
-        print(
-            f"  Synced: {new_path.name} | {from_desc.rstrip('/')} -> {to_desc.rstrip('/')}"
-        )
-
-    # --- Detect new firm/fund folders created by the user ---
-    known_firms = {
-        sanitize_folder_name(c) for c in firm_mappings.get("canonical_names", {})
-    }
-    known_firms.add(NEEDS_REVIEW_FOLDER)
-    for child in output_dir.iterdir():
-        if not child.is_dir():
-            continue
-        folder_name = child.name
-        if folder_name.startswith(".") or folder_name in _SYSTEM_FILES:
-            continue
-        if folder_name not in known_firms:
-            canonical = normalize_firm_name(folder_name, firm_mappings)
-            add_firm_to_mappings(canonical, [folder_name], firm_mappings)
-            known_firms.add(folder_name)
-            result["new_folders"].append({"folder": folder_name, "firm": canonical})
-            print(
-                f"  New firm folder detected: {folder_name} -> registered as {canonical}"
-            )
-
-            # Also detect fund sub-folders inside the new firm folder
-            for subfolder in child.iterdir():
-                if subfolder.is_dir() and not subfolder.name.startswith("."):
-                    add_fund_to_firm(canonical, subfolder.name, [], firm_mappings)
-                    result["new_folders"].append(
-                        {"folder": f"{folder_name}/{subfolder.name}", "firm": canonical}
-                    )
-                    print(f"  New fund folder detected: {folder_name}/{subfolder.name}")
-
-    # Save all modified state
-    if result["moved"] or result["new_folders"]:
-        save_classification_cache(classification_cache, output_dir)
-        save_firm_mappings(firm_mappings, output_dir)
-        with open(report_path, "w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2, ensure_ascii=False)
-
-    return result
 
 
 def add_email_override(email_address: str, firm_name: str, output_dir: Path = None):
@@ -3351,16 +3705,17 @@ def reassign_firm(old_firm_name: str, new_firm_name: str, output_dir: Path = Non
 
         canonical_names[new_canonical] = {
             "aliases": list(old_aliases),
-            "description": "",
-            "auto_added": datetime.now().isoformat(),
+            "identifier": None,
+            "funds": {},
+            "artifacts": {},
         }
 
         if old_firm_key:
-            # Copy description if it existed
-            if canonical_names[old_firm_key].get("description"):
-                canonical_names[new_canonical]["description"] = canonical_names[
-                    old_firm_key
-                ]["description"]
+            # Carry over funds and artifacts from old firm
+            old_entry = canonical_names[old_firm_key]
+            canonical_names[new_canonical]["funds"] = old_entry.get("funds", {})
+            canonical_names[new_canonical]["artifacts"] = old_entry.get("artifacts", {})
+            canonical_names[new_canonical]["identifier"] = old_entry.get("identifier")
             del canonical_names[old_firm_key]
             print(f"Renamed '{old_firm_key}' to '{new_canonical}'")
         else:
@@ -3513,8 +3868,8 @@ def list_firms(output_dir: Path = None) -> dict:
         print(f"\n{canonical}")
         if aliases:
             print(f"  Aliases: {', '.join(aliases)}")
-        if info.get("description"):
-            print(f"  Description: {info['description']}")
+        if info.get("identifier"):
+            print(f"  Identifier: {info['identifier']}")
         if funds:
             print(f"  Funds ({len(funds)}):")
             for fund_name, fund_info in funds.items():
@@ -3921,14 +4276,13 @@ def main():
     print("  6. Add domain override (all from domain -> firm)")
     print("  7. Reassign/rename firm (old firm -> new firm, merges if new exists)")
     print("  8. Monitor for new emails + artifact moves (continuous)")
-    print("  9. Check for new emails (one-time)")
-    print(" 10. Manage aliases (firm/fund)")
+    print("  9. Manage aliases (firm/fund)")
     print()
 
     if len(sys.argv) > 1:
         mode = sys.argv[1]
     else:
-        mode = input("Enter mode (1-10): ").strip()
+        mode = input("Enter mode (1-9): ").strip()
 
     if mode == "1":
         classify_and_organize_emails()
@@ -3968,10 +4322,8 @@ def main():
     elif mode == "8":
         interval = input("Poll interval in seconds (default 30): ").strip()
         interval = int(interval) if interval.isdigit() else 30
-        monitor_and_classify_with_moves(poll_interval=interval, run_once=False)
+        monitoring(poll_interval=interval, run_once=False)
     elif mode == "9":
-        monitor_and_classify(run_once=True)
-    elif mode == "10":
         manage_aliases()
     else:
         print("Invalid mode.")
