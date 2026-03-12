@@ -1,6 +1,5 @@
 import datetime as dt
 from collections import defaultdict
-from itertools import cycle
 from typing import Dict
 from pathlib import Path
 import numpy as np
@@ -25,9 +24,9 @@ fund_name_map = {
     "MSCI WORLD": {"en": "MSCI World Index", "cn": "MSCI 世界指数"},
     "S&P 500": {"en": "S&P 500 Index", "cn": "标普500指数"},
     "TOPIX": {"en": "TOPIX Index", "cn": "東証株価指数"},
-    "EUREKAHEDGE WORLD": {
-        "en": "Eurekahedge Hedge Fund Index",
-        "cn": "Eurekahedge 对冲基金指数",
+    "WITH WORLD": {
+        "en": "With Intelligence Hedge Fund Index",
+        "cn": "With Intelligence 对冲基金指数",
         # add more mappings here...
     },
 }
@@ -47,40 +46,35 @@ STYLE_DICT = {
                 "b": 60,  # bottom margin
             },
             "grid_color": "#DDDDDE",
-            "zero_color" :"#989A9C",
+            "zero_color": "#989A9C",
             "date_ticks": {
-                "num": 6, # Number of date ticks to display
-                "format": "%b" # Format for date ticks
+                "num": 6,  # Number of date ticks to display
+                "format": "%b",  # Format for date ticks
             },
             "annotation": {
                 "add_annotation": True,  # True if we want to add an annotation
                 "position": {
-
-                    "x": 0.5, # scale to the entire plot area
-                    "y": -0.18 # scale to the entire plot area
-                }
+                    "x": 0.5,  # scale to the entire plot area
+                    "y": -0.18,  # scale to the entire plot area
+                },
             },
             "legend": {
-                "orientation": "h", # "h" for horizontal, "v" for vertical
+                "orientation": "h",  # "h" for horizontal, "v" for vertical
                 "position": {
-                    "x": 0.5, # scale to the entire plot area
-                    "y": -0.07 # scale to the entire plot area
-                }
+                    "x": 0.5,  # scale to the entire plot area
+                    "y": -0.07,  # scale to the entire plot area
+                },
             },
-            "fixed_aspect": {        
-                "aspect_w": 13.5, 
-                "aspect_h": 12
-            }
+            "fixed_aspect": {"aspect_w": 13.5, "aspect_h": 12},
         },
         "trace_config": {
             "mark_size": {
-
-                "lead": 18, # marker size for the lead fund
-                "other": 16 # marker size for the other funds
+                "lead": 18,  # marker size for the lead fund
+                "other": 16,  # marker size for the other funds
             },
             "line_width": {
-                "lead": 5, # line width for the lead fund
-                "other": 4 # line width for the other funds
+                "lead": 5,  # line width for the lead fund
+                "other": 4,  # line width for the other funds
             },
             "color": {
                 "lead": "#2F2F2F",
@@ -123,13 +117,8 @@ STYLE_DICT = {
             "margin": {"l": 56, "r": 16, "t": 56, "b": 80},
             "background": {"paper": "#ffffff", "plot": "#fcfcfd"},
             "grid_color": "#efefef",
-
-            "zero_color" :"#53565A",
-            "date_ticks": {
-                "num": 8,
-                "format": "%b %Y"
-            },
-
+            "zero_color": "#53565A",
+            "date_ticks": {"num": 8, "format": "%b %Y"},
             "annotation": {
                 "add_annotation": False,
                 "position": {"x": 0.5, "y": 0.1},
@@ -140,14 +129,11 @@ STYLE_DICT = {
                 "position": {"x": 0.5, "y": 1.15},
                 "anchor": "right",
             },
-            "fixed_aspect": {        
-                "aspect_w": 13.5, 
-                "aspect_h": 6
-            }
+            "fixed_aspect": {"aspect_w": 13.5, "aspect_h": 6},
         },
         "trace_config": {
             "mark_size": {"lead": 10, "other": 8},
-            "line_width": {"lead":3, "other": 2},
+            "line_width": {"lead": 3, "other": 2},
             "color": {
                 "lead": "#2F2F2F",
                 "other": [
@@ -193,7 +179,7 @@ STYLE_DICT = {
                 "b": 60,  # bottom margin
             },
             "grid_color": "#DACEBF",
-            "zero_color" :"#53565A",
+            "zero_color": "#53565A",
             "date_ticks": {
                 "num": 6,  # Number of date ticks to display
                 "format": "%b %Y",  # Format for date ticks
@@ -212,10 +198,7 @@ STYLE_DICT = {
                     "y": -0.17,  # scale to the entire plot area
                 },
             },
-            "fixed_aspect": {        
-                "aspect_w": 13.5, 
-                "aspect_h": 6
-            }
+            "fixed_aspect": {"aspect_w": 13.5, "aspect_h": 6},
         },
         "trace_config": {
             "mark_size": {
@@ -261,6 +244,7 @@ STYLE_DICT = {
     },
 }
 
+
 def _add_value_boxes(fig, xs, ys, *, indices, color, fmt, boxcfg):
     for i in indices:
         fig.add_annotation(
@@ -280,22 +264,21 @@ def _add_value_boxes(fig, xs, ys, *, indices, color, fmt, boxcfg):
             opacity=1.0,
         )
 
+
 def plot_cumulative_returns(
-        funds: Dict[str, Fund], 
-        title: str, 
-        start_month: str = None, # YYYY-MM
-        end_month: str = None, # YYYY-MM
-        style: str = "default",
-        language: str = "en",  # "en" or "cn"
-        blur: bool = False,
-        aspect_lock = False,
-        custom_ticks = False,
-        save = False,
-        toggle = False
-    ):
-
-
-    global_ymin, global_ymax = (0, 0) if custom_ticks else ("","")
+    funds: Dict[str, Fund],
+    title: str,
+    start_month: str = None,  # YYYY-MM
+    end_month: str = None,  # YYYY-MM
+    style: str = "default",
+    language: str = "en",  # "en" or "cn"
+    blur: bool = False,
+    aspect_lock=False,
+    custom_ticks=False,
+    save=False,
+    toggle=False,
+):
+    global_ymin, global_ymax = (0, 0) if custom_ticks else ("", "")
 
     layout_config = STYLE_DICT.get(style, STYLE_DICT["default"])["layout_config"]
     trace_config = STYLE_DICT.get(style, STYLE_DICT["default"])["trace_config"]
@@ -432,7 +415,7 @@ def plot_cumulative_returns(
 
         step = max(1, int(len(months) / 12))
         marker_indices = list(range(0, len(months), step))
-        box_indices = list(range(0, len(months), step*2))
+        box_indices = list(range(0, len(months), step * 2))
 
         # Add markers for every ~10% of the data points
         if (
@@ -440,7 +423,6 @@ def plot_cumulative_returns(
             .get("markers", {})
             .get("enabled", False)
         ):
-
             # always include the last point
             if (len(months) - 1) not in marker_indices:
                 marker_indices.append(len(months) - 1)
@@ -459,12 +441,15 @@ def plot_cumulative_returns(
                             else trace_config["mark_size"]["other"]
                         ),
                         color=color_map[fund.name],
-                        line=dict(width=1, color="white")
-                    )
+                        line=dict(width=1, color="white"),
+                    ),
                 )
             )
             first_last_x = [months[marker_indices[0]], months[marker_indices[-1]]]
-            first_last_y = [cumulative_returns[marker_indices[0]], cumulative_returns[marker_indices[-1]]]
+            first_last_y = [
+                cumulative_returns[marker_indices[0]],
+                cumulative_returns[marker_indices[-1]],
+            ]
 
             fig.add_trace(
                 go.Scatter(
@@ -474,16 +459,20 @@ def plot_cumulative_returns(
                     showlegend=False,
                     hoverinfo="skip",
                     marker=dict(
-                        size=(trace_config["mark_size"]["lead"] if fund.name == lead_name else trace_config["mark_size"]["other"]) + 4,
+                        size=(
+                            trace_config["mark_size"]["lead"]
+                            if fund.name == lead_name
+                            else trace_config["mark_size"]["other"]
+                        )
+                        + 4,
                         color=color_map[fund.name],  # hollow center
-                        line=dict(width=2, color=color_map[fund.name]),  # outline in series color
-                        symbol="circle-open"  # hollow circle marker
-                    )
+                        line=dict(
+                            width=2, color=color_map[fund.name]
+                        ),  # outline in series color
+                        symbol="circle-open",  # hollow circle marker
+                    ),
                 )
             )
-
-
-
 
             # Compute a dynamic dtick as 10% of the range
         # Add value boxes based on whether the trace is a lead or not / some style do not need value boxes
@@ -519,7 +508,7 @@ def plot_cumulative_returns(
                     # build a per-index boxcfg that inherits the style, but adds a vertical offset
                     per_index_boxcfg = dict(value_box_cfg.get("box", {}))
                     # Prefer yshift (pixel space). You can also add small xshift if labels are wide.
-                    if toggle: 
+                    if toggle:
                         per_index_boxcfg.setdefault("yshift", 0)
                         per_index_boxcfg["yshift"] += tier * STACK_STEP_PX
 
@@ -562,15 +551,15 @@ def plot_cumulative_returns(
             ],
         ),
         yaxis=dict(
-            title="Cumulative Return (%)" if trace_config['Y-axis'] is True else None, 
-            tickformat=".0%", 
+            title="Cumulative Return (%)" if trace_config["Y-axis"] is True else None,
+            tickformat=".0%",
             showgrid=True,
             gridcolor=layout_config["grid_color"],
             zeroline=True,
-            zerolinecolor = layout_config["zero_color"],
-            zerolinewidth = 2,
-            rangemode = "tozero"
-            ),
+            zerolinecolor=layout_config["zero_color"],
+            zerolinewidth=2,
+            rangemode="tozero",
+        ),
         legend=dict(
             orientation=layout_config["legend"]["orientation"],
             yanchor="middle",
@@ -582,17 +571,13 @@ def plot_cumulative_returns(
     )
     # Set up the y-axis to be 1/10 of the max and min of the range
     if custom_ticks:
-        custom_ticks = 1/custom_ticks
+        custom_ticks = 1 / custom_ticks
         dtick = custom_ticks * (ymax_rounded - ymin_rounded)
-        fig.update_yaxes(
-            dtick = dtick,
-            range=[ymin_rounded, ymax_rounded]
-        )
+        fig.update_yaxes(dtick=dtick, range=[ymin_rounded, ymax_rounded])
 
     if aspect_lock == True:
-        
-        ASPECT_W = layout_config['fixed_aspect']['aspect_w']
-        ASPECT_H = layout_config['fixed_aspect']['aspect_h']
+        ASPECT_W = layout_config["fixed_aspect"]["aspect_w"]
+        ASPECT_H = layout_config["fixed_aspect"]["aspect_h"]
         WIDTH = 1280
         HEIGHT = int(WIDTH * ASPECT_H / ASPECT_W)
         fig.update_layout(width=WIDTH, height=HEIGHT)
@@ -641,19 +626,20 @@ def plot_cumulative_returns(
                 text="<br>".join(summary_lines),
             )
     # --------------------------- Show figure ---------------------------
-    
+
     if save:
-        file_name =  f'{"_".join(funds.keys())} cumulative return plot - {language}.png'
+        file_name = f"{'_'.join(funds.keys())} cumulative return plot - {language}.png"
         save_path = f"{save_dir}/{file_name}"
         fig.write_image(
             save_path,
             width=WIDTH if aspect_lock else None,
             height=HEIGHT if aspect_lock else None,
-            scale=2  # controls DPI
+            scale=2,  # controls DPI
         )
     fig.show()
 
     return fig
+
 
 def plot_fund_correlation_heatmap(
     funds: dict,
@@ -661,7 +647,7 @@ def plot_fund_correlation_heatmap(
     method: str = "pearson",  # "pearson" | "spearman" | "kendall"
     min_overlap: int = 6,  # require at least this many overlapping months for a correlation
     title: str = "Fund Return Correlations",
-    save = False,
+    save=False,
 ):
     """
     Build pairwise correlations of monthly returns using pairwise-complete data (max overlap)
@@ -732,12 +718,12 @@ def plot_fund_correlation_heatmap(
 
     # Scale each cell to, say, 40px in both directions
     cell_size = 40
-    width  = cell_size * n_funds
+    width = cell_size * n_funds
     height = cell_size * n_funds
     # 5) Layout polish
     fig.update_layout(
         width=width,
-        height=height,  
+        height=height,
         title=dict(text=f"<b>{title}</b>", x=0.5, xanchor="center"),
         template="plotly_white",
         font=dict(family="Montserrat, Roboto", size=13, color="#53565A"),
@@ -747,12 +733,13 @@ def plot_fund_correlation_heatmap(
     )
 
     if save:
-        file_name = f'{"_".join(funds.keys())} correlation plot.png'    
+        file_name = f"{'_'.join(funds.keys())} correlation plot.png"
         save_path = f"{save_dir}/{file_name}"
         fig.write_image(save_path, scale=2)
     else:
         fig.show()
     return fig, corr, overlap
+
 
 # def batch_compare (
 #                 funds: Dict[str, Fund],
