@@ -253,7 +253,7 @@ def _find_ytd_index(header_row, non_month_header):
             return i
     return None
 
-def _ytd_cross_validate_rows(cleaned_rows, year_rows, ytd_col_idx, fund_name):
+def _ytd_cross_validate_rows(cleaned_rows, year_rows, ytd_col_idx, fund_name, auto_scaled=False):
     """Cross-validate monthly values against YTD using compounding.
 
     For each complete year (12 months):
@@ -279,10 +279,17 @@ def _ytd_cross_validate_rows(cleaned_rows, year_rows, ytd_col_idx, fund_name):
         if 0 <= val_idx < len(all_vals):
             try:
                 raw = all_vals[val_idx]
-                ytd_val = float(raw.strip("%")) / 100 if "%" in raw else float(raw)
+                ytd_val = float(raw.strip("%"))
                 ytd_by_year[year] = ytd_val
             except (ValueError, TypeError):
                 pass
+
+    # Determine once whether YTD values are in percentage form (avg abs > 1.5)
+    ytd_abs_vals = [abs(v) for v in ytd_by_year.values() if v != 0]
+    ytd_is_pct = bool(ytd_abs_vals) and (sum(ytd_abs_vals) / len(ytd_abs_vals)) > 1.5
+
+    def _compound(vals):
+        return math.prod(1 + v for v in vals) - 1
 
     for year, entries in by_year.items():
         if len(entries) != 12 or year not in ytd_by_year:
@@ -291,21 +298,22 @@ def _ytd_cross_validate_rows(cleaned_rows, year_rows, ytd_col_idx, fund_name):
         ytd_raw = ytd_by_year[year]
         monthly_vals = [e["value"] for e in entries]
 
-        def _compound(vals):
-            return math.prod(1 + v for v in vals) - 1
+        # Only attempt /100 scale correction if auto-detect didn't already handle it
+        is_pct_scale = False
+        if not auto_scaled:
+            abs_vals = sorted(abs(v) for v in monthly_vals if v != 0)
+            is_pct_scale = abs_vals and abs_vals[len(abs_vals) // 2] > 0.5
+            if is_pct_scale:
+                for e in entries:
+                    e["value"] = round(e["value"] / 100, 4)
+                monthly_vals = [e["value"] for e in entries]
+                print(f"YTD cross-validation ({fund_name}, {year}): applied /100 scale correction")
 
-        # Only attempt /100 scale correction if values appear to be in
-        # percentage form (median |value| > 0.5, e.g. 13.82 meaning 13.82%)
-        abs_vals = sorted(abs(v) for v in monthly_vals if v != 0)
-        is_pct_scale = abs_vals and abs_vals[len(abs_vals) // 2] > 0.5
-        if is_pct_scale:
-            for e in entries:
-                e["value"] = round(e["value"] / 100, 6)
-            monthly_vals = [e["value"] for e in entries]
-            print(f"YTD cross-validation ({fund_name}, {year}): applied /100 scale correction")
-
-        # Flag remaining YTD mismatch (after any scale fix)
-        ytd_expected = ytd_raw / 100 if abs(ytd_raw) > 0.5 else ytd_raw
+        # Scale YTD: use the once-for-all ytd_is_pct decision, or auto_scaled flag
+        if auto_scaled or ytd_is_pct:
+            ytd_expected = ytd_raw / 100
+        else:
+            ytd_expected = ytd_raw
         compound = _compound(monthly_vals)
         error = abs(compound - ytd_expected)
         if error > 0.0002:
@@ -458,19 +466,25 @@ def process_performance(data):
 
     # Auto-detect percentage-scale values: if median |value| > 0.5, values are
     # likely in percentage form (e.g. 1.23 meaning 1.23%) and need dividing by 100
+    auto_scaled = False
     if cleaned_rows:
         abs_vals = sorted(abs(r["value"]) for r in cleaned_rows if r["value"] != 0)
         if abs_vals:
             median_abs = abs_vals[len(abs_vals) // 2]
             if median_abs > 0.5:
                 for r in cleaned_rows:
-                    r["value"] = round(r["value"] / 100, 6)
+                    r["value"] = round(r["value"] / 100, 4)
+                auto_scaled = True
 
     # --- YTD cross-validation ---
     # Identify YTD column from the non-month headers in the original header row.
     ytd_idx = _find_ytd_index(data["performance"]["table"][0], non_month_header)
     if ytd_idx is not None:
-        _ytd_cross_validate_rows(cleaned_rows, rows, ytd_idx, data["fund_name"])
+        _ytd_cross_validate_rows(cleaned_rows, rows, ytd_idx, data["fund_name"], auto_scaled)
+
+    # Ensure all values are recorded to exactly 4 decimal places
+    for r in cleaned_rows:
+        r["value"] = round(r["value"], 4)
 
     return cleaned_rows
 
@@ -505,7 +519,30 @@ def compute_identifier(performance_data):
         decimal_part = formatted.split(".")[1]
         identifier_parts.append(decimal_part)
 
-    return "".join(identifier_parts)
+    identifier = "".join(identifier_parts)
+    # Ensure identifier is always exactly 10 digits
+    return identifier[:10].ljust(10, "0")
+
+def _save_json_result(result, json_folder):
+    """Save a result dict to a JSON file named by identifier.
+
+    If a file with the same identifier already exists, keep the one
+    with the longer performance track record.
+    """
+    os.makedirs(json_folder, exist_ok=True)
+    identifier = result.get('identifier', result.get('fund_name', 'unknown'))
+    output_path = os.path.join(json_folder, f"{identifier}.json")
+
+    if os.path.exists(output_path):
+        with open(output_path, "r", encoding="utf-8") as f:
+            existing = json.load(f)
+        existing_len = len(existing.get('performance', []))
+        new_len = len(result.get('performance', []))
+        if new_len <= existing_len:
+            return  # existing has equal or longer track record, skip
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
 
 def extract_text_from_pdf(file_path):
     doc = fitz.open(file_path)
@@ -630,6 +667,35 @@ def gpt_process_text(text: str):
     data['identifier'] = compute_identifier(data.get('performance', []))
     return data
 
+def process_single_pdf(file_path, save=True, identifier="_parsed from_"):
+    """
+    Process a single PDF by file path. Renames the file and optionally saves the result as JSON.
+    Returns the parsed result dict.
+    """
+    if not os.path.isfile(file_path) or not file_path.lower().endswith(".pdf"):
+        raise ValueError(f"Invalid PDF path: {file_path}")
+
+    folder_path = os.path.dirname(file_path) or "."
+    file_name = os.path.basename(file_path)
+
+    print(f"Processing: {file_path}")
+    result = gpt_process_pdf(file_path)
+
+    # Renaming of the pdf file
+    base, ext = os.path.splitext(file_name)
+    if identifier in base:
+        prefix, base = base.split(identifier, 1)
+        result['fund_name'] = prefix
+    new_file_name = f"{result['fund_name']}{identifier}{base}{ext}"
+    new_path = os.path.join(folder_path, new_file_name)
+    os.rename(file_path, new_path)
+
+    if save:
+        json_folder = os.path.join(folder_path, "json")
+        _save_json_result(result, json_folder)
+
+    return result
+
 def process_pdfs_in_folder(folder_path="input", save=False, identifier = "_parsed from_"):
     """
     Iterates through all PDFs in the same folder as this script (relative path).
@@ -657,14 +723,8 @@ def process_pdfs_in_folder(folder_path="input", save=False, identifier = "_parse
             os.rename(file_path, new_path)
             results.append(result)
             if save:
-              # Create "json" folder inside folder_path if it doesn't exist
               json_folder = os.path.join(folder_path, "json")
-              os.makedirs(json_folder, exist_ok=True)
-
-              # Save """decide on result or results""" to a JSON file inside the "json" folder
-              output_path = os.path.join(json_folder, f"{result['fund_name']}.json")
-              with open(output_path, "w", encoding="utf-8") as f:
-                  json.dump(result, f, ensure_ascii=False, indent=2)
+              _save_json_result(result, json_folder)
     # Record the files without performance for future re-run
     no_perf_path = os.path.join(folder_path, "No Performance Found.txt")
     with open(no_perf_path, "w") as f:
@@ -714,10 +774,7 @@ def rerun_no_perf_files(folder_path="input", save=False):
                 # Save JSON if required
                 if save:
                     json_folder = os.path.join(folder_path, "json")
-                    os.makedirs(json_folder, exist_ok=True)
-                    output_path = os.path.join(json_folder, f"{result['fund_name']}.json")
-                    with open(output_path, "w", encoding="utf-8") as f_out:
-                        json.dump(result, f_out, ensure_ascii=False, indent=2)
+                    _save_json_result(result, json_folder)
 
                 results.append(result)
                 break  # stop after matching one prefix
@@ -761,14 +818,8 @@ def continue_running(folder_path="input", save=False, identifier = "_parsed from
             results.append(result)
 
             if save:
-                # Create "json" folder inside folder_path if it doesn't exist
                 json_folder = os.path.join(folder_path, "json")
-                os.makedirs(json_folder, exist_ok=True)
-
-                # Save results to a JSON file inside the "json" folder
-                output_path = os.path.join(json_folder, f"{result['fund_name']}.json")
-                with open(output_path, "w", encoding="utf-8") as f:
-                    json.dump(result, f, ensure_ascii=False, indent=2)
+                _save_json_result(result, json_folder)
 
     # Record the files without performance for future re-run
     no_perf_path = os.path.join(folder_path, "No Performance Found.txt")
@@ -953,15 +1004,9 @@ def offload_funds(funds: Dict[str, Fund]) -> List[Dict]:
     return results
 
 def results_to_json(results, folder_path="input"):
+    json_folder = os.path.join(folder_path, "json")
     for result in results:
-      # Create "json" folder inside folder_path if it doesn't exist
-      json_folder = os.path.join(folder_path, "json")
-      os.makedirs(json_folder, exist_ok=True)
-
-      # Save """decide on result or results""" to a JSON file inside the "json" folder
-      output_path = os.path.join(json_folder, f"{result['fund_name']}.json")
-      with open(output_path, "w", encoding="utf-8") as f:
-          json.dump(result, f, ensure_ascii=False, indent=2)
+      _save_json_result(result, json_folder)
 
 def save_changes_in_fund(funds: Dict[str, Fund], folder_path = "input"):
     results = offload_funds(funds)
@@ -1259,13 +1304,8 @@ def get_link_from_html(folder_path=r"input\marquee",  save=False, show=False):
                 f.write("\n".join(no_perf_list))    
             results.append(result)
             if save:
-              # Create "json" folder inside folder_path if it doesn't exist
               json_folder = os.path.join(folder_path, "json")
-              os.makedirs(json_folder, exist_ok=True)
-              # Save result to a JSON file inside the "json" folder
-              output_path = os.path.join(json_folder, f"{result['fund_name']}.json")
-              with open(output_path, "w", encoding="utf-8") as f:
-                  json.dump(result, f, ensure_ascii=False, indent=2)
+              _save_json_result(result, json_folder)
     return results
 
 def rerun_no_table_list (folder_path=r"input\marquee", save=False, show = False):
@@ -1313,12 +1353,7 @@ def rerun_no_table_list (folder_path=r"input\marquee", save=False, show = False)
                 f.write("\n".join(filter_list))
             results.append(result)
             if save:
-                # Create "json" folder inside folder_path if it doesn't exist
                 json_folder = os.path.join(folder_path, "json")
-                os.makedirs(json_folder, exist_ok=True)
-                # Save result to a JSON file inside the "json" folder
-                output_path = os.path.join(json_folder, f"{result['fund_name']}.json")
-                with open(output_path, "w", encoding="utf-8") as f:
-                    json.dump(result, f, ensure_ascii=False, indent=2)
+                _save_json_result(result, json_folder)
     return results
 

@@ -3078,6 +3078,8 @@ def _scan_disk_state(output_dir: Path) -> dict:
         # Scan direct files under firm
         for f in sorted(child.iterdir()):
             if f.is_file() and not f.name.startswith(".") and f.name not in SYSTEM_FILES:
+                if f.suffix.lower() == ".json":
+                    continue
                 art_id = _parse_artifact_id_from_filename(f.name)
                 if art_id:
                     firm_entry["artifacts"][art_id] = f.name
@@ -3100,7 +3102,7 @@ def _scan_disk_state(output_dir: Path) -> dict:
 
             for f in sorted(subfolder.rglob("*")):
                 if f.is_file() and not f.name.startswith(".") and f.name not in SYSTEM_FILES:
-                    if f.name.endswith(".review.json"):
+                    if f.suffix.lower() == ".json":
                         continue
                     art_id = _parse_artifact_id_from_filename(f.name)
                     if art_id:
@@ -3160,19 +3162,37 @@ def sync_moved_artifacts(output_dir: Path = None) -> dict:
 
     # --- Pass 1: Walk disk state and reconcile with registry ---
     for firm_folder_name, firm_disk in disk_state["firms"].items():
-        # Match firm folder to registry by contents (fund subfolders + artifact filenames)
-        disk_contents = set()
-        for fund_folder_name_inner in firm_disk["funds"]:
-            fund_name_inner, _ = _parse_folder_identifier(fund_folder_name_inner)
-            disk_contents.add(fund_name_inner)
-        for art_id_inner, filename_inner in firm_disk["artifacts"].items():
-            disk_contents.add(_strip_artifact_id_from_filename(filename_inner))
-        for filename_inner in firm_disk["untagged_files"]:
-            disk_contents.add(filename_inner)
+        matched_canonical = None
 
-        matched_canonical = _match_by_contents(
-            disk_contents, registry_index["firm_folders"]
-        )
+        # Primary: match folder name against canonical names and aliases
+        folder_upper = firm_folder_name.upper()
+        for canon, info in canonical_names.items():
+            if info.get("_deleted_at"):
+                continue
+            if folder_upper == canon.upper():
+                matched_canonical = canon
+                break
+            for alias in info.get("aliases", []):
+                if folder_upper == alias.upper():
+                    matched_canonical = canon
+                    break
+            if matched_canonical:
+                break
+
+        if not matched_canonical:
+            # Fallback: match by contents (fund subfolders + artifact filenames)
+            disk_contents = set()
+            for fund_folder_name_inner in firm_disk["funds"]:
+                fund_name_inner, _ = _parse_folder_identifier(fund_folder_name_inner)
+                disk_contents.add(fund_name_inner)
+            for art_id_inner, filename_inner in firm_disk["artifacts"].items():
+                disk_contents.add(_strip_artifact_id_from_filename(filename_inner))
+            for filename_inner in firm_disk["untagged_files"]:
+                disk_contents.add(filename_inner)
+
+            matched_canonical = _match_by_contents(
+                disk_contents, registry_index["firm_folders"]
+            )
 
         if not matched_canonical:
             # New firm — register it
@@ -3189,6 +3209,45 @@ def sync_moved_artifacts(output_dir: Path = None) -> dict:
                 "firm": new_canonical,
                 "type": "firm",
             })
+
+        # Detect firm folder rename: if the disk folder name differs from
+        # the matched canonical, re-key the firm under the new name.
+        # Skip if the target name already exists as a different firm (would overwrite).
+        new_canonical_candidate = firm_folder_name.upper()
+        if (
+            matched_canonical
+            and new_canonical_candidate != matched_canonical
+            and new_canonical_candidate not in canonical_names
+        ):
+            # Add old canonical as alias
+            firm_data = canonical_names[matched_canonical]
+            existing_aliases = [a.lower() for a in firm_data.get("aliases", [])]
+            if matched_canonical.lower() not in existing_aliases:
+                firm_data.setdefault("aliases", []).append(matched_canonical)
+            # Re-key under new name
+            canonical_names[new_canonical_candidate] = canonical_names.pop(matched_canonical)
+            # Update registry index
+            registry_index["firm_folders"][new_canonical_candidate] = registry_index["firm_folders"].pop(matched_canonical, [])
+            # Update artifact_ids index
+            for art_id, loc in list(registry_index["artifact_ids"].items()):
+                if loc[0] == matched_canonical:
+                    registry_index["artifact_ids"][art_id] = (new_canonical_candidate, loc[1])
+            # Update artifact_filenames index
+            for key, art_id in list(registry_index["artifact_filenames"].items()):
+                if key[0] == matched_canonical:
+                    new_key = (new_canonical_candidate, key[1], key[2])
+                    registry_index["artifact_filenames"][new_key] = registry_index["artifact_filenames"].pop(key)
+            # Update fund_contents index
+            for key, contents in list(registry_index["fund_contents"].items()):
+                if key[0] == matched_canonical:
+                    new_key = (new_canonical_candidate, key[1])
+                    registry_index["fund_contents"][new_key] = registry_index["fund_contents"].pop(key)
+            # Update fund_identifiers index
+            for ident, loc in list(registry_index["fund_identifiers"].items()):
+                if loc[0] == matched_canonical:
+                    registry_index["fund_identifiers"][ident] = (new_canonical_candidate, loc[1])
+            matched_canonical = new_canonical_candidate
+            _registry_dirty = True
 
         seen_firms.add(matched_canonical)
         firm_entry = canonical_names[matched_canonical]
@@ -3320,8 +3379,8 @@ def sync_moved_artifacts(output_dir: Path = None) -> dict:
                 if id_lookup and id_lookup[0] == matched_canonical:
                     matched_fund = id_lookup[1]
                     # Fund name may have changed (folder rename) — update if needed
-                    if fund_name and fund_name != matched_fund:
-                        fund_data = firm_entry.get("funds", {}).get(matched_fund, {})
+                    if fund_name and fund_name != matched_fund and matched_fund in firm_entry.get("funds", {}):
+                        fund_data = firm_entry["funds"][matched_fund]
                         existing_aliases = [a.lower() for a in fund_data.get("aliases", [])]
                         if matched_fund.lower() not in existing_aliases:
                             fund_data.setdefault("aliases", []).append(matched_fund)
@@ -3329,6 +3388,19 @@ def sync_moved_artifacts(output_dir: Path = None) -> dict:
                         firm_entry["funds"][fund_name] = firm_entry["funds"].pop(matched_fund)
                         # Update fund_identifiers index to point to new name
                         registry_index["fund_identifiers"][str(identifier)] = (matched_canonical, fund_name)
+                        # Update artifact_ids index to reflect new fund name
+                        for art_id_upd, loc_upd in list(registry_index["artifact_ids"].items()):
+                            if loc_upd == (matched_canonical, matched_fund):
+                                registry_index["artifact_ids"][art_id_upd] = (matched_canonical, fund_name)
+                        # Update artifact_filenames index
+                        for key_upd in list(registry_index["artifact_filenames"].keys()):
+                            if key_upd[0] == matched_canonical and key_upd[1] == matched_fund:
+                                new_key_upd = (matched_canonical, fund_name, key_upd[2])
+                                registry_index["artifact_filenames"][new_key_upd] = registry_index["artifact_filenames"].pop(key_upd)
+                        # Update fund_contents index
+                        old_fc_key = (matched_canonical, matched_fund)
+                        if old_fc_key in registry_index["fund_contents"]:
+                            registry_index["fund_contents"][(matched_canonical, fund_name)] = registry_index["fund_contents"].pop(old_fc_key)
                         matched_fund = fund_name
                         _registry_dirty = True
 

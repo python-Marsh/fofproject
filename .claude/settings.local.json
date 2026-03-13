@@ -25,7 +25,9 @@
       "Bash(poetry run python3 -c \":*)",
       "Bash(python3 -c \":*)",
       "Bash(poetry add python-docx python-pptx)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(grep -E \"\\\\.\\(json|txt\\)$\")",
+      "Bash(poetry install:*)"
     ]
   }
 }
