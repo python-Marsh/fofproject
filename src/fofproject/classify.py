@@ -2950,7 +2950,7 @@ def _parse_folder_identifier(folder_name: str) -> tuple[str, str]:
 
     Returns (folder_name, "") if no identifier separator is found.
     """
-    match = re.match(r"^(.+?)\s+-\s+(.+)$", folder_name)
+    match = re.match(r"^(.+)\s+-\s+([^\s-]+)$", folder_name)
     if match:
         return match.group(1).strip(), match.group(2).strip()
     return folder_name, ""
@@ -3002,34 +3002,49 @@ def _build_registry_index(mappings: dict) -> dict:
     artifact_filenames = {}
 
     for canonical, firm_data in canonical_names.items():
+        # Skip soft-deleted firms for content-based matching indexes,
+        # but still index their artifact_ids so moves from deleted entries
+        # can be tracked.
+        is_firm_deleted = bool(firm_data.get("_deleted_at"))
+
         # Collect contents: fund subfolder names + firm-level artifact filenames
         contents = []
 
         # Firm-level artifacts
         for art_id, art_data in firm_data.get("artifacts", {}).items():
+            if isinstance(art_data, dict) and art_data.get("_deleted_at"):
+                continue
             artifact_ids[art_id] = (canonical, None)
             fn = art_data.get("file_name", "") if isinstance(art_data, dict) else ""
             if fn:
                 artifact_filenames[(canonical, None, fn)] = art_id
-                contents.append(fn)
+                if not is_firm_deleted:
+                    contents.append(fn)
 
         # Funds
         for fund_name, fund_data in firm_data.get("funds", {}).items():
-            contents.append(fund_name)
+            is_fund_deleted = bool(fund_data.get("_deleted_at"))
+            if not is_firm_deleted and not is_fund_deleted:
+                contents.append(fund_name)
             fund_file_contents = []
             for art_id, art_data in fund_data.get("artifacts", {}).items():
+                if isinstance(art_data, dict) and art_data.get("_deleted_at"):
+                    continue
                 artifact_ids[art_id] = (canonical, fund_name)
                 fn = art_data.get("file_name", "") if isinstance(art_data, dict) else ""
                 if fn:
                     artifact_filenames[(canonical, fund_name, fn)] = art_id
-                    fund_file_contents.append(fn)
-            fund_contents[(canonical, fund_name)] = fund_file_contents
+                    if not is_fund_deleted:
+                        fund_file_contents.append(fn)
+            if not is_fund_deleted:
+                fund_contents[(canonical, fund_name)] = fund_file_contents
             # Index fund identifiers for identifier-based matching
             fund_id = fund_data.get("identifier")
-            if fund_id:
+            if fund_id and not is_fund_deleted:
                 fund_identifiers[str(fund_id)] = (canonical, fund_name)
 
-        firm_folders[canonical] = contents
+        if not is_firm_deleted:
+            firm_folders[canonical] = contents
 
     return {
         "artifact_ids": artifact_ids,
@@ -3099,6 +3114,8 @@ def _scan_disk_state(output_dir: Path) -> dict:
         for subfolder in sorted(child.iterdir()):
             if not subfolder.is_dir() or subfolder.name.startswith("."):
                 continue
+            if subfolder.name in SKIP_SUBFOLDERS:
+                continue
             if subfolder.name.startswith(CONFLICT_IDENTIFIER_PREFIX):
                 continue
 
@@ -3112,6 +3129,9 @@ def _scan_disk_state(output_dir: Path) -> dict:
             }
 
             for f in sorted(subfolder.rglob("*")):
+                # Skip files inside SKIP_SUBFOLDERS (e.g. graph/) nested within fund folders
+                if any(part in SKIP_SUBFOLDERS for part in f.relative_to(subfolder).parts[:-1]):
+                    continue
                 if (
                     f.is_file()
                     and not f.name.startswith(".")
@@ -3490,7 +3510,9 @@ def sync_moved_artifacts(output_dir: Path = None) -> dict:
                         _registry_dirty = True
 
             if not matched_fund:
-                # Fallback: match by fund name (direct name or alias match)
+                # Fallback 1: match by fund name directly (takes priority over
+                # content matching to prevent a folder named "FUND_B" from being
+                # matched to registry "FUND_A" just because of shared artifacts)
                 for reg_fund_name, reg_fund_data in firm_entry.get("funds", {}).items():
                     if reg_fund_data.get("_deleted_at"):
                         continue
@@ -3505,7 +3527,7 @@ def sync_moved_artifacts(output_dir: Path = None) -> dict:
                         break
 
             if not matched_fund:
-                # Fallback: match by contents (artifact filenames on disk vs registry)
+                # Fallback 2: match by contents (artifact filenames on disk vs registry)
                 disk_fund_contents = set()
                 for art_id_inner, filename_inner in fund_disk["artifacts"].items():
                     disk_fund_contents.add(
@@ -3561,6 +3583,12 @@ def sync_moved_artifacts(output_dir: Path = None) -> dict:
                         matched_canonical,
                         matched_fund,
                     )
+                    _registry_dirty = True
+                elif not identifier and fund_entry_ref.get("identifier"):
+                    # Identifier removed from folder name — clear from registry
+                    old_identifier = fund_entry_ref["identifier"]
+                    registry_index["fund_identifiers"].pop(str(old_identifier), None)
+                    fund_entry_ref["identifier"] = None
                     _registry_dirty = True
 
             seen_funds[(matched_canonical, matched_fund)] = True
@@ -4230,6 +4258,8 @@ SYSTEM_FILES = {
     FIRM_MAPPINGS_FILE,
     CLASSIFICATION_REPORT_FILE,
 }
+
+SKIP_SUBFOLDERS = {"json", "graph", "meetings", "researches"}
 
 
 def add_email_override(email_address: str, firm_name: str, output_dir: Path = None):

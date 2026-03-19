@@ -6,6 +6,8 @@ containing monthly net performance updates that haven't been processed yet,
 and runs load.py's process_single_pdf on them.
 """
 
+import json
+import shutil
 from pathlib import Path
 from fofproject.classify import (
     load_firm_mappings,
@@ -14,7 +16,9 @@ from fofproject.classify import (
     _parse_folder_identifier,
     CONFLICT_IDENTIFIER_PREFIX,
 )
-from fofproject.load import process_single_pdf
+from fofproject.load import process_single_pdf, init_funds
+from fofproject.fund import load_benchmarks
+import fofproject.fund as fund_module
 
 
 def _find_unprocessed_performance_artifacts(mappings: dict, output_dir: Path) -> list:
@@ -46,9 +50,7 @@ def _find_unprocessed_performance_artifacts(mappings: dict, output_dir: Path) ->
                     continue
                 # Build file path: output_dir / firm_folder / filename
                 # The firm folder on disk may use the canonical name directly
-                file_path = _resolve_artifact_path(
-                    output_dir, firm_name, None, file_name, art_id
-                )
+                file_path = _resolve_artifact_path(output_dir, firm_name, None, art_id)
                 if file_path and file_path.exists():
                     results.append(
                         {
@@ -70,7 +72,7 @@ def _find_unprocessed_performance_artifacts(mappings: dict, output_dir: Path) ->
                     if not file_name.lower().endswith(".pdf"):
                         continue
                     file_path = _resolve_artifact_path(
-                        output_dir, firm_name, fund_name, file_name, art_id
+                        output_dir, firm_name, fund_name, art_id
                     )
                     if file_path and file_path.exists():
                         results.append(
@@ -90,7 +92,6 @@ def _resolve_artifact_path(
     output_dir: Path,
     firm_name: str,
     fund_name: str | None,
-    file_name: str,
     artifact_id: str,
 ) -> Path | None:
     """Find the PDF file on disk by scanning firm/fund folders for a filename containing the artifact_id."""
@@ -129,6 +130,7 @@ def _resolve_artifact_path(
                 return f
 
     return None
+
 
 
 def _mark_artifact_processed(
@@ -235,6 +237,162 @@ def _try_promote_fund_identifier(
     return None, None
 
 
+def relocate_misplaced_artifacts(output_dir: Path = None) -> list:
+    """Find and move mislocated artifacts/JSON files to matching fund folders.
+
+    Walks the firm_fund_mappings registry to find artifacts whose identifier
+    does not match the fund folder hosting them. Then scans all fund folders
+    to find a folder whose identifier matches, and moves the file there.
+
+    Also scans JSON files in each fund's json/ subfolder — if a JSON filename
+    (which is the identifier) doesn't match the hosting fund folder's
+    identifier, it is moved to the correct fund folder's json/ subfolder.
+
+    A null identifier on either side does not constitute a match or mismatch.
+
+    Returns a list of dicts describing each relocation performed.
+    """
+    output_dir = output_dir or DEFAULT_OUTPUT_DIR
+    if not output_dir.exists():
+        return []
+
+    mappings = load_firm_mappings(output_dir)
+    canonical_names = mappings.get("canonical_names", {})
+
+    # Build a lookup: identifier -> (firm_name, fund_name, fund_folder_path)
+    # by scanning all fund folders on disk
+    identifier_to_fund_folder = {}
+    for firm_folder in sorted(output_dir.iterdir()):
+        if not firm_folder.is_dir() or firm_folder.name.startswith("."):
+            continue
+        for subfolder in sorted(firm_folder.iterdir()):
+            if not subfolder.is_dir() or subfolder.name.startswith("."):
+                continue
+            if subfolder.name.startswith(CONFLICT_IDENTIFIER_PREFIX):
+                continue
+            fund_name, folder_identifier = _parse_folder_identifier(subfolder.name)
+            if folder_identifier:
+                identifier_to_fund_folder[folder_identifier] = {
+                    "firm_folder": firm_folder,
+                    "fund_folder": subfolder,
+                    "fund_name": fund_name,
+                    "folder_identifier": folder_identifier,
+                }
+
+    relocated = []
+
+    # --- Pass 1: Registry-based artifact relocation ---
+    for firm_name, firm_data in canonical_names.items():
+        if firm_data.get("_deleted_at"):
+            continue
+        for fund_name, fund_data in firm_data.get("funds", {}).items():
+            if fund_data.get("_deleted_at"):
+                continue
+            fund_identifier = fund_data.get("identifier")
+            for art_id, art_info in list(fund_data.get("artifacts", {}).items()):
+                art_identifier = art_info.get("identifier")
+                if not art_identifier:
+                    continue
+                # Skip if artifact identifier matches the fund it's in
+                if art_identifier == fund_identifier:
+                    continue
+                # Find the target fund folder by artifact identifier
+                target = identifier_to_fund_folder.get(art_identifier)
+                if not target:
+                    continue
+
+                # Find the actual file on disk in the current location
+                source_path = _resolve_artifact_path(
+                    output_dir, firm_name, fund_name, art_id
+                )
+                if not source_path or not source_path.exists():
+                    continue
+
+                dest_path = target["fund_folder"] / source_path.name
+                if dest_path.exists():
+                    continue
+
+                shutil.move(str(source_path), str(dest_path))
+                relocated.append(
+                    {
+                        "type": "artifact",
+                        "artifact_id": art_id,
+                        "file_name": source_path.name,
+                        "from_fund": fund_name,
+                        "to_fund": target["fund_name"],
+                        "identifier": art_identifier,
+                        "source": str(source_path),
+                        "destination": str(dest_path),
+                    }
+                )
+                print(
+                    f"  Moved artifact '{source_path.name}' "
+                    f"from '{fund_name}' -> '{target['fund_name']}' "
+                    f"(identifier: {art_identifier})"
+                )
+
+    # --- Pass 2: JSON file relocation ---
+    for firm_folder in sorted(output_dir.iterdir()):
+        if not firm_folder.is_dir() or firm_folder.name.startswith("."):
+            continue
+        for subfolder in sorted(firm_folder.iterdir()):
+            if not subfolder.is_dir() or subfolder.name.startswith("."):
+                continue
+            if subfolder.name.startswith(CONFLICT_IDENTIFIER_PREFIX):
+                continue
+            _, folder_identifier = _parse_folder_identifier(subfolder.name)
+            json_dir = subfolder / "json"
+            if not json_dir.is_dir():
+                continue
+            for json_file in sorted(json_dir.iterdir()):
+                if not json_file.is_file() or json_file.suffix.lower() != ".json":
+                    continue
+                json_identifier = json_file.stem
+                if not json_identifier:
+                    continue
+                # Skip if it matches the current folder
+                if json_identifier == folder_identifier:
+                    continue
+                # Find a matching fund folder
+                target = identifier_to_fund_folder.get(json_identifier)
+                if not target:
+                    continue
+                # Don't move to the same folder
+                if target["fund_folder"] == subfolder:
+                    continue
+
+                dest_json_dir = target["fund_folder"] / "json"
+                dest_json_dir.mkdir(exist_ok=True)
+                dest_path = dest_json_dir / json_file.name
+                if dest_path.exists():
+                    continue
+
+                shutil.move(str(json_file), str(dest_path))
+                relocated.append(
+                    {
+                        "type": "json",
+                        "file_name": json_file.name,
+                        "from_folder": subfolder.name,
+                        "to_folder": target["fund_folder"].name,
+                        "identifier": json_identifier,
+                        "source": str(json_file),
+                        "destination": str(dest_path),
+                    }
+                )
+                print(
+                    f"  Moved JSON '{json_file.name}' "
+                    f"from '{subfolder.name}' -> '{target['fund_folder'].name}' "
+                    f"(identifier: {json_identifier})"
+                )
+
+    if relocated:
+        print(f"\nRelocated {len(relocated)} misplaced file(s).")
+    else:
+        print("No misplaced artifacts or JSON files found.")
+
+    return relocated
+
+
 def process_performance_updates(
     output_dir: Path = None,
     save: bool = True,
@@ -298,5 +456,106 @@ def process_performance_updates(
     return results
 
 
+def generate_fund_graphs(output_dir: Path = None, benchmark_fund=None, language="en"):
+    """Load JSON from each fund's json/ folder and export summary graphs.
+
+    For each fund subfolder, parses the folder identifier (e.g.
+    "FundName - ABC123" -> identifier "ABC123"), then loads only the
+    matching JSON file (json/ABC123.json). Creates a Fund object and
+    calls summary_of_a_fund(save=True, show=False), exporting all
+    graphs into a graph/ folder next to the json/ folder.
+
+    Args:
+        output_dir: Root output directory (same as classify.py).
+        benchmark_fund: Optional Fund used as benchmark for metrics.
+        language: Language for chart labels ("en" or "cn").
+
+    Returns:
+        List of dicts describing each fund processed.
+    """
+    output_dir = output_dir or DEFAULT_OUTPUT_DIR
+    if not output_dir.exists():
+        print("Output directory does not exist.")
+        return []
+
+    original_save_dir = fund_module.save_dir
+    results = []
+
+    for firm_folder in sorted(output_dir.iterdir()):
+        if not firm_folder.is_dir() or firm_folder.name.startswith("."):
+            continue
+
+        for subfolder in sorted(firm_folder.iterdir()):
+            if not subfolder.is_dir() or subfolder.name.startswith("."):
+                continue
+            if subfolder.name.startswith(CONFLICT_IDENTIFIER_PREFIX):
+                continue
+
+            _, identifier = _parse_folder_identifier(subfolder.name)
+            if not identifier:
+                continue
+
+            json_dir = subfolder / "json"
+            if not json_dir.is_dir():
+                continue
+
+            json_file = json_dir / f"{identifier}.json"
+            if not json_file.is_file():
+                continue
+
+            try:
+                with open(json_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception as e:
+                print(f"  Warning: could not load {json_file.name}: {e}")
+                continue
+
+            # Auto-wire benchmarks if no explicit benchmark_fund provided
+            bm_dict = None
+            if benchmark_fund is None:
+                try:
+                    bm_dict = load_benchmarks()
+                except Exception:
+                    pass  # BENCHMARK.csv not available, skip
+
+            funds = init_funds([data], benchmarks=bm_dict)
+            if not funds:
+                continue
+
+            # Create graph/ folder next to json/
+            graph_dir = subfolder / "graph"
+            graph_dir.mkdir(exist_ok=True)
+
+            # Temporarily redirect save_dir to the graph folder
+            fund_module.save_dir = graph_dir
+
+            for fund_name, fund in funds.items():
+                try:
+                    fund.summary_of_a_fund(
+                        benchmark_fund=benchmark_fund,
+                        language=language,
+                        save=True,
+                        show=False,
+                    )
+                    results.append(
+                        {
+                            "firm_folder": firm_folder.name,
+                            "fund_folder": subfolder.name,
+                            "fund_name": fund_name,
+                            "graph_dir": str(graph_dir),
+                        }
+                    )
+                    print(f"  Exported graphs for {fund_name} -> {graph_dir}")
+                except Exception as e:
+                    print(f"  ERROR generating graphs for {fund_name}: {e}")
+
+    # Restore original save_dir
+    fund_module.save_dir = original_save_dir
+
+    print(f"\nDone. Generated graphs for {len(results)} fund(s).")
+    return results
+
+
 if __name__ == "__main__":
     process_performance_updates()
+    generate_fund_graphs()

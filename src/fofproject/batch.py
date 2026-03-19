@@ -18,17 +18,49 @@ if not save_dir.exists():
     save_dir.mkdir(parents=True, exist_ok=True)
 
 fund_name_map = {
+    # Lead fund
     "LEAD": {"en": "Fund", "cn": "基金"},
+    # Underlying funds (RETURN DATA.csv)
     "RDGFF": {"en": "River Delta Global Frontier Fund", "cn": "RDGFF 基金"},
+    "NEW RDGFF": {"en": "River Delta Global Frontier Fund", "cn": "RDGFF 基金"},
+    "TAIREN": {"en": "Tairen Fund", "cn": "Tairen 基金"},
+    "HAO": {"en": "Hao Fund", "cn": "Hao 基金"},
+    "HAO MIX": {"en": "Hao Fund", "cn": "Hao 基金"},
+    "LEXINGTON": {"en": "Lexington Fund", "cn": "Lexington 基金"},
+    "LIM": {"en": "LIM Fund", "cn": "LIM 基金"},
+    "FOREST": {"en": "Forest Fund", "cn": "水木清风 基金"},
+    "WT CHINA": {"en": "WT China Fund", "cn": "WT 中国基金"},
+    "E20": {"en": "E20 Fund", "cn": "E20 基金"},
+    "3W GLOBAL": {"en": "3W Global Fund", "cn": "3W 全球基金"},
+    "3W CHINA": {"en": "3W China Fund", "cn": "3W 中国基金"},
+    "3W HEALTHCARE": {"en": "3W Healthcare Fund", "cn": "3W 医疗基金"},
+    "TIMEFOLIO": {"en": "Timefolio Fund", "cn": "Timefolio 基金"},
+    "MONOLITH": {"en": "Monolith Fund", "cn": "Monolith 基金"},
+    "PERSEVERANCE": {"en": "Perseverance Fund", "cn": "高毅基金"},
+    "NEO IVY": {"en": "Neo Ivy Fund", "cn": "Neo Ivy 基金"},
+    "JH BIOTECH": {"en": "JH Biotech Fund", "cn": "Janus Henderson 基金"},
+    # Benchmarks (BENCHMARK.csv)
     "MSCI CHINA": {"en": "MSCI China Index", "cn": "MSCI 中国指数"},
     "MSCI WORLD": {"en": "MSCI World Index", "cn": "MSCI 世界指数"},
+    "MSCI EM": {"en": "MSCI Emerging Markets Index", "cn": "MSCI 新兴市场指数"},
     "S&P 500": {"en": "S&P 500 Index", "cn": "标普500指数"},
     "TOPIX": {"en": "TOPIX Index", "cn": "東証株価指数"},
     "WITH WORLD": {
         "en": "With Intelligence Hedge Fund Index",
         "cn": "With Intelligence 对冲基金指数",
-        # add more mappings here...
     },
+    "SOX": {"en": "PHLX Semiconductor Index", "cn": "费城半导体指数"},
+    "KOSPI": {"en": "KOSPI Index", "cn": "韩国综合股价指数"},
+    "TAIEX": {"en": "TAIEX Index", "cn": "台湾加权指数"},
+    "RUSSELL 2000": {"en": "Russell 2000 Index", "cn": "罗素2000指数"},
+    "STOXX 600": {"en": "STOXX Europe 600 Index", "cn": "欧洲STOXX 600指数"},
+    "STOXX 50": {"en": "EURO STOXX 50 Index", "cn": "欧洲STOXX 50指数"},
+    "FTSE UK": {"en": "FTSE UK Index", "cn": "富时英国指数"},
+    "US HEALTHCARE": {"en": "US Healthcare Index", "cn": "美国医疗保健指数"},
+    "HK HEALTHCARE": {"en": "HK Healthcare Index", "cn": "恆生医疗保健指数"},
+    "US FINANCIAL": {"en": "US Financial Index", "cn": "美国金融指数"},
+    "US ENERGY": {"en": "US Energy Index", "cn": "美国能源指数"},
+    "COMMODITY": {"en": "Commodity Index", "cn": "大宗商品指数"},
 }
 
 STYLE_DICT = {
@@ -245,12 +277,15 @@ STYLE_DICT = {
 }
 
 
-def _add_value_boxes(fig, xs, ys, *, indices, color, fmt, boxcfg):
+def _add_value_boxes(fig, xs, ys, *, indices, color, fmt, boxcfg, fund_name=None):
     for i in indices:
+        label = f"{ys[i]:{fmt}}"
+        if fund_name:
+            label = f"{fund_name}  {label}"
         fig.add_annotation(
             x=xs[i],
             y=ys[i],
-            text=f"{ys[i]:{fmt}}",
+            text=label,
             showarrow=False,
             bgcolor=hex_to_rgba(color, 0.15),  # transparent fill based on trace color
             bordercolor=color,
@@ -277,6 +312,8 @@ def plot_cumulative_returns(
     custom_ticks=False,
     save=False,
     toggle=False,
+    highlight_extremes=False,  # False to disable, or int N to show top N funds + indices
+    strict_period=False,
 ):
     global_ymin, global_ymax = (0, 0) if custom_ticks else ("", "")
 
@@ -287,19 +324,43 @@ def plot_cumulative_returns(
     start_month = dt.datetime.strptime(start_month, "%Y-%m") if start_month else None
     end_month = dt.datetime.strptime(end_month, "%Y-%m") if end_month else None
 
-    # Collect all months across funds
-    start_months = [f.monthly_returns[0]["month"] for f in funds.values()]
-    end_months = [f.monthly_returns[-1]["month"] for f in funds.values()]
+    if strict_period:
+        # Lock the reporting period and exclude funds that don't fully cover it
+        if not start_month or not end_month:
+            raise ValueError("strict_period requires both start_month and end_month")
+        excluded = []
+        filtered_funds = {}
+        for name, f in funds.items():
+            f_start = f.monthly_returns[0]["month"]
+            f_end = f.monthly_returns[-1]["month"]
+            if f_start <= start_month and f_end >= end_month:
+                filtered_funds[name] = f
+            else:
+                excluded.append(name)
+        if excluded:
+            print(
+                f"strict_period: excluded {excluded} (insufficient data for {start_month:%Y-%m} to {end_month:%Y-%m})"
+            )
+        if not filtered_funds:
+            raise ValueError(
+                f"No funds cover the full period {start_month:%Y-%m} to {end_month:%Y-%m}"
+            )
+        funds = filtered_funds
+    else:
+        # Collect all months across funds
+        start_months = [f.monthly_returns[0]["month"] for f in funds.values()]
+        end_months = [f.monthly_returns[-1]["month"] for f in funds.values()]
 
-    # Update start_month and end_month if the current months are not valid
-    if not (
-        start_month
-        and start_month > max(start_months)
-        and start_month < min(end_months)
-    ):
-        start_month = max(start_months)
-    if not (end_month and max(start_months) < end_month < min(end_months)):
-        end_month = min(end_months)
+        # Update start_month and end_month if the current months are not valid
+        if not (
+            start_month
+            and start_month > max(start_months)
+            and start_month < min(end_months)
+        ):
+            start_month = max(start_months)
+        if not (end_month and max(start_months) < end_month < min(end_months)):
+            end_month = min(end_months)
+
     # Assert start month is before end month
     if start_month > end_month:
         raise ValueError("start_month must be <= end_month")
@@ -327,6 +388,7 @@ def plot_cumulative_returns(
     value_box_tiers = defaultdict(int)  # index -> next tier number (0,1,2,...)
     STACK_STEP_PX = 16
     color_map: Dict[str, str] = {}
+    pending_value_boxes = []  # deferred boxes for highlight_extremes mode
     for index, fund in enumerate(funds.values()):
         # Compute cumulative returns for each month
         months = [
@@ -503,28 +565,79 @@ def plot_cumulative_returns(
                 if last not in idxs:
                     idxs.append(last)
             if idxs:
-                for ix in sorted(set(idxs)):
-                    tier = value_box_tiers[ix]
-                    # build a per-index boxcfg that inherits the style, but adds a vertical offset
-                    per_index_boxcfg = dict(value_box_cfg.get("box", {}))
-                    # Prefer yshift (pixel space). You can also add small xshift if labels are wide.
-                    if toggle:
-                        per_index_boxcfg.setdefault("yshift", 0)
-                        per_index_boxcfg["yshift"] += tier * STACK_STEP_PX
-
-                    _add_value_boxes(
-                        fig,
-                        months,
-                        cumulative_returns,
-                        indices=[
-                            ix
-                        ],  # draw this index only so we can control offsets per index
-                        color=color_map[fund.name],
-                        fmt=value_box_cfg.get("format", "+.2%"),
-                        boxcfg=per_index_boxcfg,
+                if highlight_extremes:
+                    # Defer box creation until we know top/bottom performers
+                    pending_value_boxes.append(
+                        {
+                            "fund_name": fund.name,
+                            "months": list(months),
+                            "cumulative_returns": list(cumulative_returns),
+                            "idxs": sorted(set(idxs)),
+                            "is_index": fund.performance_fee == 0
+                            and fund.management_fee == 0,
+                        }
                     )
+                else:
+                    for ix in sorted(set(idxs)):
+                        tier = value_box_tiers[ix]
+                        # build a per-index boxcfg that inherits the style, but adds a vertical offset
+                        per_index_boxcfg = dict(value_box_cfg.get("box", {}))
+                        # Prefer yshift (pixel space). You can also add small xshift if labels are wide.
+                        if toggle:
+                            per_index_boxcfg.setdefault("yshift", 0)
+                            per_index_boxcfg["yshift"] += tier * STACK_STEP_PX
 
-                    value_box_tiers[ix] += 1
+                        _add_value_boxes(
+                            fig,
+                            months,
+                            cumulative_returns,
+                            indices=[
+                                ix
+                            ],  # draw this index only so we can control offsets per index
+                            color=color_map[fund.name],
+                            fmt=value_box_cfg.get("format", "+.2%"),
+                            boxcfg=per_index_boxcfg,
+                        )
+
+                        value_box_tiers[ix] += 1
+
+    # --- Deferred value boxes for highlight_extremes mode ---
+    if highlight_extremes and pending_value_boxes:
+        # Determine top N performers by final cumulative return
+        n_top = int(highlight_extremes)
+        non_index = {
+            k: v
+            for k, v in final_cumulative_returns.items()
+            if not any(
+                p["fund_name"] == k and p["is_index"] for p in pending_value_boxes
+            )
+        }
+        top_funds = set(
+            sorted(non_index, key=non_index.get, reverse=True)[:n_top]
+        )
+
+        for entry in pending_value_boxes:
+            fname = entry["fund_name"]
+            # Only show boxes for top N performers and index funds
+            if fname not in top_funds and not entry["is_index"]:
+                continue
+            for ix in entry["idxs"]:
+                tier = value_box_tiers[ix]
+                per_index_boxcfg = dict(value_box_cfg.get("box", {}))
+                if toggle:
+                    per_index_boxcfg.setdefault("yshift", 0)
+                    per_index_boxcfg["yshift"] += tier * STACK_STEP_PX
+                _add_value_boxes(
+                    fig,
+                    entry["months"],
+                    entry["cumulative_returns"],
+                    indices=[ix],
+                    color=color_map[fname],
+                    fmt=value_box_cfg.get("format", "+.2%"),
+                    boxcfg=per_index_boxcfg,
+                    fund_name=fname,
+                )
+                value_box_tiers[ix] += 1
 
     # --------------------------- Set Layout ---------------------------
 

@@ -60,25 +60,27 @@ CRITICAL RULES:
 Final output: three lists — (a) full table, (b) month headers, and (c) non-month headers. If you do not identify a monthly return performance table with timeseries data, then simply put the value as "[]". Do not treat the following as valid monthly performance tables: key metrics summary, annual return table that has no monthly timeseries performance.
 
 4) geo_focus
-Goal: Categorize the fund's geographical investment focus. Return exactly ONE value from this list: ["APAC","China","Developed Markets","Emerging Markets","Europe","Global","Japan","Korea","Latin America","Theme-Global","US"].
+Goal: Categorize the fund's geographical investment focus. Return exactly ONE value from this list: ["China","Developed Markets","Emerging Markets","Global","US"].
 Rules:
 a. Pick the single most representative region.
 b. If the fund invests across 3+ diverse regions, return "Global".
-c. If the fund is thematic but global in scope, return "Theme-Global".
+c. If the fund is focused on a single country/region not in the list (e.g. Japan, Korea, Europe, Latin America, APAC), map it to the closest match: single developed-market country → "Developed Markets", single emerging-market country → "Emerging Markets".
 d. If not found on the factsheet, return "".
 
 5) strategy
-Goal: Identify the fund's investment strategy type(s). Return a list with one or more values from: ["Activists","CTA","Credit LS","Distressed / Special Situation","Equity LS","Global Macro","Multi-Strategy","Niche Strategies","Relative Value","SMID Cap","Systematic","Themed"].
+Goal: Identify the fund's investment strategy type(s). Return a list with one or more values from: ["CTA","Credit LS","Equity LS","Multi-Strategy","Relative Value","SMID Cap","Systematic","Themed"].
 Rules:
 a. Select all strategies that clearly apply based on the factsheet.
 b. If not stated or unclear from the factsheet, return [].
+c. Map strategies not in the list to the closest match: activist → "Equity LS", distressed/special situation → "Credit LS", global macro → "Multi-Strategy", niche → "Themed".
 
 6) asset_class
-Goal: Identify the fund's asset class focus. Return a list with one or more values from: ["Commodities","Convertible","Credit","Currencies (FX)","Digital Assets","Equities","Insurance Linked","Structured Products","Volatility"].
+Goal: Identify the fund's asset class focus. Return a list with one or more values from: ["Commodities","Credit","Currencies (FX)","Digital Assets","Equities","Structured Products","Volatility"].
 Rules:
 a. Select all asset classes that clearly apply based on the factsheet.
 b. If the fund is a general equity long/short fund, return ["Equities"].
-c. If not stated or unclear from the factsheet, return [].
+c. Map asset classes not in the list to the closest match: convertible → "Credit", insurance linked → "Structured Products".
+d. If not stated or unclear from the factsheet, return [].
 
 7) ir_name
 Goal: Extract the name of the primary investor relations contact or main representative mentioned on the factsheet. Return a full name as a string. If not found on the factsheet, return "".
@@ -121,6 +123,20 @@ Goal: Extract as a single decimal. Example: "1%" → 0.01. Rule: Use the fee mat
 
 19) performance_fee
 Goal: Extract as a single decimal. Example: "20%" → 0.20. Rule: Use the fee matching the share class of the performance series (or the most common class if unclear).
+
+20) suggested_benchmark
+Goal: Based on the fund's geo_focus, strategy and asset_class, suggest the single most appropriate benchmark index from this list: {benchmark_list}.
+Rules:
+a. China-focused equity → "MSCI CHINA"
+b. Japan-focused → "TOPIX"
+c. US equity → "S&P 500"
+d. Global equity → "MSCI WORLD"
+e. Korea → "KOSPI"
+f. Emerging markets → "MSCI EM"
+g. Europe → "STOXX 600"
+h. Semiconductor/tech themed → "SOX"
+i. Healthcare themed → "US HEALTHCARE"
+j. If unclear, default to "MSCI WORLD"
 """
 
 RESPONSE_SCHEMA = """
@@ -162,20 +178,20 @@ RESPONSE_SCHEMA = """
     },
     "geo_focus": {
       "type": "string",
-      "enum": ["APAC","China","Developed Markets","Emerging Markets","Europe","Global","Japan","Korea","Latin America","Theme-Global","US",""]
+      "enum": ["China","Developed Markets","Emerging Markets","Global","US",""]
     },
     "strategy": {
       "type": "array",
       "items": {
         "type": "string",
-        "enum": ["Activists","CTA","Credit LS","Distressed / Special Situation","Equity LS","Global Macro","Multi-Strategy","Niche Strategies","Relative Value","SMID Cap","Systematic","Themed"]
+        "enum": ["CTA","Credit LS","Equity LS","Multi-Strategy","Relative Value","SMID Cap","Systematic","Themed"]
       }
     },
     "asset_class": {
       "type": "array",
       "items": {
         "type": "string",
-        "enum": ["Commodities","Convertible","Credit","Currencies (FX)","Digital Assets","Equities","Insurance Linked","Structured Products","Volatility"]
+        "enum": ["Commodities","Credit","Currencies (FX)","Digital Assets","Equities","Structured Products","Volatility"]
       }
     },
     "ir_name": {
@@ -218,6 +234,9 @@ RESPONSE_SCHEMA = """
     },
     "performance_fee": {
       "type": "number"
+    },
+    "suggested_benchmark": {
+      "type": "string"
     }
   },
   "required": [
@@ -239,12 +258,14 @@ RESPONSE_SCHEMA = """
     "net_exposure",
     "net_return",
     "management_fee",
-    "performance_fee"
+    "performance_fee",
+    "suggested_benchmark"
   ]
 }
 """
 
 ignored_funds = []
+
 
 def _find_ytd_index(header_row, non_month_header):
     """Find the index of the YTD column in the original header row."""
@@ -253,7 +274,10 @@ def _find_ytd_index(header_row, non_month_header):
             return i
     return None
 
-def _ytd_cross_validate_rows(cleaned_rows, year_rows, ytd_col_idx, fund_name, auto_scaled=False):
+
+def _ytd_cross_validate_rows(
+    cleaned_rows, year_rows, ytd_col_idx, fund_name, auto_scaled=False
+):
     """Cross-validate monthly values against YTD using compounding.
 
     For each complete year (12 months):
@@ -307,7 +331,9 @@ def _ytd_cross_validate_rows(cleaned_rows, year_rows, ytd_col_idx, fund_name, au
                 for e in entries:
                     e["value"] = round(e["value"] / 100, 4)
                 monthly_vals = [e["value"] for e in entries]
-                print(f"YTD cross-validation ({fund_name}, {year}): applied /100 scale correction")
+                print(
+                    f"YTD cross-validation ({fund_name}, {year}): applied /100 scale correction"
+                )
 
         # Scale YTD: use the once-for-all ytd_is_pct decision, or auto_scaled flag
         if auto_scaled or ytd_is_pct:
@@ -323,28 +349,30 @@ def _ytd_cross_validate_rows(cleaned_rows, year_rows, ytd_col_idx, fund_name, au
                 f"(error={error:.6f}, likely minor OCR discrepancy)"
             )
 
+
 def process_performance(data):
-    
     # GPT's own screening
-    if data['fund_name'] == "ERROR":
-        print(f"No performance table found by GPT in {data["fund_name"]}")
+    if data["fund_name"] == "ERROR":
+        print(f"No performance table found by GPT in {data['fund_name']}")
         return []
 
     table = data["performance"]["table"]
     month_header = data["performance"]["month_header"]
     non_month_header = set(data["performance"]["non_month_header"])
-    
+
     if len(month_header) != 12:
-        print(f"Wrongly assigned a month header of {len(month_header)} from {data["fund_name"]}, would result in extra values in earliest and latest months")
+        print(
+            f"Wrongly assigned a month header of {len(month_header)} from {data['fund_name']}, would result in extra values in earliest and latest months"
+        )
 
     if not table:
-        print(f"Empty values in performance table of {data["fund_name"]}")
+        print(f"Empty values in performance table of {data['fund_name']}")
         return []
 
     # Extract header
     header = table[0]
     rows = table[1:]
-    
+
     # Step 1: Remove non_month_header on the left
     for entry in header:
         if entry in non_month_header:
@@ -355,8 +383,9 @@ def process_performance(data):
             break
     years = []
     raw_row_lengths = {}  # year -> original row length (before stripping empties)
+
     # Identify year column position
-    def parse_yearly_performance(data_lists, year_counter = 2025):
+    def parse_yearly_performance(data_lists, year_counter=2025):
         """
         Takes the raw list of lists collected from GPT (idealy one list per year), where each sub-list starts with a year followed by performance values.
         Returns a list of dicts mapping {year: [values]}.
@@ -384,7 +413,7 @@ def process_performance(data):
                     continue
                 # find the year and add it as key later
                 # Strip common suffixes like * or # from year labels (e.g. "2021*")
-                cleaned = value.rstrip('*#†‡ ')
+                cleaned = value.rstrip("*#†‡ ")
                 if cleaned.isdigit() and 1900 <= int(cleaned) <= 2100:
                     year = int(cleaned)
                     years.append(year)
@@ -393,19 +422,22 @@ def process_performance(data):
                     values.append(value)
 
             if year is None:
-              year = year_counter
-              years.append(year)
-              year_counter -= 1
-              print(f"No valid year found in {data}, appending {year}")
+                year = year_counter
+                years.append(year)
+                year_counter -= 1
+                print(f"No valid year found in {data}, appending {year}")
             raw_row_lengths[year] = len(data)
             results.append({year: values})
-        
+
         return results
+
     rows = parse_yearly_performance(rows)
     earliest_year = min(years)
     latest_year = max(years)
     if earliest_year == latest_year:
-        print(f"Only one year {earliest_year} found in table of {data['fund_name']}, returned empty list")
+        print(
+            f"Only one year {earliest_year} found in table of {data['fund_name']}, returned empty list"
+        )
         return []
 
     # Clean non_month_header
@@ -431,9 +463,13 @@ def process_performance(data):
         # Ensure middle years always have 12
         if year not in (earliest_year, latest_year):
             if len(values) > 12:
-                values = values[:12] # drop last elements till 12, assume there are no values appended in the front
+                values = values[
+                    :12
+                ]  # drop last elements till 12, assume there are no values appended in the front
             elif len(values) < 12:
-                print(f"Less than 12 months found in table of {data['fund_name']}, returned empty list")
+                print(
+                    f"Less than 12 months found in table of {data['fund_name']}, returned empty list"
+                )
                 return []
         if year == earliest_year:
             # Assign backward from December
@@ -445,7 +481,9 @@ def process_performance(data):
                 try:
                     num = float(val.strip("%")) / 100 if "%" in val else float(val)
                 except Exception:
-                    print(f"Non-number found in {data['fund_name']}'s latest month, returned empty list")
+                    print(
+                        f"Non-number found in {data['fund_name']}'s latest month, returned empty list"
+                    )
                     return []
                 cleaned_rows.append({"date": date_str, "value": num})
                 month -= 1
@@ -457,11 +495,15 @@ def process_performance(data):
                 try:
                     num = float(val.strip("%")) / 100 if "%" in val else float(val)
                 except Exception:
-                    print(f"Non-number found in {data['fund_name']}'s earliest month, returned empty list")
+                    print(
+                        f"Non-number found in {data['fund_name']}'s earliest month, returned empty list"
+                    )
                     return []
                 cleaned_rows.append({"date": date_str, "value": num})
                 if year != latest_year and len(values) != 12:
-                    print(f"Parsing error: Year {year} has {len(values)} values (expected 12).")
+                    print(
+                        f"Parsing error: Year {year} has {len(values)} values (expected 12)."
+                    )
                     return []
 
     # Auto-detect percentage-scale values: if median |value| > 0.5, values are
@@ -480,13 +522,16 @@ def process_performance(data):
     # Identify YTD column from the non-month headers in the original header row.
     ytd_idx = _find_ytd_index(data["performance"]["table"][0], non_month_header)
     if ytd_idx is not None:
-        _ytd_cross_validate_rows(cleaned_rows, rows, ytd_idx, data["fund_name"], auto_scaled)
+        _ytd_cross_validate_rows(
+            cleaned_rows, rows, ytd_idx, data["fund_name"], auto_scaled
+        )
 
     # Ensure all values are recorded to exactly 4 decimal places
     for r in cleaned_rows:
         r["value"] = round(r["value"], 4)
 
     return cleaned_rows
+
 
 def compute_identifier(performance_data):
     """Compute a fund identifier from the first 5 months of performance data.
@@ -504,8 +549,7 @@ def compute_identifier(performance_data):
 
     # Sort by date ascending and take first 5
     sorted_perf = sorted(
-        performance_data,
-        key=lambda x: datetime.strptime(x["date"], "%d/%m/%Y")
+        performance_data, key=lambda x: datetime.strptime(x["date"], "%d/%m/%Y")
     )
     first_five = sorted_perf[:5]
 
@@ -523,11 +567,58 @@ def compute_identifier(performance_data):
     # Ensure identifier is always exactly 10 digits
     return identifier[:10].ljust(10, "0")
 
+
+def _try_merge_performance(a, b, tolerance=1e-6):
+    """Try to merge two result dicts whose performance overlaps numerically.
+
+    Returns a merged result dict if the overlapping months match within
+    *tolerance*, or ``None`` if they don't overlap or disagree.  The merged
+    result keeps the identity (fund_name, etc.) of whichever result starts
+    earlier, combines all performance months, and recomputes the identifier.
+    """
+    perf_a = a.get("performance", [])
+    perf_b = b.get("performance", [])
+    if not perf_a or not perf_b:
+        return None
+
+    map_a = {e["date"]: e["value"] for e in perf_a}
+    map_b = {e["date"]: e["value"] for e in perf_b}
+
+    overlap = set(map_a) & set(map_b)
+    if not overlap:
+        return None
+
+    # Verify overlapping months match
+    if not all(abs(map_a[d] - map_b[d]) <= tolerance for d in overlap):
+        return None
+
+    # Determine which starts earlier
+    start_a = min(datetime.strptime(d, "%d/%m/%Y") for d in map_a)
+    start_b = min(datetime.strptime(d, "%d/%m/%Y") for d in map_b)
+    earlier, later_map = (a, map_b) if start_a <= start_b else (b, map_a)
+
+    # Merge: start from earlier's data, add non-overlapping months from later
+    merged_map = {e["date"]: e["value"] for e in earlier["performance"]}
+    for d, v in later_map.items():
+        if d not in merged_map:
+            merged_map[d] = v
+
+    merged_perf = [{"date": d, "value": v} for d, v in merged_map.items()]
+    merged_perf.sort(key=lambda x: datetime.strptime(x["date"], "%d/%m/%Y"))
+
+    merged = dict(earlier)
+    merged["performance"] = merged_perf
+    merged["identifier"] = compute_identifier(merged_perf)
+    return merged
+
+
 def _save_json_result(result, json_folder):
     """Save a result dict to a JSON file named by identifier.
 
     If a file with the same identifier already exists, keep the one
-    with the longer performance track record.
+    with the longer performance track record.  If a file with a *different*
+    identifier exists but overlapping performance matches, merge them.
+
     Skips saving if identifier/fund_name is missing or performance is empty.
     """
     # Skip if no meaningful identifier or fund_name
@@ -548,13 +639,58 @@ def _save_json_result(result, json_folder):
     if os.path.exists(output_path):
         with open(output_path, "r", encoding="utf-8") as f:
             existing = json.load(f)
-        existing_len = len(existing.get('performance', []))
-        new_len = len(result.get('performance', []))
-        if new_len <= existing_len:
-            return  # existing has equal or longer track record, skip
+        # Try merging with the same-identifier file
+        merged = _try_merge_performance(existing, result)
+        if merged:
+            result = merged
+            identifier = merged["identifier"]
+            # Identifier may have changed after merge; clean up old file if needed
+            new_output_path = os.path.join(json_folder, f"{identifier}.json")
+            if new_output_path != output_path:
+                os.remove(output_path)
+                output_path = new_output_path
+        else:
+            existing_len = len(existing.get("performance", []))
+            new_len = len(result.get("performance", []))
+            if new_len <= existing_len:
+                return  # existing has equal or longer track record, skip
+    else:
+        # Check all existing JSONs for a mergeable match
+        for file_name in os.listdir(json_folder):
+            if not file_name.lower().endswith(".json"):
+                continue
+            existing_path = os.path.join(json_folder, file_name)
+            with open(existing_path, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+            merged = _try_merge_performance(existing, result)
+            if merged:
+                result = merged
+                identifier = merged["identifier"]
+                # Remove the old file, will save under new identifier
+                os.remove(existing_path)
+                output_path = os.path.join(json_folder, f"{identifier}.json")
+                break
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
+
+
+def _has_valid_performance(result):
+    """Return True if result contains a non-empty list of performance dicts."""
+    val = result.get("performance")
+    return isinstance(val, list) and len(val) > 0 and all(isinstance(item, dict) for item in val)
+
+
+def _collect_result(result, fund_name, results, no_perf_list, folder_path, save):
+    """Append result to results and save JSON if performance is valid, otherwise record in no_perf_list."""
+    if _has_valid_performance(result):
+        results.append(result)
+    else:
+        no_perf_list.append(fund_name)
+    if save:
+        json_folder = os.path.join(folder_path, "json")
+        _save_json_result(result, json_folder)
+
 
 def extract_text_from_pdf(file_path):
     doc = fitz.open(file_path)
@@ -564,122 +700,143 @@ def extract_text_from_pdf(file_path):
     doc.close()
     return text
 
+
+def _build_system_prompt():
+    """Build the GPT system prompt with benchmark list injected dynamically from BENCHMARK.csv."""
+    from fofproject.fund import get_available_benchmarks
+
+    try:
+        benchmark_list = get_available_benchmarks()
+    except Exception:
+        benchmark_list = []
+    prompt = SYSTEM_PROMPT.replace("{benchmark_list}", str(benchmark_list))
+    return prompt + "\n\nJSON Schema:\n" + RESPONSE_SCHEMA
+
+
 def _gpt_extract_from_file(client, file_path: str):
     """Upload a PDF and run GPT extraction via file upload (for image-based tables)."""
+    system_prompt = _build_system_prompt()
     with open(file_path, "rb") as f:
-        uploaded_file = client.files.create(
-            file=f,
-            purpose="assistants"
-        )
+        uploaded_file = client.files.create(file=f, purpose="assistants")
 
     response = client.responses.create(
-      model="gpt-5.2",
-      temperature=0,
-      input=[
-          {
-              "role": "system",
-              "content": [
-                  {"type": "input_text", "text": SYSTEM_PROMPT + "\n\nJSON Schema:\n" + RESPONSE_SCHEMA}
-              ]
-          },
-          {
-              "role": "user",
-              "content": [
-                  {"type": "input_text", "text": "Extract the required data from this PDF file:"},
-                  {"type": "input_file", "file_id": uploaded_file.id}
-              ]
-          }
-      ]
+        model="gpt-5.2",
+        temperature=0,
+        input=[
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": system_prompt,
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Extract the required data from this PDF file:",
+                    },
+                    {"type": "input_file", "file_id": uploaded_file.id},
+                ],
+            },
+        ],
     )
     output_text = response.output_text.strip()
     data = json.loads(output_text)
     data["performance"] = process_performance(data)
     return data
 
+
 def _gpt_extract_from_text(client, text: str):
     """Run GPT extraction on pre-extracted text."""
+    system_prompt = _build_system_prompt()
     response = client.responses.create(
         model="gpt-4.1",
         temperature=0,
         input=[
             {
                 "role": "system",
-                "content": SYSTEM_PROMPT + "\n\nJSON Schema:\n" + RESPONSE_SCHEMA
+                "content": system_prompt,
             },
             {
                 "role": "user",
-                "content": f"Extract the required data from this file:\n{text}"
-            }
-        ]
+                "content": f"Extract the required data from this file:\n{text}",
+            },
+        ],
     )
     output_text = response.output_text.strip()
     data = json.loads(output_text)
     data["performance"] = process_performance(data)
     return data
+
 
 def gpt_process_pdf(file_path: str):
     """
     Upload a PDF and run GPT extraction according to the schema.
     Returns the parsed JSON or raw text if parsing fails.
     """
-    client = OpenAI(
-      api_key=os.getenv("OPENAI_API_KEY")
-    )
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     text = extract_text_from_pdf(file_path)
     # Cannot parse pdf into text, try uploading pdf directly
     if not text:
         data = _gpt_extract_from_file(client, file_path)
         print(f"{data['fund_name']} uses pdf screening. Values can be unstable...")
-        data['fund_name'] = f"{data['fund_name']} from_pdf"
+        data["fund_name"] = f"{data['fund_name']} from_pdf"
     else:
         data = _gpt_extract_from_text(client, text)
         # Fallback: if text extraction yielded no performance, retry with PDF upload
         # (handles cases where performance table is embedded as an image)
         if not data.get("performance"):
-            print(f"{data['fund_name']} text extraction found no performance, retrying with PDF upload...")
+            print(
+                f"{data['fund_name']} text extraction found no performance, retrying with PDF upload..."
+            )
             pdf_data = _gpt_extract_from_file(client, file_path)
             if pdf_data.get("performance"):
                 # Keep non-performance fields from text extraction (usually more reliable)
                 # but use performance from PDF upload
                 data["performance"] = pdf_data["performance"]
-    if isinstance(data.get('performance'), list) and data['performance']:
-    # Check if performance is a non-empty list and sort it
-      data['performance'].sort(key=lambda x:datetime.strptime(x["date"], "%d/%m/%Y"))
-    data['identifier'] = compute_identifier(data.get('performance', []))
+    if isinstance(data.get("performance"), list) and data["performance"]:
+        # Check if performance is a non-empty list and sort it
+        data["performance"].sort(key=lambda x: datetime.strptime(x["date"], "%d/%m/%Y"))
+    data["identifier"] = compute_identifier(data.get("performance", []))
     return data
+
 
 def gpt_process_text(text: str):
     """
     From text and run GPT extraction according to the schema.
     Returns the parsed JSON or raw text if parsing fails.
     """
-    client = OpenAI(
-      api_key=os.getenv("OPENAI_API_KEY")
-    )
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    system_prompt = _build_system_prompt()
     response = client.responses.create(
         model="gpt-4.1",
         temperature=0,
         input=[
             {
                 "role": "system",
-                "content": SYSTEM_PROMPT + "\n\nJSON Schema:\n" + RESPONSE_SCHEMA
+                "content": system_prompt,
             },
             {
                 "role": "user",
-                "content": f"Extract the required data from this file:\n{text}"
-            }
-        ]
+                "content": f"Extract the required data from this file:\n{text}",
+            },
+        ],
     )
     output_text = response.output_text.strip()
     data = json.loads(output_text)
     data["performance"] = process_performance(data)
-    if isinstance(data.get('performance'), list) and data['performance']:
-    # Check if performance is a non-empty list and sort it
-      data['performance'].sort(key=lambda x:datetime.strptime(x["date"], "%d/%m/%Y"))
-    data['identifier'] = compute_identifier(data.get('performance', []))
+    if isinstance(data.get("performance"), list) and data["performance"]:
+        # Check if performance is a non-empty list and sort it
+        data["performance"].sort(key=lambda x: datetime.strptime(x["date"], "%d/%m/%Y"))
+    data["identifier"] = compute_identifier(data.get("performance", []))
     return data
 
-def process_single_pdf(file_path, save=True, identifier="_parsed from_"):
+
+def process_single_pdf(file_path, save=True, prefix_hint="_parsed from_"):
     """
     Process a single PDF by file path. Renames the file and optionally saves the result as JSON.
     Returns the parsed result dict.
@@ -695,10 +852,10 @@ def process_single_pdf(file_path, save=True, identifier="_parsed from_"):
 
     # Renaming of the pdf file
     base, ext = os.path.splitext(file_name)
-    if identifier in base:
-        prefix, base = base.split(identifier, 1)
-        result['fund_name'] = prefix
-    new_file_name = f"{result['fund_name']}{identifier}{base}{ext}"
+    if prefix_hint in base:
+        prefix, base = base.split(prefix_hint, 1)
+        result["fund_name"] = prefix
+    new_file_name = f"{result['fund_name']}{prefix_hint}{base}{ext}"
     new_path = os.path.join(folder_path, new_file_name)
     os.rename(file_path, new_path)
 
@@ -708,40 +865,35 @@ def process_single_pdf(file_path, save=True, identifier="_parsed from_"):
 
     return result
 
-def process_pdfs_in_folder(folder_path="input", save=False, identifier = "_parsed from_"):
+
+def process_pdfs_in_folder(folder_path="input", save=False, prefix_hint="_parsed from_"):
     """
     Iterates through all PDFs in the same folder as this script (relative path).
     Returns a list of JSON results.
     """
     results = []
-    no_perf_list =[]
+    no_perf_list = []
     for file_name in os.listdir(folder_path):
         if file_name.lower().endswith(".pdf"):
             file_path = os.path.join(folder_path, file_name)
             print(f"Processing: {file_path}")
             result = gpt_process_pdf(file_path)
-            # Checking if there's performance recorded
-            val = result['performance']
-            if not (isinstance(val, list) and all(isinstance(item, dict) for item in val)) or (isinstance(val, list) and not val)  :
-                no_perf_list = no_perf_list + [result['fund_name']]
+            _collect_result(result, result["fund_name"], results, no_perf_list, folder_path, save)
             # Renaming of the pdf. file
             base, ext = os.path.splitext(file_name)
-            if identifier in base:
-                # keep only the part after "identifier" to make sure the file name will not stack up & Re-run with the same fund_name stored
-                prefix, base = base.split(identifier, 1)
-                result['fund_name'] = prefix
-            new_file_name = f"{result['fund_name']}{identifier}{base}{ext}"
+            if prefix_hint in base:
+                # keep only the part after prefix_hint to make sure the file name will not stack up & Re-run with the same fund_name stored
+                prefix, base = base.split(prefix_hint, 1)
+                result["fund_name"] = prefix
+            new_file_name = f"{result['fund_name']}{prefix_hint}{base}{ext}"
             new_path = os.path.join(folder_path, new_file_name)
             os.rename(file_path, new_path)
-            results.append(result)
-            if save:
-              json_folder = os.path.join(folder_path, "json")
-              _save_json_result(result, json_folder)
     # Record the files without performance for future re-run
     no_perf_path = os.path.join(folder_path, "No Performance Found.txt")
     with open(no_perf_path, "w") as f:
-      f.write("\n".join(no_perf_list))
+        f.write("\n".join(no_perf_list))
     return results
+
 
 def rerun_no_perf_files(folder_path="input", save=False):
     """
@@ -779,9 +931,12 @@ def rerun_no_perf_files(folder_path="input", save=False):
                 result = gpt_process_pdf(file_path)
 
                 # Check performance again
-                val = result['performance']
-                if not (isinstance(val, list) and all(isinstance(item, dict) for item in val)) or (isinstance(val, list) and not val):
-                    still_no_perf.append(result['fund_name'])
+                val = result["performance"]
+                if not (
+                    isinstance(val, list)
+                    and all(isinstance(item, dict) for item in val)
+                ) or (isinstance(val, list) and not val):
+                    still_no_perf.append(result["fund_name"])
 
                 # Save JSON if required
                 if save:
@@ -797,9 +952,10 @@ def rerun_no_perf_files(folder_path="input", save=False):
 
     return results
 
-def continue_running(folder_path="input", save=False, identifier = "_parsed from_"):
+
+def continue_running(folder_path="input", save=False, prefix_hint="_parsed from_"):
     """
-    Processes only PDFs in the folder that do NOT already contain the identifier in their name.
+    Processes only PDFs in the folder that do NOT already contain the prefix_hint in their name.
     Returns a list of JSON results.
     """
     results = []
@@ -809,29 +965,20 @@ def continue_running(folder_path="input", save=False, identifier = "_parsed from
         if file_name.lower().endswith(".pdf"):
             base, ext = os.path.splitext(file_name)
 
-            # Skip files that already have the identifier in the name
-            if identifier in base:
+            # Skip files that already have the prefix_hint in the name
+            if prefix_hint in base:
                 continue
 
             file_path = os.path.join(folder_path, file_name)
             print(f"Processing: {file_path}")
             result = gpt_process_pdf(file_path)
 
-            # Checking if there's performance recorded
-            val = result['performance']
-            if not (isinstance(val, list) and all(isinstance(item, dict) for item in val)) or (isinstance(val, list) and not val):
-                no_perf_list.append(result['fund_name'])
+            _collect_result(result, result["fund_name"], results, no_perf_list, folder_path, save)
 
-            # Renaming the file with identifier
-            new_file_name = f"{result['fund_name']}{identifier}{base}{ext}"
+            # Renaming the file with prefix_hint
+            new_file_name = f"{result['fund_name']}{prefix_hint}{base}{ext}"
             new_path = os.path.join(folder_path, new_file_name)
             os.rename(file_path, new_path)
-
-            results.append(result)
-
-            if save:
-                json_folder = os.path.join(folder_path, "json")
-                _save_json_result(result, json_folder)
 
     # Record the files without performance for future re-run
     no_perf_path = os.path.join(folder_path, "No Performance Found.txt")
@@ -839,6 +986,7 @@ def continue_running(folder_path="input", save=False, identifier = "_parsed from
         f.write("\n".join(no_perf_list))
 
     return results
+
 
 def load_saved_json(folder_path="input"):
     """
@@ -866,17 +1014,18 @@ def load_saved_json(folder_path="input"):
                 print(f"⚠️ Error loading {file_name}: {e}")
     return results
 
+
 def results_to_csv(results, folder_path="input"):
     """
     Transforms a list of saved results into a CSV with:
     - First column: date (sorted ascending)
     - Following columns: each fund's performance values
-    
+
     Parameters:
         results (list[dict]): The list of results loaded from JSON.
         output_path (str): Path to save the CSV file.
     """
-    
+
     # Dictionary to collect data: {date: {fund_name: value}}
     data = {}
     output_path = os.path.join(folder_path, "returns.csv")
@@ -894,9 +1043,11 @@ def results_to_csv(results, folder_path="input"):
             try:
                 date = datetime.strptime(perf["date"], "%d/%m/%Y").date()
             except Exception as e:
-                print(f"⚠️ Skipping due to wrong date format '{perf.get('date')}' for {fund_name}: {e}")
+                print(
+                    f"⚠️ Skipping due to wrong date format '{perf.get('date')}' for {fund_name}: {e}"
+                )
                 continue
-            
+
             if date not in data:
                 data[date] = {}
             data[date][fund_name] = perf["value"]
@@ -904,7 +1055,9 @@ def results_to_csv(results, folder_path="input"):
     df_new = pd.DataFrame.from_dict(data, orient="index").sort_index()
     df_new.index.name = "date"
     df_new.reset_index(inplace=True)
-    df_new["date"] = pd.to_datetime(df_new["date"], dayfirst=True).dt.strftime("%d/%m/%Y")
+    df_new["date"] = pd.to_datetime(df_new["date"], dayfirst=True).dt.strftime(
+        "%d/%m/%Y"
+    )
 
     if os.path.exists(output_path):
         # Load the old CSV
@@ -913,30 +1066,39 @@ def results_to_csv(results, folder_path="input"):
         # Merge: keep latest values for overlapping dates
         df_combined = pd.concat([df_old, df_new], ignore_index=True)
         # Normalize old dates as well
-        df_old["date"] = pd.to_datetime(df_old["date"], dayfirst=True).dt.strftime("%d/%m/%Y")
+        df_old["date"] = pd.to_datetime(df_old["date"], dayfirst=True).dt.strftime(
+            "%d/%m/%Y"
+        )
         # Drop duplicates on 'date', keeping the last occurrence (from df_new)
         df_combined = df_combined.drop_duplicates(subset="date", keep="last")
 
         # Sort by date if needed
         df_combined = df_combined.sort_values(by="date")
 
-        print(f"🔄 Existing CSV found. Updated with new data and saved to {output_path}")
+        print(
+            f"🔄 Existing CSV found. Updated with new data and saved to {output_path}"
+        )
     else:
         # If no CSV exists, just use the new data
         df_combined = df_new
         print(f"✅ No existing CSV found. Created new CSV at {output_path}")
 
     # Save to CSV
-    df_combined["date"] = pd.to_datetime(df_combined["date"], dayfirst=True).dt.strftime("%d/%m/%Y")
+    df_combined["date"] = pd.to_datetime(
+        df_combined["date"], dayfirst=True
+    ).dt.strftime("%d/%m/%Y")
     df_combined.to_csv(output_path, index=False)
 
     return df_combined
 
-def init_funds(funds_data: List[Dict]) -> Dict[str, Fund]:
+
+def init_funds(funds_data: List[Dict], benchmarks: Dict[str, Fund] = None) -> Dict[str, Fund]:
     """Initialize Fund objects from a list of dicts.
 
     Args:
         funds_data (List[Dict]): List of fund-like dicts
+        benchmarks (Dict[str, Fund], optional): Dict of benchmark Fund objects.
+            If provided, auto-wires default_benchmark from suggested_benchmark_name.
 
     Returns:
         Dict{Fund_name: fund}: Successfully initialized Fund objects
@@ -965,12 +1127,19 @@ def init_funds(funds_data: List[Dict]) -> Dict[str, Fund]:
                 net_return=data.get("net_return"),
                 management_fee=data.get("management_fee"),
                 performance_fee=data.get("performance_fee"),
+                suggested_benchmark_name=data.get("suggested_benchmark"),
             )
-            initialized_funds[f'{fund.name}'] = fund
+            initialized_funds[f"{fund.name}"] = fund
         except ValueError as e:
             # Skip invalid funds and log the issue
             print(f"Skipping fund {data.get('fund_name', 'UNKNOWN')}: {e}")
+
+    if benchmarks:
+        from fofproject.fund import assign_benchmarks
+        assign_benchmarks(initialized_funds, benchmarks)
+
     return initialized_funds
+
 
 def offload_funds(funds: Dict[str, Fund]) -> List[Dict]:
     """Convert a dict of Fund objects back into a list of dicts.
@@ -991,41 +1160,57 @@ def offload_funds(funds: Dict[str, Fund]) -> List[Dict]:
                     "value": entry["value"],
                 }
             )
-        results.append({
-            "fund_name": fund.name,
-            "one_liner": getattr(fund, "one_liner", None),
-            "performance": string_returns,
-            "geo_focus": getattr(fund, "geo_focus", None),
-            "strategy": getattr(fund, "strategy", None),
-            "asset_class": getattr(fund, "asset_class", None),
-            "identifier": getattr(fund, "identifier", None),
-            "ir_name": getattr(fund, "ir_name", None),
-            "email": getattr(fund, "email", None),
-            "phone": getattr(fund, "phone", None),
-            "base": getattr(fund, "base", None),
-            "fund_inception": getattr(fund, "fund_inception", None),
-            "aum_size": getattr(fund, "aum_size", None),
-            "return_pa": getattr(fund, "return_pa", None),
-            "volatility_pa": getattr(fund, "volatility_pa", None),
-            "min_ticket": getattr(fund, "min_ticket", None),
-            "net_exposure": getattr(fund, "net_exposure", None),
-            "net_return": getattr(fund, "net_return", None),
-            "management_fee": getattr(fund, "management_fee", None),
-            "performance_fee": getattr(fund, "performance_fee", None),
-        })
+        results.append(
+            {
+                "fund_name": fund.name,
+                "one_liner": getattr(fund, "one_liner", None),
+                "performance": string_returns,
+                "geo_focus": getattr(fund, "geo_focus", None),
+                "strategy": getattr(fund, "strategy", None),
+                "asset_class": getattr(fund, "asset_class", None),
+                "identifier": getattr(fund, "identifier", None),
+                "ir_name": getattr(fund, "ir_name", None),
+                "email": getattr(fund, "email", None),
+                "phone": getattr(fund, "phone", None),
+                "base": getattr(fund, "base", None),
+                "fund_inception": getattr(fund, "fund_inception", None),
+                "aum_size": getattr(fund, "aum_size", None),
+                "return_pa": getattr(fund, "return_pa", None),
+                "volatility_pa": getattr(fund, "volatility_pa", None),
+                "min_ticket": getattr(fund, "min_ticket", None),
+                "net_exposure": getattr(fund, "net_exposure", None),
+                "net_return": getattr(fund, "net_return", None),
+                "management_fee": getattr(fund, "management_fee", None),
+                "performance_fee": getattr(fund, "performance_fee", None),
+                "suggested_benchmark": getattr(fund, "suggested_benchmark_name", None),
+            }
+        )
     return results
+
 
 def results_to_json(results, folder_path="input"):
     json_folder = os.path.join(folder_path, "json")
     for result in results:
-      _save_json_result(result, json_folder)
+        _save_json_result(result, json_folder)
 
-def save_changes_in_fund(funds: Dict[str, Fund], folder_path = "input"):
+
+def save_changes_in_fund(funds: Dict[str, Fund], folder_path="input"):
+    # Preserve benchmark assignments before round-tripping
+    benchmark_refs = {
+        name: fund.default_benchmark
+        for name, fund in funds.items()
+        if fund.default_benchmark is not None
+    }
     results = offload_funds(funds)
     results_to_csv(results=results, folder_path=folder_path)
     results_to_json(results=results, folder_path=folder_path)
     funds = init_funds(results)
+    # Restore benchmark assignments
+    for name, bm in benchmark_refs.items():
+        if name in funds:
+            funds[name].default_benchmark = bm
     return funds
+
 
 def merge_funds(dict1: dict, dict2: dict) -> dict:
     """
@@ -1034,7 +1219,7 @@ def merge_funds(dict1: dict, dict2: dict) -> dict:
     overwrite only the 'monthly_returns' attribute from dict1.
     """
     merged = dict2.copy()
-    
+
     for fund_name, fund_obj in dict1.items():
         if fund_name in merged:
             # Only update monthly_returns
@@ -1042,12 +1227,25 @@ def merge_funds(dict1: dict, dict2: dict) -> dict:
         else:
             # If fund not in dict2, add it fully
             merged[fund_name] = fund_obj
+    # Preserve benchmark assignments before round-tripping
+    benchmark_refs = {
+        name: fund.default_benchmark
+        for name, fund in merged.items()
+        if fund.default_benchmark is not None
+    }
     # Reload so there is no stale computation of key metrics
     results = offload_funds(merged)
     merged = init_funds(results)
+    # Restore benchmark assignments
+    for name, bm in benchmark_refs.items():
+        if name in merged:
+            merged[name].default_benchmark = bm
     return merged
 
-def parse_from_marquee(url: str, fund_name: str = "", manager_name:str = "", show=False):
+
+def parse_from_marquee(
+    url: str, fund_name: str = "", manager_name: str = "", show=False
+):
     """
     Access a webpage that loads content via JavaScript and extract the full HTML after rendering.
     """
@@ -1060,7 +1258,7 @@ def parse_from_marquee(url: str, fund_name: str = "", manager_name:str = "", sho
     from webdriver_manager.chrome import ChromeDriverManager
     from selenium.common.exceptions import TimeoutException
     import time
-    
+
     if not show:
         chrome_options = Options()
         chrome_options.add_argument("--headless=new")  # Run in headless mode
@@ -1070,8 +1268,8 @@ def parse_from_marquee(url: str, fund_name: str = "", manager_name:str = "", sho
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service)
     wait = WebDriverWait(driver, 20)
-    Mq_username=os.getenv("MQ_USERNAME")
-    Mq_password=os.getenv("MQ_PASSWORD")
+    Mq_username = os.getenv("MQ_USERNAME")
+    Mq_password = os.getenv("MQ_PASSWORD")
     requested_list = []
     try:
         driver.get(url)
@@ -1083,7 +1281,9 @@ def parse_from_marquee(url: str, fund_name: str = "", manager_name:str = "", sho
             # Fill username fields
             username_field = driver.find_element(By.NAME, "username")
             username_field.send_keys(Mq_username)
-            button = driver.find_element(By.CSS_SELECTOR, "button[data-cy='gs-uitk-button__button']")
+            button = driver.find_element(
+                By.CSS_SELECTOR, "button[data-cy='gs-uitk-button__button']"
+            )
             button.click()
             # Wait for password field to appear
             password_field = wait.until(
@@ -1091,7 +1291,9 @@ def parse_from_marquee(url: str, fund_name: str = "", manager_name:str = "", sho
             )
             # Enter your password
             password_field.send_keys(Mq_password)
-            button = driver.find_element(By.CSS_SELECTOR, "button[data-cy='gs-uitk-button__button']")
+            button = driver.find_element(
+                By.CSS_SELECTOR, "button[data-cy='gs-uitk-button__button']"
+            )
             button.click()
             print("Login successful!")
         else:
@@ -1103,10 +1305,15 @@ def parse_from_marquee(url: str, fund_name: str = "", manager_name:str = "", sho
         # First: look for "Request Full Access" span
         try:
             buttons = wait.until(
-                EC.presence_of_all_elements_located((By.XPATH,"//span[text()='Request Full Access' or text()='Full Access Requested']"))
+                EC.presence_of_all_elements_located(
+                    (
+                        By.XPATH,
+                        "//span[text()='Request Full Access' or text()='Full Access Requested']",
+                    )
+                )
             )
         except:
-            buttons = []   # no buttons found in time
+            buttons = []  # no buttons found in time
             print("No Request Full Access button found.")
 
         if buttons:  # Found request buttons
@@ -1115,7 +1322,9 @@ def parse_from_marquee(url: str, fund_name: str = "", manager_name:str = "", sho
             for span in buttons:
                 # Check if inside a clickable parent (button or link)
                 try:
-                    parent = span.find_element(By.XPATH, "./ancestor::*[self::button or self::a]")
+                    parent = span.find_element(
+                        By.XPATH, "./ancestor::*[self::button or self::a]"
+                    )
                     if parent.is_enabled() and parent.get_attribute("disabled") is None:
                         parent.click()
                         print("Clicked: Request Full Access")
@@ -1127,16 +1336,20 @@ def parse_from_marquee(url: str, fund_name: str = "", manager_name:str = "", sho
         else:
             # Second: if no button, look for table
             try:
-                tbody = wait.until(EC.presence_of_element_located((By.XPATH, "//tbody")))
+                tbody = wait.until(
+                    EC.presence_of_element_located((By.XPATH, "//tbody"))
+                )
                 if tbody:
                     print("Table found.")
                     try:  # wait a bit more for full table load
                         card = driver.find_element(
                             By.XPATH,
-                            "//div[contains(@class,'aurora-card')][.//div[@class='aurora-card-head-title' and contains(normalize-space(.), 'Fund(s)')]]"
+                            "//div[contains(@class,'aurora-card')][.//div[@class='aurora-card-head-title' and contains(normalize-space(.), 'Fund(s)')]]",
                         )
                         # Then find the body inside that card
-                        card_body = card.find_element(By.XPATH, ".//div[@class='aurora-card-body']")
+                        card_body = card.find_element(
+                            By.XPATH, ".//div[@class='aurora-card-body']"
+                        )
                         # Within that body, find all <a> tags
                         links = card_body.find_elements(By.XPATH, ".//a")
 
@@ -1147,28 +1360,39 @@ def parse_from_marquee(url: str, fund_name: str = "", manager_name:str = "", sho
                             text = link.text.strip()
                             fund_options.append((href, text))
                         # Now, find the link that matches the manager_name (case-insensitive)
-                        selected_link = None    
+                        selected_link = None
                         for href, text in fund_options:
                             if manager_name.lower() in text.lower():
                                 selected_link = href
-                                print(f"Navigated to fund page for manager: {manager_name}")
+                                print(
+                                    f"Navigated to fund page for manager: {manager_name}"
+                                )
                                 break
                             elif fund_name.lower() in text.lower():
                                 selected_link = href
                                 print(f"Navigated to fund page for fund: {fund_name}")
                                 break
                             else:
-                                selected_link = fund_options[0][0]  # default to first option if no match
-                                print(f"No exact match found; defaulting to first fund option: {fund_options[0][0]}")
+                                selected_link = fund_options[0][
+                                    0
+                                ]  # default to first option if no match
+                                print(
+                                    f"No exact match found; defaulting to first fund option: {fund_options[0][0]}"
+                                )
                         if selected_link:
                             driver.get(selected_link)
                             time.sleep(25)  # wait for the new page to load
                             try:
                                 buttons = wait.until(
-                                    EC.presence_of_all_elements_located((By.XPATH,"//span[text()='Request Full Access' or text()='Full Access Requested']"))
+                                    EC.presence_of_all_elements_located(
+                                        (
+                                            By.XPATH,
+                                            "//span[text()='Request Full Access' or text()='Full Access Requested']",
+                                        )
+                                    )
                                 )
                             except:
-                                buttons = []   # no buttons found in time
+                                buttons = []  # no buttons found in time
                                 print("No Request Full Access button found.")
 
                             if buttons:  # Found request buttons
@@ -1177,28 +1401,47 @@ def parse_from_marquee(url: str, fund_name: str = "", manager_name:str = "", sho
                                 for span in buttons:
                                     # Check if inside a clickable parent (button or link)
                                     try:
-                                        parent = span.find_element(By.XPATH, "./ancestor::*[self::button or self::a]")
-                                        if parent.is_enabled() and parent.get_attribute("disabled") is None:
+                                        parent = span.find_element(
+                                            By.XPATH,
+                                            "./ancestor::*[self::button or self::a]",
+                                        )
+                                        if (
+                                            parent.is_enabled()
+                                            and parent.get_attribute("disabled") is None
+                                        ):
                                             parent.click()
                                             print("Clicked: Request Full Access")
                                         else:
                                             print("Full Access Requested")
                                     except:
-                                        print("Error finding clickable parent for Request Full Access")
+                                        print(
+                                            "Error finding clickable parent for Request Full Access"
+                                        )
                             else:
-                            # Second: if no button, look for table
+                                # Second: if no button, look for table
                                 try:
-                                    tbody = wait.until(EC.presence_of_element_located((By.XPATH, "//tbody")))
+                                    tbody = wait.until(
+                                        EC.presence_of_element_located(
+                                            (By.XPATH, "//tbody")
+                                        )
+                                    )
                                     if tbody:
                                         try:
                                             table = driver.find_element(
                                                 By.XPATH,
-                                                "//div[@class='aurora-card-head-title' and contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'return')]"
+                                                "//div[@class='aurora-card-head-title' and contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'return')]",
                                             )
-                                            print("Performance table found after selection page.")
-                                            page_html = driver.execute_script("return document.body.innerText;")
+                                            print(
+                                                "Performance table found after selection page."
+                                            )
+                                            page_html = driver.execute_script(
+                                                "return document.body.innerText;"
+                                            )
                                         except Exception as e:
-                                            print("Performance table not found after selection but there is a table", e)
+                                            print(
+                                                "Performance table not found after selection but there is a table",
+                                                e,
+                                            )
                                             page_html = False
                                             requested_list = [fund_name]
                                 except:
@@ -1209,16 +1452,20 @@ def parse_from_marquee(url: str, fund_name: str = "", manager_name:str = "", sho
                         try:
                             table = driver.find_element(
                                 By.XPATH,
-                                "//div[@class='aurora-card-head-title' and contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'return')]"
+                                "//div[@class='aurora-card-head-title' and contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'return')]",
                             )
                             print("Performance table found.")
-                            page_html = driver.execute_script("return document.body.innerText;")
+                            page_html = driver.execute_script(
+                                "return document.body.innerText;"
+                            )
                         except Exception as e:
                             print("Performance table not found but there is a table", e)
                             page_html = False
                             requested_list = [fund_name]
             except TimeoutException:
-                print(f"No table found or access requested for {fund_name} at {url} under given time.")
+                print(
+                    f"No table found or access requested for {fund_name} at {url} under given time."
+                )
                 page_html = False
                 requested_list = [fund_name]
 
@@ -1226,7 +1473,7 @@ def parse_from_marquee(url: str, fund_name: str = "", manager_name:str = "", sho
                 print(f"Error loading {fund_name} from {url}: {e}")
                 page_html = False
                 requested_list = [fund_name]
-            
+
         # Give JavaScript a bit more time if necessary
         time.sleep(2)
         print("Scraper Session Completed.")
@@ -1235,7 +1482,8 @@ def parse_from_marquee(url: str, fund_name: str = "", manager_name:str = "", sho
         driver.quit()
         return page_html, requested_list
 
-def get_link_from_html(folder_path=r"input\marquee",  save=False, show=False):
+
+def get_link_from_html(folder_path=r"input\marquee", save=False, show=False):
     """
     Reads a text file containing URLs (one per line) and returns them as a list.
     """
@@ -1245,6 +1493,7 @@ def get_link_from_html(folder_path=r"input\marquee",  save=False, show=False):
     results = []
     found_link = False
     from bs4 import BeautifulSoup
+
     # Read fund_name prefixes from the file
     for file_name in os.listdir(folder_path):
         if file_name.lower().endswith((".html", ".htm")):
@@ -1270,7 +1519,7 @@ def get_link_from_html(folder_path=r"input\marquee",  save=False, show=False):
                 # Found a valid marquee link
                 if "marquee.gs.com" in fund_link.lower():
                     # Save the found link
-                    
+
                     if not found_link:
                         # --- Navigate back to the table ---
                         found_link = True
@@ -1278,19 +1527,31 @@ def get_link_from_html(folder_path=r"input\marquee",  save=False, show=False):
 
                         if table:
                             # Locate the first header row (mso-yfti-irow:0)
-                            header_row = table.find("tr", style=lambda s: s and "mso-yfti-irow:0" in s)
+                            header_row = table.find(
+                                "tr", style=lambda s: s and "mso-yfti-irow:0" in s
+                            )
                             if header_row:
                                 # Extract text from all cells in that header row
                                 headers = [
-                                    " ".join(cell.get_text(separator=" ", strip=True).split())
+                                    " ".join(
+                                        cell.get_text(separator=" ", strip=True).split()
+                                    )
                                     for cell in header_row.find_all(["td", "th"])
                                 ]
                                 matching_index = next(
-                                    (i for i, h in enumerate(headers)
-                                    if any(k in h.lower() for k in ["presenter", "manager"])),
-                                    None  # default if no match is found
+                                    (
+                                        i
+                                        for i, h in enumerate(headers)
+                                        if any(
+                                            k in h.lower()
+                                            for k in ["presenter", "manager"]
+                                        )
+                                    ),
+                                    None,  # default if no match is found
                                 )
-                    presenter_text = td_cells[matching_index].get_text(separator=" ", strip=True)
+                    presenter_text = td_cells[matching_index].get_text(
+                        separator=" ", strip=True
+                    )
                     links.append((fund_name, fund_link, presenter_text))
             links_path = os.path.join(folder_path, "Links & Names.txt")
             with open(links_path, "w") as f:
@@ -1298,7 +1559,9 @@ def get_link_from_html(folder_path=r"input\marquee",  save=False, show=False):
                     f.write(f"{url}\t{name}\t{manager}\n")
     # Parsing information from the links
     for fund_name, fund_link, manager_name in links:
-        page_html, requested_list = parse_from_marquee(url=fund_link, fund_name=fund_name, manager_name=manager_name,show=show)
+        page_html, requested_list = parse_from_marquee(
+            url=fund_link, fund_name=fund_name, manager_name=manager_name, show=show
+        )
         if not page_html:
             print(f"No table found or access requested for {fund_name} at {fund_link}")
             empty_list = empty_list + requested_list
@@ -1307,20 +1570,14 @@ def get_link_from_html(folder_path=r"input\marquee",  save=False, show=False):
                 f.write("\n".join(empty_list))
         else:
             result = gpt_process_text(page_html)
-            # Checking if there's performance recorded
-            val = result['performance']
-            if not (isinstance(val, list) and all(isinstance(item, dict) for item in val)) or (isinstance(val, list) and not val)  :
-                no_perf_list = no_perf_list + [fund_name]
+            _collect_result(result, fund_name, results, no_perf_list, folder_path, save)
             no_perf_path = os.path.join(folder_path, "No Performance Found.txt")
             with open(no_perf_path, "w") as f:
-                f.write("\n".join(no_perf_list))    
-            results.append(result)
-            if save:
-              json_folder = os.path.join(folder_path, "json")
-              _save_json_result(result, json_folder)
+                f.write("\n".join(no_perf_list))
     return results
 
-def rerun_no_table_list (folder_path=r"input\marquee", save=False, show = False):
+
+def rerun_no_table_list(folder_path=r"input\marquee", save=False, show=False):
     """
     Reads 'Requested & No Table.txt' in folder_path.
     Re-runs parse_from_marquee for files that match the prefixes listed.
@@ -1340,32 +1597,28 @@ def rerun_no_table_list (folder_path=r"input\marquee", save=False, show = False)
         no_perf_list = [line.strip() for line in f if line.strip()]
     with open(links_path, "r") as f:
         for line in f:
-            fund_name, url, manager_name= line.strip().split("\t", 2)  # split into 2 parts only
-            links.append(( fund_name, url, manager_name))
+            fund_name, url, manager_name = line.strip().split(
+                "\t", 2
+            )  # split into 2 parts only
+            links.append((fund_name, url, manager_name))
     with open(filter_list_path, "r") as f:
         filter_list = [line.strip() for line in f if line.strip()]
-    
+
     for fund_name, fund_link, manager_name in links:
         if fund_name not in filter_list:
             continue  # skip anything not in the second list
-        page_html = parse_from_marquee(url=fund_link, fund_name=fund_name, manager_name=manager_name, show=show)
+        page_html = parse_from_marquee(
+            url=fund_link, fund_name=fund_name, manager_name=manager_name, show=show
+        )
         if not page_html:
             print(f"No table found or access requested for {fund_name} at {fund_link}")
         else:
             result = gpt_process_text(page_html)
-            # Checking if there's performance recorded
             print(f"{result['fund_name']} processed successfully.")
-            val = result['performance']
-            if not (isinstance(val, list) and all(isinstance(item, dict) for item in val)) or (isinstance(val, list) and not val)  :
-                no_perf_list = no_perf_list + [result['fund_name']]
+            _collect_result(result, result["fund_name"], results, no_perf_list, folder_path, save)
             found_list = found_list + [fund_name]
             filter_list = [item for item in filter_list if item not in found_list]
             # Write the updated list back to the file
             with open(filter_list_path, "w") as f:
                 f.write("\n".join(filter_list))
-            results.append(result)
-            if save:
-                json_folder = os.path.join(folder_path, "json")
-                _save_json_result(result, json_folder)
     return results
-

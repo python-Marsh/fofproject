@@ -8,8 +8,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from matplotlib.font_manager import FontProperties
-from pyfonts import load_google_font
-from fofproject.utils import hex_to_rgba, list_of_dicts_to_df, parse_month
+from fofproject.utils import hex_to_rgba, parse_month
 from dateutil.relativedelta import relativedelta
 
 current_dir = Path(__file__).parent
@@ -19,6 +18,7 @@ if not save_dir.exists():
 
 # Use a font that is available in this container environment.
 MEASURE_FONT_FAMILY = "DejaVu Sans"
+
 
 def get_font2height():
     """
@@ -52,6 +52,7 @@ def get_font2height():
         plt.close(fig)
     return font2height
 
+
 FONT2HEIGHT = get_font2height()
 
 FONT_FNAME = {
@@ -64,6 +65,7 @@ FONT_FNAME = {
         "regular": "src/fofproject/font/Roboto/static/Roboto-Regular.ttf",
     },
 }
+
 
 def find_largest_font_size(target_height, font2height):
     """
@@ -89,7 +91,70 @@ def find_largest_font_size(target_height, font2height):
             return font_size
     return None
 
-def input_monthly_returns(file_path, performance_fee=0.2, management_fee=0.01):
+
+def get_available_benchmarks(file_path="BENCHMARK.csv"):
+    """Read BENCHMARK.csv header and return list of available index names."""
+    df = pd.read_csv(file_path, nrows=0)
+    return [col for col in df.columns if col != "date"]
+
+
+def load_benchmarks(file_path="BENCHMARK.csv"):
+    """Load benchmark/index funds from a CSV file with zero fees.
+
+    Parameters
+    ----------
+    file_path : str
+        Path to the benchmark CSV file.
+
+    Returns
+    -------
+    dict
+        Dictionary mapping benchmark names to Fund objects.
+    """
+    df = pd.read_csv(file_path)
+    funds = {}
+    for col in df.columns:
+        if col == "date":
+            continue
+        returns = [
+            {"date": d, "value": v} for d, v in zip(df["date"], df[col]) if pd.notna(v)
+        ]
+        funds[col] = Fund(
+            name=col,
+            monthly_returns=returns,
+            performance_fee=0,
+            management_fee=0,
+        )
+    return funds
+
+
+def assign_benchmarks(funds, benchmarks):
+    """Wire up suggested_benchmark_name → default_benchmark Fund object.
+
+    Skips funds that already have a default_benchmark (e.g. from benchmark_map).
+
+    Parameters
+    ----------
+    funds : dict
+        Dictionary of Fund objects to assign benchmarks to.
+    benchmarks : dict
+        Dictionary of benchmark Fund objects (e.g. from load_benchmarks()).
+    """
+    for fund in funds.values():
+        if fund.default_benchmark is not None:
+            continue
+        name = getattr(fund, "suggested_benchmark_name", None)
+        if name and name in benchmarks:
+            fund.default_benchmark = benchmarks[name]
+
+
+def input_monthly_returns(
+    file_path,
+    performance_fee=0.2,
+    management_fee=0.01,
+    benchmark_csv=None,
+    benchmark_map=None,
+):
     """
     Load monthly return data from a CSV file and create Fund objects for each column.
 
@@ -105,6 +170,12 @@ def input_monthly_returns(file_path, performance_fee=0.2, management_fee=0.01):
         Performance fee as decimal (0.2 = 20%). Stored on Fund for reference.
     management_fee : float, default 0.01
         Management fee as decimal (0.01 = 1%). Stored on Fund for reference.
+    benchmark_csv : str, optional
+        Path to a BENCHMARK.csv file. If provided, benchmark indices are loaded
+        (with zero fees) and merged into the returned dict.
+    benchmark_map : dict, optional
+        Mapping of fund names to benchmark names (e.g., {"HAO": "MSCI CHINA"}).
+        Sets default_benchmark on each fund automatically.
 
     Returns
     -------
@@ -113,8 +184,10 @@ def input_monthly_returns(file_path, performance_fee=0.2, management_fee=0.01):
 
     Example
     -------
-    >>> funds = input_monthly_returns("RETURN DATA.csv")
-    >>> funds["RDGFF"].total_ann_rtn  # Access annualized return
+    >>> funds = input_monthly_returns("RETURN DATA.csv",
+    ...     benchmark_csv="BENCHMARK.csv",
+    ...     benchmark_map={"HAO": "MSCI CHINA", "LIM": "TOPIX"})
+    >>> funds["HAO"].beta_to()  # uses MSCI CHINA automatically
     """
     # Read CSV file
     df = pd.read_csv(file_path)
@@ -134,7 +207,20 @@ def input_monthly_returns(file_path, performance_fee=0.2, management_fee=0.01):
             performance_fee=performance_fee,
             management_fee=management_fee,
         )
+
+    # Auto-load benchmarks from separate CSV
+    if benchmark_csv:
+        benchmarks = load_benchmarks(benchmark_csv)
+        funds.update(benchmarks)
+
+    # Wire up default benchmarks from explicit mapping
+    if benchmark_map:
+        for fund_name, benchmark_name in benchmark_map.items():
+            if fund_name in funds and benchmark_name in funds:
+                funds[fund_name].default_benchmark = funds[benchmark_name]
+
     return funds
+
 
 def subset_of_funds(funds, keys=["RDGFF", "MSCI CHINA", "MSCI GLOBAL"]):
     """
@@ -161,8 +247,9 @@ def subset_of_funds(funds, keys=["RDGFF", "MSCI CHINA", "MSCI GLOBAL"]):
     >>> selected = subset_of_funds(all_funds, ["RDGFF", "MSCI CHINA"])
     >>> plot_cumulative_returns(selected)
     """
-    funds_to_be_plot = {k: funds.get(k, None) for k in keys} 
+    funds_to_be_plot = {k: funds.get(k, None) for k in keys}
     return funds_to_be_plot
+
 
 class Fund:
     def __init__(
@@ -187,8 +274,9 @@ class Fund:
         net_return: Optional[bool] = None,
         management_fee: Optional[float] = None,
         performance_fee: Optional[float] = None,
+        default_benchmark: Optional["Fund"] = None,
+        suggested_benchmark_name: Optional[str] = None,
     ):
-
         """
         Initialize a Fund object with monthly return data and optional metadata.
 
@@ -264,7 +352,7 @@ class Fund:
         """
         if not all(isinstance(x, dict) for x in monthly_returns):
             raise ValueError(f"{name}: No valid monthly returns")
-        
+
         processed_returns = []
         for entry in monthly_returns:
             raw_date = entry["date"]
@@ -297,16 +385,26 @@ class Fund:
         self.phone = phone
         self.base = base
         self.fund_inception = fund_inception
-        self.contact_info = f"{ir_name} - Based in {base}, try reachout via email '{email}' or phone '{phone}'" if ir_name else "No contact info"
+        self.contact_info = (
+            f"{ir_name} - Based in {base}, try reachout via email '{email}' or phone '{phone}'"
+            if ir_name
+            else "No contact info"
+        )
         self.aum_size = aum_size
         self.return_pa = return_pa
         self.volatility_pa = volatility_pa
         self.min_ticket = min_ticket
         self.net_exposure = net_exposure
-        self.net_exposure_info = f"Net Exposure = {min(self.net_exposure)*100}% to {max(self.net_exposure)*100}%" if self.net_exposure else "No net exposure info"
+        self.net_exposure_info = (
+            f"Net Exposure = {min(self.net_exposure) * 100}% to {max(self.net_exposure) * 100}%"
+            if self.net_exposure
+            else "No net exposure info"
+        )
         self.net_return = net_return
         self.management_fee = management_fee
         self.performance_fee = performance_fee
+        self.default_benchmark = default_benchmark
+        self.suggested_benchmark_name = suggested_benchmark_name
         self.monthly_returns = processed_returns
         self.inception_date = self.compute_inception_date()
         self.latest_date = self.compute_latest_date()
@@ -541,7 +639,7 @@ class Fund:
 
         monthly_vol = float(s.std(ddof=ddof))
         return monthly_vol * math.sqrt(12.0)
-    
+
     def rolling_volatility(self, window=12):
         """
         Calculate rolling annualized volatility over a sliding window.
@@ -573,12 +671,12 @@ class Fund:
                 vols.append(None)
             else:
                 start_month = dates[i - window + 1].strftime("%Y-%m")
-                end_month   = dates[i].strftime("%Y-%m")
+                end_month = dates[i].strftime("%Y-%m")
                 v = self.volatility(start_month=start_month, end_month=end_month)
                 vols.append(v)
 
         return pd.Series(vols, index=pd.to_datetime(dates))
-    
+
     def vol_of_vol(self, window=12):
         """
         Calculate volatility-of-volatility (standard deviation of rolling volatility).
@@ -604,7 +702,7 @@ class Fund:
         rolling_vol = self.rolling_volatility(window=window)
         vol_of_vol = rolling_vol.std()
         return vol_of_vol
-    
+
     def sharpe_ratio(self, start_month=None, end_month=None, risk_free_rate=0.0):
         """
         Calculate the Sharpe ratio (risk-adjusted return).
@@ -881,7 +979,7 @@ class Fund:
 
         return total_rtn / count if count > 0 else 0.0
 
-    def join_two_funds(self, benchmark_fund, start_month=None, end_month=None):
+    def join_two_funds(self, benchmark_fund=None, start_month=None, end_month=None):
         """
         Align this fund's returns with a benchmark over their common date range.
 
@@ -904,6 +1002,9 @@ class Fund:
             (fund_values, benchmark_values) - two aligned lists of decimal returns.
             Returns empty lists if no overlapping period.
         """
+        benchmark_fund = benchmark_fund or self.default_benchmark
+        if benchmark_fund is None:
+            raise ValueError(f"{self.name}: benchmark_fund required but none provided and no default_benchmark set")
         fund1 = self.monthly_returns  # market returns
         fund2 = benchmark_fund.monthly_returns  # stock returns
 
@@ -932,7 +1033,7 @@ class Fund:
         ]
         return fund1_values, fund2_values
 
-    def correlation_to(self, benchmark_fund, start_month=None, end_month=None):
+    def correlation_to(self, benchmark_fund=None, start_month=None, end_month=None):
         """
         Calculate Pearson correlation coefficient with a benchmark.
 
@@ -961,7 +1062,9 @@ class Fund:
         >>> fund.correlation_to(msci_china, "2020-01", "2023-12")
         0.72  # Moderate positive correlation
         """
-        # Example: list1 and list2 are your two lists
+        benchmark_fund = benchmark_fund or self.default_benchmark
+        if benchmark_fund is None:
+            raise ValueError(f"{self.name}: benchmark_fund required but none provided and no default_benchmark set")
         fund1_values, fund2_values = self.join_two_funds(
             benchmark_fund=benchmark_fund, start_month=start_month, end_month=end_month
         )
@@ -975,7 +1078,7 @@ class Fund:
         corr = corr_matrix[0, 1]
         return corr
 
-    def beta_to(self, benchmark_fund, start_month=None, end_month=None):
+    def beta_to(self, benchmark_fund=None, start_month=None, end_month=None):
         """
         Calculate beta (market sensitivity) relative to a benchmark.
 
@@ -1006,7 +1109,9 @@ class Fund:
         >>> fund.beta_to(msci_china, "2020-01", "2023-12")
         0.65  # Fund captures 65% of benchmark's moves
         """
-        # Example: assume you already have two lists of dicts
+        benchmark_fund = benchmark_fund or self.default_benchmark
+        if benchmark_fund is None:
+            raise ValueError(f"{self.name}: benchmark_fund required but none provided and no default_benchmark set")
         fund1_values, fund2_values = self.join_two_funds(
             benchmark_fund=benchmark_fund, start_month=start_month, end_month=end_month
         )
@@ -1022,7 +1127,7 @@ class Fund:
 
         return beta
 
-    def upside_capture_ratio(self, benchmark_fund, start_month=None, end_month=None):
+    def upside_capture_ratio(self, benchmark_fund=None, start_month=None, end_month=None):
         """
         Calculate upside capture ratio relative to a benchmark.
 
@@ -1055,6 +1160,9 @@ class Fund:
         >>> fund.upside_capture_ratio(msci_china, "2020-01", "2023-12")
         85.5  # Fund captures 85.5% of benchmark's upside
         """
+        benchmark_fund = benchmark_fund or self.default_benchmark
+        if benchmark_fund is None:
+            raise ValueError(f"{self.name}: benchmark_fund required but none provided and no default_benchmark set")
         fund_values, benchmark_values = self.join_two_funds(
             benchmark_fund=benchmark_fund, start_month=start_month, end_month=end_month
         )
@@ -1082,7 +1190,7 @@ class Fund:
 
         return (fund_compound / bench_compound) * 100
 
-    def downside_capture_ratio(self, benchmark_fund, start_month=None, end_month=None):
+    def downside_capture_ratio(self, benchmark_fund=None, start_month=None, end_month=None):
         """
         Calculate downside capture ratio relative to a benchmark.
 
@@ -1115,6 +1223,9 @@ class Fund:
         >>> fund.downside_capture_ratio(msci_china, "2020-01", "2023-12")
         65.0  # Fund only captures 65% of benchmark's downside (good)
         """
+        benchmark_fund = benchmark_fund or self.default_benchmark
+        if benchmark_fund is None:
+            raise ValueError(f"{self.name}: benchmark_fund required but none provided and no default_benchmark set")
         fund_values, benchmark_values = self.join_two_funds(
             benchmark_fund=benchmark_fund, start_month=start_month, end_month=end_month
         )
@@ -1142,7 +1253,7 @@ class Fund:
 
         return (fund_compound / bench_compound) * 100
 
-    def capture_ratio(self, benchmark_fund, start_month=None, end_month=None):
+    def capture_ratio(self, benchmark_fund=None, start_month=None, end_month=None):
         """
         Calculate the capture ratio (upside capture / downside capture).
 
@@ -1174,6 +1285,9 @@ class Fund:
         >>> fund.capture_ratio(msci_china, "2020-01", "2023-12")
         1.31  # Upside 85.5% / Downside 65% = 1.31 (favorable asymmetry)
         """
+        benchmark_fund = benchmark_fund or self.default_benchmark
+        if benchmark_fund is None:
+            raise ValueError(f"{self.name}: benchmark_fund required but none provided and no default_benchmark set")
         upside = self.upside_capture_ratio(benchmark_fund, start_month, end_month)
         downside = self.downside_capture_ratio(benchmark_fund, start_month, end_month)
 
@@ -1189,7 +1303,7 @@ class Fund:
         end_month: str | None = None,  # "YYYY-MM"
         bins: int = 24,
         show_stats_lines: bool = True,
-        save = False,
+        save=False,
     ):
         """
         Create a histogram of monthly return distribution with KDE overlay.
@@ -1216,7 +1330,7 @@ class Fund:
         plotly.graph_objects.Figure
             Interactive Plotly figure object.
         """
-        from math import exp, pi, sqrt
+        from math import pi, sqrt
 
         # ----- style + palette (inlined here) -----
         layout_config = {
@@ -1429,16 +1543,17 @@ class Fund:
             borderwidth=1,
         )
         if save:
-            file_name = f'{self.name} monthly return distribution plot {sm.strftime("%Y-%m-%d")} to {em.strftime("%Y-%m-%d")}.png'
+            file_name = f"{self.name} monthly return distribution plot {sm.strftime('%Y-%m-%d')} to {em.strftime('%Y-%m-%d')}.png"
             save_path = f"{save_dir}/{file_name}"
             fig.write_image(save_path, scale=2)
         return fig
 
-    def compare_worst_performance(self,
-        benchmark_fund,
+    def compare_worst_performance(
+        self,
+        benchmark_fund=None,
         n_worst=10,
         title="Fund Performance on Benchmark's Worst Days",
-        save=False
+        save=False,
     ):
         """
         Compare fund behavior during benchmark's worst months.
@@ -1463,6 +1578,9 @@ class Fund:
         plotly.graph_objects.Figure
             Interactive grouped bar chart comparing returns.
         """
+        benchmark_fund = benchmark_fund or self.default_benchmark
+        if benchmark_fund is None:
+            raise ValueError(f"{self.name}: benchmark_fund required but none provided and no default_benchmark set")
 
         # Align both series by date
         fund_returns = self.monthly_returns
@@ -1473,8 +1591,8 @@ class Fund:
         bench_returns = pd.Series(
             {entry["datetime"]: entry["value"] for entry in bench_returns}
         )
-         # Combine into a DataFrame
-        combined = pd.concat([fund_returns, bench_returns], axis=1, join='inner')
+        # Combine into a DataFrame
+        combined = pd.concat([fund_returns, bench_returns], axis=1, join="inner")
         combined.columns = [self.name, benchmark_fund.name]
 
         # Find N worst benchmark returns (lowest values)
@@ -1491,22 +1609,26 @@ class Fund:
         fig = go.Figure()
 
         # Benchmark bars (grey)
-        fig.add_trace(go.Bar(
-            x=x_labels,
-            y=worst_df[benchmark_fund.name],
-            name=f"{benchmark_fund.name} Returns",
-            marker_color="rgba(152,154,156,0.8)",
-            hovertemplate="Rank: %{x}<br>Return: %{y:.2%}<extra>Benchmark</extra>"
-        ))
+        fig.add_trace(
+            go.Bar(
+                x=x_labels,
+                y=worst_df[benchmark_fund.name],
+                name=f"{benchmark_fund.name} Returns",
+                marker_color="rgba(152,154,156,0.8)",
+                hovertemplate="Rank: %{x}<br>Return: %{y:.2%}<extra>Benchmark</extra>",
+            )
+        )
 
         # Fund bars (gold)
-        fig.add_trace(go.Bar(
-            x=x_labels,
-            y=worst_df[self.name],
-            name=f"{self.name} Returns",
-            marker_color="rgba(193,174,148,0.85)",
-            hovertemplate="Rank: %{x}<br>Return: %{y:.2%}<extra>Fund</extra>"
-        ))
+        fig.add_trace(
+            go.Bar(
+                x=x_labels,
+                y=worst_df[self.name],
+                name=f"{self.name} Returns",
+                marker_color="rgba(193,174,148,0.85)",
+                hovertemplate="Rank: %{x}<br>Return: %{y:.2%}<extra>Fund</extra>",
+            )
+        )
 
         # Average horizontal lines
         fig.add_hline(
@@ -1514,45 +1636,37 @@ class Fund:
             line_dash="dot",
             line_color="rgba(193,174,148,0.6)",
             annotation_text=f"{self.name} Avg: {worst_df[self.name].mean():.2%}",
-            annotation_position="top left"
+            annotation_position="top left",
         )
         fig.add_hline(
             y=worst_df[benchmark_fund.name].mean(),
             line_dash="dot",
             line_color="rgba(152,154,156,0.6)",
             annotation_text=f"{benchmark_fund.name} Avg: {worst_df[benchmark_fund.name].mean():.2%}",
-            annotation_position="bottom left"
+            annotation_position="bottom left",
         )
 
         # Layout and aesthetics
         fig.update_layout(
-            title=dict(
-                text=f"<b>{title}</b>",
-                x=0.5,
-                font=dict(size=20)
-            ),
+            title=dict(text=f"<b>{title}</b>", x=0.5, font=dict(size=20)),
             xaxis=dict(
                 title=f"Top {n_worst} Worst Benchmark Returns (Ranked)",
                 tickfont=dict(size=10),
-                showgrid=False
+                showgrid=False,
             ),
             yaxis=dict(
                 title="Daily Return",
                 tickformat=".2%",
                 zeroline=True,
-                zerolinecolor="black"
+                zerolinecolor="black",
             ),
             barmode="group",
             hovermode="x unified",
             template="plotly_white",
             legend=dict(
-                orientation="h",
-                yanchor="bottom",
-                y=1.02,
-                xanchor="center",
-                x=0.5
+                orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5
             ),
-            margin=dict(l=60, r=40, t=60, b=80)
+            margin=dict(l=60, r=40, t=60, b=80),
         )
 
         if save:
@@ -1564,8 +1678,12 @@ class Fund:
         return fig
 
     def plot_rolling_vol_vs_benchmark(
-        self, benchmark_fund=None, window=12, title="Rolling Volatility (annually)", save = False
-        ):
+        self,
+        benchmark_fund=None,
+        window=12,
+        title="Rolling Volatility (annually)",
+        save=False,
+    ):
         """
         Plot rolling volatility time series with optional benchmark comparison.
 
@@ -1589,43 +1707,52 @@ class Fund:
         plotly.graph_objects.Figure
             Interactive line chart with volatility time series.
         """
+
+        benchmark_fund = benchmark_fund or self.default_benchmark
+
         def to_py_dt(idx):
             if isinstance(idx, pd.PeriodIndex):
                 idx = idx.to_timestamp()
-            idx = pd.to_datetime(idx, errors='coerce')
+            idx = pd.to_datetime(idx, errors="coerce")
             idx = pd.DatetimeIndex(idx).tz_localize(None)
-            return [ts.to_pydatetime() for ts in idx] 
+            return [ts.to_pydatetime() for ts in idx]
+
         # Fund rolling vol & vol-of-vol
         fund_rv = self.rolling_volatility(window=window)
         fund_rv.index = pd.to_datetime(fund_rv.index)
         fund_rv = fund_rv.dropna()
 
-        x_fund  = to_py_dt(fund_rv.index)
+        x_fund = to_py_dt(fund_rv.index)
 
         fund_vov = self.vol_of_vol(window=window)
 
         fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=x_fund, y=fund_rv.values,
-            mode="lines",
-            name=f"{self.name} (rolling vol)",
-            line=dict(color ="#C1AE94", width=2, dash="solid"),
-            hovertemplate="Date: %{x|%Y-%m}<br>Vol: %{y:.4f}<extra>Fund</extra>"
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=x_fund,
+                y=fund_rv.values,
+                mode="lines",
+                name=f"{self.name} (rolling vol)",
+                line=dict(color="#C1AE94", width=2, dash="solid"),
+                hovertemplate="Date: %{x|%Y-%m}<br>Vol: %{y:.4f}<extra>Fund</extra>",
+            )
+        )
         fig.add_hline(
             y=self.total_vol,
-            line_dash="dash",   # solid, dash, dot, etc.
+            line_dash="dash",  # solid, dash, dot, etc.
             line_color="rgba(193, 174, 148, 0.5)",
             annotation_text=f"{self.name}'s Historical Vol",
-            annotation=dict(                                     # <-- styling only
+            annotation=dict(  # <-- styling only
                 font=dict(family="Roboto Bold", size=11, color="#C1AE94"),
                 align="left",
-                bgcolor="rgba(0,0,0,0)"                          # optional
+                bgcolor="rgba(0,0,0,0)",  # optional
             ),
-            annotation_position="top right")
+            annotation_position="top right",
+        )
 
-
-        annotation_text = f"<b>Vol-of-Vol (std of rolling vol)</b><br>{self.name}: {fund_vov:.4f}"
+        annotation_text = (
+            f"<b>Vol-of-Vol (std of rolling vol)</b><br>{self.name}: {fund_vov:.4f}"
+        )
 
         # Benchmark if provided
         if benchmark_fund is not None:
@@ -1633,66 +1760,66 @@ class Fund:
             bench_rv.index = pd.to_datetime(bench_rv.index)
             bench_vov = benchmark_fund.vol_of_vol(window=window)
             bench_rv = bench_rv.dropna()
-            
 
             # Align series for plotting
 
             x_bench = to_py_dt(bench_rv.index)
-            start_date = max (min(x_bench), min(x_fund))
+            start_date = max(min(x_bench), min(x_fund))
             end_date = min(max(x_bench), max(x_fund))
             fig.update_xaxes(range=[start_date, end_date])
 
-            fig.add_trace(go.Scatter(
-                x=x_bench, y=bench_rv.values,
-                mode="lines",
-                name=f"{benchmark_fund.name} (rolling vol)",
-                line=dict(color ="#989A9C", width=2, dash="solid"),
-                hovertemplate="Date: %{x|%Y-%m}<br>Vol: %{y:.4f}<extra>Benchmark</extra>"
-            ))
+            fig.add_trace(
+                go.Scatter(
+                    x=x_bench,
+                    y=bench_rv.values,
+                    mode="lines",
+                    name=f"{benchmark_fund.name} (rolling vol)",
+                    line=dict(color="#989A9C", width=2, dash="solid"),
+                    hovertemplate="Date: %{x|%Y-%m}<br>Vol: %{y:.4f}<extra>Benchmark</extra>",
+                )
+            )
             fig.add_hline(
                 y=benchmark_fund.total_vol,
-                line_dash="dash",   # solid, dash, dot, etc.
+                line_dash="dash",  # solid, dash, dot, etc.
                 line_color="rgba(152,154,156,0.5)",
                 annotation_text=f"{benchmark_fund.name}'s Historical Vol",
-                annotation=dict(                                     # <-- styling only
+                annotation=dict(  # <-- styling only
                     font=dict(family="Roboto Bold", size=11, color="#989A9C"),
                     align="left",
-                    bgcolor="rgba(0,0,0,0)"                          # optional
+                    bgcolor="rgba(0,0,0,0)",  # optional
                 ),
-                annotation_position="top right"
-            )       
+                annotation_position="top right",
+            )
 
             annotation_text += f"<br>{benchmark_fund.name}: {bench_vov:.4f}"
         # Layout
         fig.update_layout(
             title=dict(
-                text=f"<b>{self.name} -- {title}<b>",   # Title text
-                x=0.5,             # Centered (0=left, 0.5=center, 1=right)
-                y=0.925,            # Vertical position
+                text=f"<b>{self.name} -- {title}<b>",  # Title text
+                x=0.5,  # Centered (0=left, 0.5=center, 1=right)
+                y=0.925,  # Vertical position
                 xanchor="center",  # Anchor position
                 yanchor="middle",
                 font=dict(
-                    size=22,                      # Font size
-                    color="black"                     # Font color
-                )),
-            legend=dict(
-                orientation="v", 
-                font = dict(size =9),
-                yanchor="bottom", 
-                y=-0.25, 
-                xanchor="right", 
-                x=1),
-            margin=dict(l=60, r=40, t=60, b=100),
-            xaxis=dict(
-                title="Date",
-                tickfont=dict(size=12, color="#53565A")
+                    size=22,  # Font size
+                    color="black",  # Font color
+                ),
             ),
+            legend=dict(
+                orientation="v",
+                font=dict(size=9),
+                yanchor="bottom",
+                y=-0.25,
+                xanchor="right",
+                x=1,
+            ),
+            margin=dict(l=60, r=40, t=60, b=100),
+            xaxis=dict(title="Date", tickfont=dict(size=12, color="#53565A")),
             yaxis=dict(
-                title="Rolling Volatility",
-                tickfont=dict(size=12, color="#53565A")
+                title="Rolling Volatility", tickfont=dict(size=12, color="#53565A")
             ),
             hovermode="x unified",
-            template="plotly_white"
+            template="plotly_white",
         )
         fig.add_annotation(
             xref="paper",
@@ -1703,24 +1830,25 @@ class Fund:
             yanchor="top",
             align="right",
             showarrow=False,
-            text=annotation_text,   
+            text=annotation_text,
             bgcolor="#F6F6F7",
             bordercolor=hex_to_rgba("#C1AE94", 0.9),
             borderwidth=1,
         )
         if save:
-            file_name = f'{self.name} rolling vol plot.png'
+            file_name = f"{self.name} rolling vol plot.png"
             save_path = f"{save_dir}/{file_name}"
             fig.write_image(save_path, scale=2)
         return fig
 
     def export_monthly_table(
-        self, language: str = "en",
+        self,
+        language: str = "en",
         benchmark_fund: Fund = None,
         benchmark_name: str = None,
         inception_column: bool = False,
-        end_month = None,
-        save = False,
+        end_month=None,
+        save=False,
     ):
         """
         Create a calendar-style table of monthly returns by year.
@@ -1749,6 +1877,7 @@ class Fund:
         matplotlib.pyplot
             Matplotlib figure object (call .show() to display).
         """
+        benchmark_fund = benchmark_fund or self.default_benchmark
         # ---------------- configurations ----------------
         month_labels = {
             "en": [
@@ -1781,16 +1910,8 @@ class Fund:
             ],
         }
         other_labels = {
-            "en": {
-                "ytd_label": "YTD",
-                "year": "Year",
-                "inc": "Since\nInception"
-            },
-            "cn": {
-                "ytd_label": "年初至今",
-                "year": "年分",
-                "inc": "成立至今"
-            },
+            "en": {"ytd_label": "YTD", "year": "Year", "inc": "Since\nInception"},
+            "cn": {"ytd_label": "年初至今", "year": "年分", "inc": "成立至今"},
         }
 
         if language == "en":
@@ -1805,14 +1926,11 @@ class Fund:
             inc_label = other_labels["cn"]["inc"]
         # ---------------- prepare data ----------------
         if end_month is None:
-            end_month_dt = self.latest_date 
+            end_month_dt = self.latest_date
         else:
             end_month_dt = pd.to_datetime(end_month + "-01")
 
-        df = [
-            entry for entry in self.monthly_returns
-            if entry["month"] <= end_month_dt
-        ]
+        df = [entry for entry in self.monthly_returns if entry["month"] <= end_month_dt]
 
         monthly_returns_list = [df]
         if benchmark_fund:
@@ -1845,19 +1963,20 @@ class Fund:
                 if i == 0:
                     df_sorted = df.sort_index(ascending=True)
                     # Compound the YTD multipliers and subtract 1
-                    df_sorted['INC'] = (1.0 + df_sorted['YTD']).cumprod() - 1.0
+                    df_sorted["INC"] = (1.0 + df_sorted["YTD"]).cumprod() - 1.0
                     # Put the new column back on your original order (if you had it sorted desc)
-                    df['INC'] = df_sorted['INC'].reindex(df.index)
+                    df["INC"] = df_sorted["INC"].reindex(df.index)
                 else:
-                    df['INC'] = np.nan
+                    df["INC"] = np.nan
+
             def pct_str(x):
                 """Format a float as a percentage string."""
-                return f"{x*100:,.2f}%" if pd.notna(x) else ""
+                return f"{x * 100:,.2f}%" if pd.notna(x) else ""
 
             df = df.map(pct_str)
             # append to list
             df_list.append(df)
-        # 
+        #
         if inception_column == True:
             end_label = [ytd_label, inc_label]
         else:
@@ -1881,7 +2000,7 @@ class Fund:
                     + row_benchmark
                 )
             df = pd.DataFrame(rows, columns=["year"] + df_list[0].columns.to_list())
-            
+
             df.columns = [year_label] + table_labels + end_label
         else:
             df = df_list[0]
@@ -1906,7 +2025,7 @@ class Fund:
         # identify text font size that fits in the cell height
         double_line = False
         if benchmark_name:
-            double_line = ("\n" in benchmark_name) or inception_column 
+            double_line = ("\n" in benchmark_name) or inception_column
         scaler = 0.75 if double_line else 1
         font_size = find_largest_font_size(cell_height * 0.55 * scaler, FONT2HEIGHT)
         # recalculate final height
@@ -1948,7 +2067,7 @@ class Fund:
         plt.tight_layout()
         if save:
             file_name = (
-                f'{self.name} monthly return table {end_month_dt.strftime("%Y-%m-%d")}'
+                f"{self.name} monthly return table {end_month_dt.strftime('%Y-%m-%d')}"
                 + (f" {benchmark_fund.name}" if benchmark_fund else "")
                 + ".png"
             )
@@ -1965,7 +2084,7 @@ class Fund:
         metrics=None,
         horizontal: bool = False,
         fix_aspect: bool = False,
-        save = False,
+        save=False,
     ):
         """
         Create a summary table of key performance metrics.
@@ -1999,6 +2118,7 @@ class Fund:
         matplotlib.figure.Figure
             Matplotlib figure object.
         """
+        benchmark_fund = benchmark_fund or self.default_benchmark
         header_fill = "#cbb69d"
         cell_fill = "#f0f0f0"
         text_color = "black"
@@ -2052,7 +2172,7 @@ class Fund:
             "vol": f"{100 * self.volatility(self.inception_date, end_month):.1f}%",
             "mdd": f"{100 * self.max_drawdown(self.inception_date, end_month):.1f}%",
             "cum": f"{100 * self.cumulative_return(self.inception_date, end_month):.1f}%",
-            "win": f"{self.positive_months(self.inception_date, end_month)*100:.2f}%",
+            "win": f"{self.positive_months(self.inception_date, end_month) * 100:.2f}%",
             "sharpe": f"{self.sharpe_ratio(self.inception_date, end_month):.2f}",
             "sortino": f"{self.sortino_ratio(self.inception_date, end_month):.2f}",
             "beta": f"{self.beta_to(benchmark_fund, self.inception_date, end_month):.2f}",
@@ -2168,17 +2288,17 @@ class Fund:
         plt.axis("off")
         plt.tight_layout()
         if save:
-            save_path = f'{save_dir}/{self.name} key metrics table {end_month.strftime("%Y-%m-%d")}.png'
+            save_path = f"{save_dir}/{self.name} key metrics table {end_month.strftime('%Y-%m-%d')}.png"
             plt.savefig(save_path, bbox_inches="tight", pad_inches=0, dpi=200)
         return fig
-    
+
     def export_correlation_table(
         self,
         end_month: str,
         benchmark_funds,
         language: str = "en",
         save: bool = False,
-        ):
+    ):
         """
         Create a horizontal table showing correlations to multiple benchmarks.
 
@@ -2240,11 +2360,14 @@ class Fund:
         font_width = FONT2HEIGHT[font_size]
         font_height = FONT2HEIGHT[font_size]
 
-
         # Use L to localize a stub column (first column) and the header label
-        cell_text = [[L["corr"], *corr_values]]        # one data row with a localized stub cell
-        col_labels = [L["benchmark"], *benchmark_names] # header row with a localized first cell
-
+        cell_text = [
+            [L["corr"], *corr_values]
+        ]  # one data row with a localized stub cell
+        col_labels = [
+            L["benchmark"],
+            *benchmark_names,
+        ]  # header row with a localized first cell
 
         col_widths = [
             font_width * max(len(lab), len(val)) * 1.2
@@ -2298,15 +2421,16 @@ class Fund:
 
         if save:
             save_path = (
-                f'{save_dir}/{self.name} correlation table '
-                f'{end_month.strftime("%Y-%m-%d")}.png'
+                f"{save_dir}/{self.name} correlation table "
+                f"{end_month.strftime('%Y-%m-%d')}.png"
             )
             plt.savefig(save_path, bbox_inches="tight", pad_inches=0, dpi=200)
 
         return fig
 
-
-    def summary_of_a_fund(self, benchmark_fund=None, language="en", save = False):
+    def summary_of_a_fund(
+        self, benchmark_fund=None, language="en", save=False, show=True
+    ):
         """
         Generate a comprehensive fund analysis with multiple visualizations.
 
@@ -2326,34 +2450,52 @@ class Fund:
             Language for labels ("en" for English, "cn" for Chinese).
         save : bool, default False
             If True, saves all charts as PNGs to output directory.
+        show : bool, default True
+            If False, suppresses interactive display of charts.
 
         Returns
         -------
         None
-            Displays all charts interactively via .show() calls.
+            Displays all charts interactively via .show() calls (when show=True).
         """
-        print(self.one_liner)
-        print(f"Net Exposure = {min(self.net_exposure)*100}% to {max(self.net_exposure)*100}%") if self.net_exposure else None
-        print(self.contact_info)
-        endmonth_str = datetime.strftime(self.latest_date, format='%Y-%m')
-        plot1 = self.export_monthly_table(language, benchmark_fund=benchmark_fund, save=save)
+        benchmark_fund = benchmark_fund or self.default_benchmark
+
+        if show:
+            print(self.one_liner)
+            print(
+                f"Net Exposure = {min(self.net_exposure) * 100}% to {max(self.net_exposure) * 100}%"
+            ) if self.net_exposure else None
+            print(self.contact_info)
+        endmonth_str = datetime.strftime(self.latest_date, format="%Y-%m")
+        plot1 = self.export_monthly_table(
+            language, benchmark_fund=benchmark_fund, save=save
+        )
         plot2 = self.export_key_metrics_table(
             benchmark_fund=benchmark_fund,
             end_month=endmonth_str,
             language=language,
             metrics=["cagr", "vol", "sharpe", "sortino", "mdd", "beta", "corr", "win"],
             horizontal=False,
-            save = save,
+            save=save,
         )
         plot3 = self.plot_monthly_return_distribution(save=save)
-        plot4 = self.plot_rolling_vol_vs_benchmark(benchmark_fund=benchmark_fund, save=save)
-        plot5 = self.compare_worst_performance(benchmark_fund, n_worst=10, title="Fund Performance on Benchmark's Worst Days", save=save)
-        
-        plot1.show()
-        plot2.show()
-        plot3.show()
-        plot4.show()
-        plot5.show()
+        plot4 = self.plot_rolling_vol_vs_benchmark(
+            benchmark_fund=benchmark_fund, save=save
+        )
+        plot5 = self.compare_worst_performance(
+            benchmark_fund,
+            n_worst=10,
+            title="Fund Performance on Benchmark's Worst Days",
+            save=save,
+        )
+
+        if show:
+            plot1.show()
+            plot2.show()
+            plot3.show()
+            plot4.show()
+            plot5.show()
+
 
 def compare_funds(fund_dict, benchmark_fund=None):
     """
@@ -2404,7 +2546,9 @@ def compare_funds(fund_dict, benchmark_fund=None):
             "Perf Fee": fund.performance_fee,
             "Inception Date": fund.inception_date,
             "Latest Date": fund.latest_date,
-            "Month Running": (fund.latest_date - fund.inception_date).days / 30.0 if fund.inception_date and fund.latest_date else None,
+            "Month Running": (fund.latest_date - fund.inception_date).days / 30.0
+            if fund.inception_date and fund.latest_date
+            else None,
             "# Months": fund.num_months,
             "Cumulative Return": fund.total_cum_rtn,
             "Annualized Return": fund.total_ann_rtn,
@@ -2414,10 +2558,12 @@ def compare_funds(fund_dict, benchmark_fund=None):
             "Max Drawdown": fund.total_max_dd,
             "Positive Months": fund.total_pos_months,
         }
-        if benchmark_fund is not None:
-            row["Capture Ratio"] = fund.capture_ratio(benchmark_fund, fund.inception_date, fund.latest_date)
+        bm = benchmark_fund or fund.default_benchmark
+        if bm is not None:
+            row["Capture Ratio"] = fund.capture_ratio(
+                bm, fund.inception_date, fund.latest_date
+            )
         data.append(row)
 
     df = pd.DataFrame(data)
     return df
-

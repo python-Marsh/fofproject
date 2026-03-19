@@ -11,7 +11,17 @@ pio.renderers.default = "browser"
 def presentation_data_update(month: str):
     print(f"Updating presentation data to {month}...")
     funds = input_monthly_returns(
-        r"RETURN DATA.csv", performance_fee=0.2, management_fee=0.01
+        r"RETURN DATA.csv",
+        performance_fee=0.2,
+        management_fee=0.01,
+        benchmark_csv="BENCHMARK.csv",
+        benchmark_map={
+            "HAO": "MSCI CHINA",
+            "TAIREN": "MSCI CHINA",
+            "FOREST": "MSCI CHINA",
+            "LEXINGTON": "S&P 500",
+            "LIM": "TOPIX",
+        },
     )
 
     end_month = parse_month(month)
@@ -78,13 +88,6 @@ def presentation_data_update(month: str):
     )
     print("========== Portfolio holdings =============")
     print("Appendix of our portfolio performance:")
-    benchmark_map = {
-        "HAO": "MSCI CHINA",
-        "TAIREN": "MSCI CHINA",
-        "FOREST": "MSCI CHINA",
-        "LEXINGTON": "S&P 500",
-        "LIM": "TOPIX",
-    }
     for name in ["HAO", "TAIREN", "LEXINGTON", "LIM", "FOREST"]:
         print(
             f"return of {name}: {funds[name].get_monthly_return(year, specific_month) * 100:.2f}%"
@@ -107,7 +110,6 @@ def presentation_data_update(month: str):
         funds[name].export_key_metrics_table(
             language="en",
             end_month=end_month,
-            benchmark_fund=funds[benchmark_map[name]],
             metrics=["cagr", "vol", "sharpe", "sortino", "beta"],
             horizontal=True,
             fix_aspect=True,
