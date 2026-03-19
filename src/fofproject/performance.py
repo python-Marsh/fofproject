@@ -396,6 +396,8 @@ def relocate_misplaced_artifacts(output_dir: Path = None) -> list:
 def process_performance_updates(
     output_dir: Path = None,
     save: bool = True,
+    *,
+    mappings: dict = None,
 ) -> list:
     """Find and process all unprocessed performance PDF artifacts.
 
@@ -412,7 +414,8 @@ def process_performance_updates(
     """
     output_dir = output_dir or DEFAULT_OUTPUT_DIR
 
-    mappings = load_firm_mappings(output_dir)
+    _owns_mappings = mappings is None
+    mappings = mappings if mappings is not None else load_firm_mappings(output_dir)
     unprocessed = _find_unprocessed_performance_artifacts(mappings, output_dir)
 
     if not unprocessed:
@@ -449,8 +452,9 @@ def process_performance_updates(
         except Exception as e:
             print(f"  ERROR processing {item['file_name']}: {e}")
 
-    # Save updated mappings with processed flags
-    save_firm_mappings(mappings, output_dir)
+    # Save updated mappings with processed flags (skip if caller owns the mappings object)
+    if _owns_mappings:
+        save_firm_mappings(mappings, output_dir)
     print(f"\nDone. Processed {len(results)} of {len(unprocessed)} artifact(s).")
 
     return results
@@ -556,6 +560,95 @@ def generate_fund_graphs(output_dir: Path = None, benchmark_fund=None, language=
     return results
 
 
+def backfill_computed_metrics(output_dir: Path = None):
+    """Update each fund's JSON file with computed return_pa and volatility_pa.
+
+    Walks the same folder structure as generate_fund_graphs(), loads each
+    fund's JSON, creates a Fund object via init_funds, then writes the
+    Fund's total_ann_rtn and total_vol back into the JSON as return_pa
+    and volatility_pa.
+
+    Args:
+        output_dir: Root output directory (same as classify.py).
+
+    Returns:
+        List of dicts describing each fund updated.
+    """
+    output_dir = output_dir or DEFAULT_OUTPUT_DIR
+    if not output_dir.exists():
+        print("Output directory does not exist.")
+        return []
+
+    updated = []
+
+    for firm_folder in sorted(output_dir.iterdir()):
+        if not firm_folder.is_dir() or firm_folder.name.startswith("."):
+            continue
+
+        for subfolder in sorted(firm_folder.iterdir()):
+            if not subfolder.is_dir() or subfolder.name.startswith("."):
+                continue
+            if subfolder.name.startswith(CONFLICT_IDENTIFIER_PREFIX):
+                continue
+
+            _, identifier = _parse_folder_identifier(subfolder.name)
+            if not identifier:
+                continue
+
+            json_dir = subfolder / "json"
+            if not json_dir.is_dir():
+                continue
+
+            json_file = json_dir / f"{identifier}.json"
+            if not json_file.is_file():
+                continue
+
+            try:
+                with open(json_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception as e:
+                print(f"  Warning: could not load {json_file.name}: {e}")
+                continue
+
+            funds = init_funds([data])
+            if not funds:
+                continue
+
+            fund = next(iter(funds.values()))
+            if fund.total_ann_rtn is None and fund.total_vol is None:
+                continue
+
+            changed = False
+            if fund.total_ann_rtn is not None:
+                data["return_pa"] = round(fund.total_ann_rtn, 6)
+                changed = True
+            if fund.total_vol is not None:
+                data["volatility_pa"] = round(fund.total_vol, 6)
+                changed = True
+
+            if changed:
+                with open(json_file, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+                updated.append(
+                    {
+                        "fund_name": fund.name,
+                        "identifier": identifier,
+                        "return_pa": data.get("return_pa"),
+                        "volatility_pa": data.get("volatility_pa"),
+                        "json_file": str(json_file),
+                    }
+                )
+                print(
+                    f"  Updated {fund.name}: "
+                    f"return_pa={data.get('return_pa')}, "
+                    f"volatility_pa={data.get('volatility_pa')}"
+                )
+
+    print(f"\nDone. Updated metrics for {len(updated)} fund(s).")
+    return updated
+
+
 if __name__ == "__main__":
     process_performance_updates()
     generate_fund_graphs()
+    backfill_computed_metrics()

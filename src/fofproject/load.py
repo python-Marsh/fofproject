@@ -836,32 +836,41 @@ def gpt_process_text(text: str):
     return data
 
 
-def process_single_pdf(file_path, save=True, prefix_hint="_parsed from_"):
+def process_single_pdf(file_path, save=True, funds=None):
     """
-    Process a single PDF by file path. Renames the file and optionally saves the result as JSON.
+    Process a single PDF by file path and optionally save the result as JSON.
+    If *funds* dict is provided (must contain 'RDGFF'), also generates worst-performance
+    comparison charts against RDGFF.
     Returns the parsed result dict.
     """
     if not os.path.isfile(file_path) or not file_path.lower().endswith(".pdf"):
         raise ValueError(f"Invalid PDF path: {file_path}")
 
     folder_path = os.path.dirname(file_path) or "."
-    file_name = os.path.basename(file_path)
 
     print(f"Processing: {file_path}")
     result = gpt_process_pdf(file_path)
 
-    # Renaming of the pdf file
-    base, ext = os.path.splitext(file_name)
-    if prefix_hint in base:
-        prefix, base = base.split(prefix_hint, 1)
-        result["fund_name"] = prefix
-    new_file_name = f"{result['fund_name']}{prefix_hint}{base}{ext}"
-    new_path = os.path.join(folder_path, new_file_name)
-    os.rename(file_path, new_path)
-
     if save:
         json_folder = os.path.join(folder_path, "json")
         _save_json_result(result, json_folder)
+
+    # Generate worst-performance comparison charts against RDGFF
+    if funds is not None and "RDGFF" in funds and _has_valid_performance(result):
+        fund_obj = init_funds([result]).get(result["fund_name"])
+        if fund_obj:
+            fund_obj.compare_worst_performance(
+                funds["RDGFF"],
+                title="Performance during our fund's top 10 drawdowns",
+                n_worst=10,
+                save=True,
+            )
+            fund_obj.compare_worst_performance(
+                funds["RDGFF"],
+                title="Entire performance compared with our fund's",
+                n_worst=100,
+                save=True,
+            )
 
     return result
 

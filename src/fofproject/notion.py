@@ -68,7 +68,6 @@ FUND_FOLDER_PATTERN = re.compile(r"^(.+?)\s*-\s*(\d+)$")
 CONFLICT_IDENTIFIER_PREFIX = "404 multiple identifier"
 
 
-
 # File size limit for single-part upload (20 MB)
 MAX_SINGLE_UPLOAD_BYTES = 20 * 1024 * 1024
 
@@ -298,12 +297,33 @@ def _update_page_properties(page_id: str, properties: dict) -> dict:
     return _notion_request("patch", f"/pages/{page_id}", json=body)
 
 
+def _archive_page(page_id: str):
+    """Archive (soft-delete) a Notion page.
+
+    Archived pages can be recovered from the Notion trash:
+      - In Notion UI: Settings & members → Trash → find and restore the page
+      - Via API: PATCH /pages/{page_id} with {"archived": false}
+    """
+    _notion_request("patch", f"/pages/{page_id}", json={"archived": True})
+    log.info("Archived page %s", page_id)
+
+
 # =========================
 # FILE UPLOAD
 # =========================
 
 
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".svg", ".webp", ".tiff", ".ico"}
+IMAGE_EXTENSIONS = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".bmp",
+    ".svg",
+    ".webp",
+    ".tiff",
+    ".ico",
+}
 
 
 def _get_block_type(file_path: Path, as_image: bool = False) -> str:
@@ -415,13 +435,22 @@ def _upload_file(file_path: Path) -> str | None:
 
 
 def _extract_filename_from_url(url: str) -> str | None:
-    """Extract the filename from a Notion S3 URL (keeps underscores as-is)."""
+    """Extract the filename from a Notion S3 URL (keeps underscores as-is).
+
+    Handles double-encoded URLs (e.g. %253D → %3D → =) by unquoting
+    repeatedly until the string stabilizes.
+    """
     from urllib.parse import urlparse, unquote
 
     try:
         path = urlparse(url).path
-        encoded_name = path.rsplit("/", 1)[-1]
-        return unquote(encoded_name)
+        name = path.rsplit("/", 1)[-1]
+        # Unquote repeatedly to handle double (or triple) encoding
+        prev = None
+        while name != prev:
+            prev = name
+            name = unquote(name)
+        return name
     except Exception:
         return None
 
@@ -437,13 +466,15 @@ def _delete_block(block_id: str):
     log.info("Deleted block %s", block_id)
 
 
+FILE_BLOCK_TYPES = {"file", "pdf", "image", "audio", "video"}
+
+
 def _find_file_block_ids_in_children(
     parent_id: str,
     normalized_name: str,
 ) -> list[str]:
     """Find all file block IDs under a parent that match the given normalized filename."""
     matching = []
-    file_block_types = {"file", "pdf", "image", "audio", "video"}
     start_cursor = None
 
     while True:
@@ -453,7 +484,7 @@ def _find_file_block_ids_in_children(
         data = _notion_request("get", f"/blocks/{parent_id}/children", params=params)
         for block in data.get("results", []):
             btype = block.get("type", "")
-            if btype in file_block_types:
+            if btype in FILE_BLOCK_TYPES:
                 block_data = block.get(btype, {})
                 name = block_data.get("name")
                 if not name:
@@ -468,6 +499,43 @@ def _find_file_block_ids_in_children(
         start_cursor = data.get("next_cursor")
 
     return matching
+
+
+def _rename_file_block(block_id: str, new_name: str):
+    """Rename a file block by updating its name via the Block PATCH endpoint."""
+    # Fetch the block to determine its type
+    block = _notion_request("get", f"/blocks/{block_id}")
+    btype = block.get("type", "")
+    if btype not in FILE_BLOCK_TYPES:
+        log.warning("Block %s is type '%s', not a file block — skipping rename", block_id, btype)
+        return
+    _notion_request("patch", f"/blocks/{block_id}", json={btype: {"name": new_name}})
+    log.info("Renamed block %s to '%s'", block_id, new_name)
+
+
+def _rename_file_on_page(page_id: str, old_name: str, new_name: str) -> bool:
+    """Find file blocks matching old_name on a page and rename them to new_name.
+
+    Searches page-level children and section callout children.
+    Returns True if at least one block was renamed.
+    """
+    norm = _normalize_filename(old_name)
+    block_ids = _find_file_block_ids_in_children(page_id, norm)
+
+    # Also check inside section callout blocks (fund pages)
+    section_callouts = _find_section_callout_ids(page_id)
+    for callout_id in section_callouts.values():
+        block_ids.extend(_find_file_block_ids_in_children(callout_id, norm))
+
+    if block_ids:
+        for bid in block_ids:
+            _rename_file_block(bid, new_name)
+        log.info(
+            "Renamed %d block(s) from '%s' to '%s' on page %s",
+            len(block_ids), old_name, new_name, page_id,
+        )
+        return True
+    return False
 
 
 def _remove_file_from_page(page_id: str, filename: str):
@@ -733,7 +801,6 @@ def _find_graph_callout(page_id: str) -> str | None:
             break
         start_cursor = data.get("next_cursor")
     return None
-
 
 
 def _upload_files_into_callout(
@@ -1099,26 +1166,26 @@ def sync_fund(
     existing = _query_database_by_title(fund_db_id, fund_name, FUND_TITLE_PROP)
     if existing:
         fund_page_id = existing["id"]
-        log.info("Fund '%s' already exists -> %s", fund_name, fund_page_id)
-    else:
-        # Create fund page with Identifier and AM Firm relation
-        extra_properties = {
-            "Identifier": {
-                "rich_text": [{"type": "text", "text": {"content": identifier}}]
-            },
-            "AM Firm": {"relation": [{"id": firm_page_id}]},
-        }
-        fund_page_id = _create_page(
-            fund_db_id,
-            fund_name,
-            title_property=FUND_TITLE_PROP,
-            extra_properties=extra_properties,
-            use_template=True,
-        )
+        log.info("Fund '%s' already exists -> %s, skipping uploads", fund_name, fund_page_id)
+        return fund_page_id
 
-    # Wait for template if we just created the page
-    if not existing:
-        _wait_for_template(fund_page_id)
+    # Create fund page with Identifier and AM Firm relation
+    extra_properties = {
+        "Identifier": {
+            "rich_text": [{"type": "text", "text": {"content": identifier}}]
+        },
+        "AM Firm": {"relation": [{"id": firm_page_id}]},
+    }
+    fund_page_id = _create_page(
+        fund_db_id,
+        fund_name,
+        title_property=FUND_TITLE_PROP,
+        extra_properties=extra_properties,
+        use_template=True,
+    )
+
+    # Wait for template to be applied to the new page
+    _wait_for_template(fund_page_id)
 
     # Find section callout blocks from the template
     section_callouts = _find_section_callout_ids(fund_page_id)
@@ -1145,17 +1212,21 @@ def sync_fund(
             if callout_id:
                 log.info(
                     "Uploading %d graph file(s) for fund '%s'",
-                    len(graph_files), fund_name,
+                    len(graph_files),
+                    fund_name,
                 )
                 _upload_files_into_callout(
-                    callout_id, graph_files,
-                    label="graph", as_image=True,
+                    callout_id,
+                    graph_files,
+                    label="graph",
+                    as_image=True,
                 )
             else:
                 log.warning(
                     "Graph callout '%s' not found on page for fund '%s', "
                     "skipping graph uploads",
-                    GRAPH_CALLOUT_TEXT, fund_name,
+                    GRAPH_CALLOUT_TEXT,
+                    fund_name,
                 )
 
     # Upload JSON properties to the fund page
@@ -1192,12 +1263,12 @@ def sync_firm(firm_path: Path, firm_db_id: str, fund_db_id: str):
     # Parse folder contents
     firm_files, fund_folders = get_firm_contents(firm_path)
 
-    # Upload firm-level files to "Firm Documents" property
-    if firm_files:
+    # Only upload firm-level files if the firm was just created
+    if not existing and firm_files:
         log.info("Uploading %d firm-level file(s)", len(firm_files))
         _upload_firm_files_to_property(firm_page_id, firm_files)
 
-    # Sync each fund subfolder
+    # Sync each fund subfolder (sync_fund skips existing funds)
     fund_page_ids = []
     for fund_folder in fund_folders:
         fund_page_id = sync_fund(fund_folder, fund_db_id, firm_page_id)
@@ -1263,19 +1334,63 @@ CITY_COORDINATES: dict[str, tuple[float, float]] = {
     "mexico city": (19.4326, -99.1332),
 }
 
+# Country name → capital city key in CITY_COORDINATES.
+# Used as a fallback when only a country name is provided.
+COUNTRY_CAPITALS: dict[str, str] = {
+    "china": "beijing",
+    "japan": "tokyo",
+    "south korea": "seoul",
+    "korea": "seoul",
+    "india": "mumbai",
+    "indonesia": "jakarta",
+    "malaysia": "kuala lumpur",
+    "thailand": "bangkok",
+    "philippines": "manila",
+    "taiwan": "taipei",
+    "united states": "new york",
+    "usa": "new york",
+    "us": "new york",
+    "united kingdom": "london",
+    "uk": "london",
+    "england": "london",
+    "scotland": "edinburgh",
+    "switzerland": "zurich",
+    "australia": "sydney",
+    "canada": "toronto",
+    "france": "paris",
+    "germany": "frankfurt",
+    "netherlands": "amsterdam",
+    "ireland": "dublin",
+    "uae": "dubai",
+    "united arab emirates": "dubai",
+    "brazil": "sao paulo",
+    "mexico": "mexico city",
+    "luxembourg": "luxembourg",
+    "cayman islands": "cayman",
+    "singapore": "singapore",
+    "hong kong": "hong kong",
+}
+
 
 def _geocode_base(base_str: str) -> dict | None:
     """Convert a base location string to a Notion place property value.
 
     Matches against CITY_COORDINATES using case-insensitive substring search.
+    Falls back to COUNTRY_CAPITALS if no city match is found.
     Returns a dict ready to be used as a Notion ``place`` property value,
     or None if no match is found.
     """
     if not base_str:
         return None
     lower = base_str.lower()
+    # Try matching a city first
     for city, (lat, lon) in CITY_COORDINATES.items():
         if city in lower:
+            return {"place": {"name": base_str, "lat": lat, "lon": lon}}
+    # Fall back to country → capital
+    for country, capital_key in COUNTRY_CAPITALS.items():
+        if country in lower:
+            lat, lon = CITY_COORDINATES[capital_key]
             return {"place": {"name": base_str, "lat": lat, "lon": lon}}
     return None
 
@@ -1387,7 +1502,9 @@ def upload_json_to_fund_page(fund_page_id: str, json_path: Path):
     _update_page_properties(fund_page_id, props)
     log.info(
         "Updated %d properties on fund page %s from %s",
-        len(props), fund_page_id, json_path.name,
+        len(props),
+        fund_page_id,
+        json_path.name,
     )
 
 
@@ -1415,7 +1532,8 @@ def upload_json_folder_to_fund(fund_page_id: str, fund_path: Path):
     if len(json_files) > 1:
         log.info(
             "Multiple JSON files found in %s — used most recent: %s",
-            json_dir, json_files[0].name,
+            json_dir,
+            json_files[0].name,
         )
 
 
@@ -1504,7 +1622,8 @@ class NotionFolderHandler(FileSystemEventHandler):
                 if existing_fund:
                     log.info(
                         "New graph file in fund '%s': %s",
-                        fund_name, file_path.name,
+                        fund_name,
+                        file_path.name,
                     )
                     threading.Thread(
                         target=self._upload_graph_file_to_section,
@@ -1525,7 +1644,8 @@ class NotionFolderHandler(FileSystemEventHandler):
                 if existing_fund:
                     log.info(
                         "New JSON file in fund '%s': %s",
-                        fund_name, file_path.name,
+                        fund_name,
+                        file_path.name,
                     )
                     threading.Thread(
                         target=upload_json_to_fund_page,
@@ -1536,7 +1656,11 @@ class NotionFolderHandler(FileSystemEventHandler):
 
         # Skip files inside other managed subfolders (meetings/, researches/)
         if parent.name in SKIP_SUBFOLDERS:
-            log.debug("Skipping file in managed subfolder '%s': %s", parent.name, file_path.name)
+            log.debug(
+                "Skipping file in managed subfolder '%s': %s",
+                parent.name,
+                file_path.name,
+            )
             return
 
         grandparent = parent.parent
@@ -1597,26 +1721,65 @@ class NotionFolderHandler(FileSystemEventHandler):
         if not callout_id:
             log.warning(
                 "Graph callout '%s' not found on page %s, skipping graph upload",
-                GRAPH_CALLOUT_TEXT, fund_page_id,
+                GRAPH_CALLOUT_TEXT,
+                fund_page_id,
             )
             return
         _upload_files_into_callout(
-            callout_id, [file_path],
-            label="graph", as_image=True,
+            callout_id,
+            [file_path],
+            label="graph",
+            as_image=True,
         )
 
-    def on_deleted(self, event):
-        """Handle file or folder deletion — remove corresponding content from Notion."""
+    def on_modified(self, event):
+        """Handle file modification — re-upload JSON properties to Notion."""
         if event.is_directory:
             return
 
+        file_path = Path(event.src_path)
+        parent = file_path.parent
+
+        # Only handle JSON files in json/ subfolders
+        if parent.name != "json" or file_path.suffix.lower() != ".json":
+            return
+
+        fund_folder = parent.parent
+        firm_folder = fund_folder.parent
+        if firm_folder.parent != self.watch_folder:
+            return
+
+        fund_name = _resolve_fund_name(fund_folder.name)
+        existing_fund = _query_database_by_title(
+            self.fund_db_id, fund_name, FUND_TITLE_PROP
+        )
+        if existing_fund:
+            log.info(
+                "JSON file modified in fund '%s': %s",
+                fund_name, file_path.name,
+            )
+            threading.Thread(
+                target=upload_json_to_fund_page,
+                args=(existing_fund["id"], file_path),
+                daemon=True,
+            ).start()
+
+    def on_deleted(self, event):
+        """Handle file or folder deletion — remove corresponding content from Notion."""
         deleted_path = Path(event.src_path)
+
+        if event.is_directory:
+            self._handle_folder_deleted(deleted_path)
+            return
+
         parent = deleted_path.parent
         filename = deleted_path.name
 
         # Skip files in managed subfolders (graph/, json/, meetings/, researches/)
         if parent.name in SKIP_SUBFOLDERS:
-            log.debug("Skipping deletion in managed subfolder '%s': %s", parent.name, filename)
+            log.debug(
+                "Skipping deletion in managed subfolder '%s': %s", parent.name, filename
+            )
             return
 
         grandparent = parent.parent
@@ -1655,6 +1818,39 @@ class NotionFolderHandler(FileSystemEventHandler):
                 threading.Thread(
                     target=_remove_file_from_firm_property,
                     args=(existing_firm["id"], filename),
+                    daemon=True,
+                ).start()
+
+    def _handle_folder_deleted(self, deleted_path: Path):
+        """Handle a folder being deleted — archive the corresponding Notion page."""
+        parent = deleted_path.parent
+
+        # Fund folder deleted (child of a firm folder)
+        if parent.parent == self.watch_folder:
+            fund_name = _resolve_fund_name(deleted_path.name)
+            existing_fund = _query_database_by_title(
+                self.fund_db_id, fund_name, FUND_TITLE_PROP
+            )
+            if existing_fund:
+                log.info("Fund folder deleted: '%s' — archiving Notion page", deleted_path.name)
+                threading.Thread(
+                    target=_archive_page,
+                    args=(existing_fund["id"],),
+                    daemon=True,
+                ).start()
+            return
+
+        # Firm folder deleted (direct child of watch folder)
+        if parent == self.watch_folder:
+            firm_name = deleted_path.name
+            existing_firm = _query_database_by_title(
+                self.firm_db_id, firm_name, FIRM_TITLE_PROP
+            )
+            if existing_firm:
+                log.info("Firm folder deleted: '%s' — archiving Notion page", firm_name)
+                threading.Thread(
+                    target=_archive_page,
+                    args=(existing_firm["id"],),
                     daemon=True,
                 ).start()
 
@@ -1736,13 +1932,25 @@ class NotionFolderHandler(FileSystemEventHandler):
                 ).start()
 
     def _handle_file_rename(self, old_path: Path, new_path: Path):
-        """Handle a file being renamed — delete old from Notion, upload new."""
+        """Handle a file being renamed or moved — rename block or move between pages."""
         old_parent = old_path.parent
         new_parent = new_path.parent
 
+        # Same-folder rename: just rename the block on the same page
+        if old_parent == new_parent:
+            self._handle_same_folder_rename(old_path, new_path)
+            return
+
+        # Cross-folder move: remove from source page, upload to destination page
+        self._handle_cross_folder_move(old_path, new_path)
+
+    def _handle_same_folder_rename(self, old_path: Path, new_path: Path):
+        """Handle a file renamed within the same folder."""
+        parent = old_path.parent
+
         # File renamed within a fund folder
-        if old_parent == new_parent and old_parent.parent.parent == self.watch_folder:
-            fund_name = _resolve_fund_name(old_parent.name)
+        if parent.parent.parent == self.watch_folder:
+            fund_name = _resolve_fund_name(parent.name)
             existing_fund = _query_database_by_title(
                 self.fund_db_id, fund_name, FUND_TITLE_PROP
             )
@@ -1753,25 +1961,16 @@ class NotionFolderHandler(FileSystemEventHandler):
                     old_path.name,
                     new_path.name,
                 )
-
-                def _rename_fund_file(page_id, old_name, new_file):
-                    _remove_file_from_page(page_id, old_name)
-                    section_callouts = _find_section_callout_ids(page_id)
-                    if section_callouts:
-                        _upload_files_to_sections(page_id, [new_file], section_callouts)
-                    else:
-                        _upload_and_attach_files(page_id, [new_file])
-
                 threading.Thread(
-                    target=_rename_fund_file,
-                    args=(existing_fund["id"], old_path.name, new_path),
+                    target=_rename_file_on_page,
+                    args=(existing_fund["id"], old_path.name, new_path.name),
                     daemon=True,
                 ).start()
             return
 
         # File renamed within a firm folder
-        if old_parent == new_parent and old_parent.parent == self.watch_folder:
-            firm_name = old_parent.name
+        if parent.parent == self.watch_folder:
+            firm_name = parent.name
             existing_firm = _query_database_by_title(
                 self.firm_db_id, firm_name, FIRM_TITLE_PROP
             )
@@ -1782,16 +1981,82 @@ class NotionFolderHandler(FileSystemEventHandler):
                     old_path.name,
                     new_path.name,
                 )
-
-                def _rename_firm_file(page_id, old_name, new_file):
-                    _remove_file_from_firm_property(page_id, old_name)
-                    _upload_firm_files_to_property(page_id, [new_file])
-
                 threading.Thread(
-                    target=_rename_firm_file,
-                    args=(existing_firm["id"], old_path.name, new_path),
+                    target=_rename_file_on_page,
+                    args=(existing_firm["id"], old_path.name, new_path.name),
                     daemon=True,
                 ).start()
+
+    def _resolve_page_for_path(self, file_path: Path) -> tuple[str | None, str]:
+        """Resolve a file path to its Notion page ID and page type ('fund' or 'firm').
+
+        Returns (page_id, page_type) or (None, '') if no matching page is found.
+        """
+        parent = file_path.parent
+
+        # File in a fund folder (watch/firm/fund/file)
+        if parent.parent.parent == self.watch_folder:
+            fund_name = _resolve_fund_name(parent.name)
+            existing = _query_database_by_title(
+                self.fund_db_id, fund_name, FUND_TITLE_PROP
+            )
+            if existing:
+                return existing["id"], "fund"
+            return None, ""
+
+        # File in a firm folder (watch/firm/file)
+        if parent.parent == self.watch_folder:
+            firm_name = parent.name
+            existing = _query_database_by_title(
+                self.firm_db_id, firm_name, FIRM_TITLE_PROP
+            )
+            if existing:
+                return existing["id"], "firm"
+
+        return None, ""
+
+    def _handle_cross_folder_move(self, old_path: Path, new_path: Path):
+        """Handle a file moved between different folders (fund→fund, fund→firm, etc.).
+
+        Removes the file from the source Notion page and uploads it to the destination page.
+        """
+        source_page_id, source_type = self._resolve_page_for_path(old_path)
+        dest_page_id, dest_type = self._resolve_page_for_path(new_path)
+
+        def _do_cross_folder_move():
+            # Remove from source
+            if source_page_id:
+                if source_type == "fund":
+                    _remove_file_from_page(source_page_id, old_path.name)
+                else:
+                    _remove_file_from_firm_property(source_page_id, old_path.name)
+                log.info(
+                    "Removed file '%s' from %s page %s (cross-folder move)",
+                    old_path.name, source_type, source_page_id,
+                )
+
+            # Upload to destination
+            if dest_page_id and new_path.exists():
+                if dest_type == "fund":
+                    section_callouts = _find_section_callout_ids(dest_page_id)
+                    if section_callouts:
+                        _upload_files_to_sections(
+                            dest_page_id, [new_path], section_callouts
+                        )
+                    else:
+                        _upload_and_attach_files(dest_page_id, [new_path])
+                else:
+                    _upload_firm_files_to_property(dest_page_id, [new_path])
+                log.info(
+                    "Uploaded file '%s' to %s page %s (cross-folder move)",
+                    new_path.name, dest_type, dest_page_id,
+                )
+
+        log.info(
+            "File moved across folders: '%s' -> '%s'",
+            old_path, new_path,
+        )
+        threading.Thread(target=_do_cross_folder_move, daemon=True).start()
 
 
 # =========================
@@ -1800,7 +2065,7 @@ class NotionFolderHandler(FileSystemEventHandler):
 
 # Poll intervals (seconds)
 POLL_INTERVAL_FAST = 30  # For newly created pages
-POLL_INTERVAL_SLOW = 30  # For routine modification checks
+POLL_INTERVAL_SLOW = 600  # For routine modification checks
 FAST_WINDOW_SECONDS = 600  # Pages created within this window get fast polling
 
 
@@ -2070,7 +2335,9 @@ def _get_relation_page_items(page_id: str, relation_property: str) -> list[dict]
                 }
             )
         else:
-            log.warning("%s page %s has no title, skipping", relation_property, rel["id"])
+            log.warning(
+                "%s page %s has no title, skipping", relation_property, rel["id"]
+            )
 
     return items
 
@@ -2115,9 +2382,7 @@ def _sync_relation_items_to_subfolder(
 
     # Download/export new items
     existing_local = {
-        _normalize_filename(f.name)
-        for f in subfolder.iterdir()
-        if f.is_file()
+        _normalize_filename(f.name) for f in subfolder.iterdir() if f.is_file()
     }
 
     for item in items:

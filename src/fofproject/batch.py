@@ -67,7 +67,7 @@ STYLE_DICT = {
     "pptx": {
         "layout_config": {
             "font": {
-                "family": "Roboto, MontSerrat Semibold, sans-serif",
+                "family": "Roboto, MontSerrat Semibold, Noto Sans SC, sans-serif",
                 "size": 20,
                 "color": "#2f2f2f",
             },
@@ -142,7 +142,7 @@ STYLE_DICT = {
     "default": {
         "layout_config": {
             "font": {
-                "family": "Inter, Montserrat, system-ui, sans-serif",
+                "family": "Inter, Montserrat, Noto Sans SC, system-ui, sans-serif",
                 "size": 13,
                 "color": "#1f2937",
             },
@@ -200,7 +200,7 @@ STYLE_DICT = {
     "excel": {
         "layout_config": {
             "font": {
-                "family": "Microsoft Yahei Light, Roboto, sans-serif",
+                "family": "Microsoft Yahei Light, Noto Sans SC, Roboto, sans-serif",
                 "size": 14,
                 "color": "#2f2f2f",
             },

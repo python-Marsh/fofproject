@@ -17,7 +17,6 @@ import os
 import json
 import re
 import shutil
-import time
 import uuid
 from html import unescape
 from datetime import datetime
@@ -2832,7 +2831,9 @@ def get_processed_folders(output_dir: Path) -> set:
     return processed
 
 
-def classify_new_emails(email_input_dir: Path = None, output_dir: Path = None) -> dict:
+def classify_new_emails(
+    email_input_dir: Path = None, output_dir: Path = None, *, mappings: dict = None
+) -> dict:
     """
     Classify only new/unprocessed email folders.
 
@@ -2864,7 +2865,8 @@ def classify_new_emails(email_input_dir: Path = None, output_dir: Path = None) -
     # We'll do this by temporarily filtering what classify_and_organize_emails processes
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    firm_mappings = load_firm_mappings(output_dir)
+    _owns_mappings = mappings is None
+    firm_mappings = mappings if mappings is not None else load_firm_mappings(output_dir)
     classification_lookup = _load_classification_lookup(output_dir)
     client = get_openai_client()
     existing_firms = list(firm_mappings.get("canonical_names", {}).keys())
@@ -2920,8 +2922,9 @@ def classify_new_emails(email_input_dir: Path = None, output_dir: Path = None) -
 
         results.append(entry)
 
-    # Save updated data
-    save_firm_mappings(firm_mappings, output_dir)
+    # Save updated data (skip if caller owns the mappings object)
+    if _owns_mappings:
+        save_firm_mappings(firm_mappings, output_dir)
 
     # Update the report with new classifications
     report_path = output_dir / CLASSIFICATION_REPORT_FILE
@@ -3130,7 +3133,10 @@ def _scan_disk_state(output_dir: Path) -> dict:
 
             for f in sorted(subfolder.rglob("*")):
                 # Skip files inside SKIP_SUBFOLDERS (e.g. graph/) nested within fund folders
-                if any(part in SKIP_SUBFOLDERS for part in f.relative_to(subfolder).parts[:-1]):
+                if any(
+                    part in SKIP_SUBFOLDERS
+                    for part in f.relative_to(subfolder).parts[:-1]
+                ):
                     continue
                 if (
                     f.is_file()
@@ -3155,7 +3161,7 @@ def _scan_disk_state(output_dir: Path) -> dict:
     return state
 
 
-def sync_moved_artifacts(output_dir: Path = None) -> dict:
+def sync_moved_artifacts(output_dir: Path = None, *, mappings: dict = None) -> dict:
     """Sync the firm_fund_mappings registry with the actual disk state.
 
     Detects:
@@ -3183,7 +3189,8 @@ def sync_moved_artifacts(output_dir: Path = None) -> dict:
             "errors": [],
         }
 
-    mappings = load_firm_mappings(output_dir)
+    _owns_mappings = mappings is None
+    mappings = mappings if mappings is not None else load_firm_mappings(output_dir)
     canonical_names = mappings.get("canonical_names", {})
     registry_index = _build_registry_index(mappings)
     disk_state = _scan_disk_state(output_dir)
@@ -3798,8 +3805,8 @@ def sync_moved_artifacts(output_dir: Path = None) -> dict:
                     }
                 )
 
-    # Save updated mappings
-    if (
+    # Save updated mappings (skip if caller owns the mappings object)
+    if _owns_mappings and (
         result["moved"]
         or result["new_folders"]
         or result["removed_folders"]
@@ -3812,7 +3819,9 @@ def sync_moved_artifacts(output_dir: Path = None) -> dict:
     return result
 
 
-def reconcile_misplaced_artifacts(output_dir: Path = None) -> dict:
+def reconcile_misplaced_artifacts(
+    output_dir: Path = None, *, mappings: dict = None
+) -> dict:
     """Find artifacts whose identifier matches a different fund folder and move them.
 
     Scans all artifacts in the registry that have a non-null ``identifier``.
@@ -3835,13 +3844,16 @@ def reconcile_misplaced_artifacts(output_dir: Path = None) -> dict:
         }
     """
     output_dir = output_dir or DEFAULT_OUTPUT_DIR
-    mappings = load_firm_mappings(output_dir)
+    _owns_mappings = mappings is None
+    mappings = mappings if mappings is not None else load_firm_mappings(output_dir)
     canonical_names = mappings.get("canonical_names", {})
 
     result: dict = {"relocated": [], "errors": []}
 
     # --- Step 1: Build identifier → (firm, fund_name) index from fund-level identifiers ---
-    fund_id_index: dict[str, tuple[str, str]] = {}  # identifier → (canonical_firm, fund_name)
+    fund_id_index: dict[
+        str, tuple[str, str]
+    ] = {}  # identifier → (canonical_firm, fund_name)
     for canonical, firm_data in canonical_names.items():
         for fund_name, fund_data in firm_data.get("funds", {}).items():
             if fund_data.get("_deleted_at"):
@@ -3899,15 +3911,17 @@ def reconcile_misplaced_artifacts(output_dir: Path = None) -> dict:
             if not art_identifier or str(art_identifier) not in fund_id_index:
                 continue
             target_firm, target_fund = fund_id_index[str(art_identifier)]
-            relocations.append({
-                "artifact_id": art_id,
-                "art_data": art_data,
-                "from_firm": canonical,
-                "from_fund": None,
-                "to_firm": target_firm,
-                "to_fund": target_fund,
-                "disk_key": (firm_folder, None, art_id),
-            })
+            relocations.append(
+                {
+                    "artifact_id": art_id,
+                    "art_data": art_data,
+                    "from_firm": canonical,
+                    "from_fund": None,
+                    "to_firm": target_firm,
+                    "to_fund": target_fund,
+                    "disk_key": (firm_folder, None, art_id),
+                }
+            )
 
         # Fund-level artifacts
         for fund_name, fund_data in firm_data.get("funds", {}).items():
@@ -3925,19 +3939,23 @@ def reconcile_misplaced_artifacts(output_dir: Path = None) -> dict:
                     continue
                 # Resolve disk folder name for this fund
                 fund_disk_folder = None
-                for fdn, fd in disk_state["firms"].get(firm_folder, {}).get("funds", {}).items():
+                for fdn, fd in (
+                    disk_state["firms"].get(firm_folder, {}).get("funds", {}).items()
+                ):
                     if fd["name"] == fund_name or fdn == fund_name:
                         fund_disk_folder = fdn
                         break
-                relocations.append({
-                    "artifact_id": art_id,
-                    "art_data": art_data,
-                    "from_firm": canonical,
-                    "from_fund": fund_name,
-                    "to_firm": target_firm,
-                    "to_fund": target_fund,
-                    "disk_key": (firm_folder, fund_disk_folder, art_id),
-                })
+                relocations.append(
+                    {
+                        "artifact_id": art_id,
+                        "art_data": art_data,
+                        "from_firm": canonical,
+                        "from_fund": fund_name,
+                        "to_firm": target_firm,
+                        "to_fund": target_fund,
+                        "disk_key": (firm_folder, fund_disk_folder, art_id),
+                    }
+                )
 
     # --- Step 4: Execute relocations ---
     for reloc in relocations:
@@ -3955,7 +3973,9 @@ def reconcile_misplaced_artifacts(output_dir: Path = None) -> dict:
             target_fund_data = target_firm_data.get("funds", {}).get(to_fund, {})
             target_id = target_fund_data.get("identifier", "")
             target_folder_name = f"{to_fund} - {target_id}" if target_id else to_fund
-            target_path = output_dir / sanitize_folder_name(to_firm) / target_folder_name
+            target_path = (
+                output_dir / sanitize_folder_name(to_firm) / target_folder_name
+            )
             if not target_path.exists():
                 result["errors"].append(
                     f"Target folder not found for {art_id}: {to_firm}/{to_fund}"
@@ -4022,15 +4042,17 @@ def reconcile_misplaced_artifacts(output_dir: Path = None) -> dict:
 
         from_label = f"{from_firm}/{from_fund}" if from_fund else from_firm
         to_label = f"{to_firm}/{to_fund}"
-        result["relocated"].append({
-            "artifact_id": art_id,
-            "file_name": art_data.get("file_name", source_file.name),
-            "from": from_label,
-            "to": to_label,
-        })
+        result["relocated"].append(
+            {
+                "artifact_id": art_id,
+                "file_name": art_data.get("file_name", source_file.name),
+                "from": from_label,
+                "to": to_label,
+            }
+        )
 
-    # Save if any changes were made
-    if result["relocated"]:
+    # Save if any changes were made (skip if caller owns the mappings object)
+    if _owns_mappings and result["relocated"]:
         save_firm_mappings(mappings, output_dir)
 
     return result
@@ -4112,141 +4134,6 @@ def _remove_artifact_from_registry(
         return firm_data.get("artifacts", {}).pop(artifact_id, None) or {}
 
 
-def monitoring(
-    email_input_dir: Path = None,
-    output_dir: Path = None,
-    poll_interval: int = 30,
-    run_once: bool = False,
-):
-    """
-    Combined monitor: classify new emails AND sync manually moved artifacts
-    in a single polling loop.
-    """
-    email_input_dir = email_input_dir or DEFAULT_EMAIL_INPUT_DIR
-    output_dir = output_dir or DEFAULT_OUTPUT_DIR
-
-    print("=" * 60)
-    print("EMAIL + ARTIFACT MOVE MONITOR")
-    print("=" * 60)
-    print(f"Emails:     {email_input_dir}")
-    print(f"Output:     {output_dir}")
-    print(f"Poll interval: {poll_interval} seconds")
-    if not run_once:
-        print("Press Ctrl+C to stop monitoring")
-    print("-" * 60)
-
-    classify_result = None
-    try:
-        while True:
-            # 1. Classify new emails
-            classify_result = classify_new_emails(email_input_dir, output_dir)
-
-            if classify_result["new_folders_found"] > 0:
-                print(
-                    f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                    f"Processed {classify_result['new_folders_found']} new email(s)"
-                )
-                for item in classify_result["classifications"]:
-                    firm = item.get("firm")
-                    if firm:
-                        print(f"  + {item['subject'][:40]}... -> {firm}")
-                    else:
-                        print(
-                            f"  - {item['subject'][:40]}... ({item.get('reason', 'skipped')})"
-                        )
-
-            # 2. Reconcile misplaced artifacts by identifier matching
-            reconcile_result = reconcile_misplaced_artifacts(output_dir)
-
-            if reconcile_result["relocated"]:
-                print(
-                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                    f"Relocated {len(reconcile_result['relocated'])} misplaced artifact(s)"
-                )
-                for r in reconcile_result["relocated"]:
-                    print(
-                        f"  >> {r['file_name']} [{r['artifact_id']}]"
-                        f" : {r['from']} -> {r['to']}"
-                    )
-            if reconcile_result["errors"]:
-                for err in reconcile_result["errors"]:
-                    print(f"  ERROR (reconcile): {err}")
-
-            # 3. Sync manually moved artifacts
-            move_result = sync_moved_artifacts(output_dir)
-
-            if move_result["moved"]:
-                print(
-                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                    f"Synced {len(move_result['moved'])} moved artifact(s)"
-                )
-                for m in move_result["moved"]:
-                    print(
-                        f"  ~ {m.get('old_file', '?')} [{m.get('artifact_id', '')}]"
-                        f" : {m.get('from', '?')} -> {m.get('to', '?')}"
-                    )
-
-            if move_result.get("new_folders"):
-                print(
-                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                    f"Registered {len(move_result['new_folders'])} new folder(s)"
-                )
-                for nf in move_result["new_folders"]:
-                    print(f"  + {nf['folder']} -> {nf['firm']}")
-
-            if move_result.get("new_artifacts"):
-                print(
-                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                    f"Tagged {len(move_result['new_artifacts'])} new artifact(s)"
-                )
-                for na in move_result["new_artifacts"]:
-                    loc = na["firm"] + (f"/{na['fund']}" if na.get("fund") else "")
-                    print(f"  + {na['file_name']} [{na['artifact_id']}] -> {loc}")
-
-            if move_result.get("removed_folders"):
-                print(
-                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                    f"Soft-deleted {len(move_result['removed_folders'])} folder(s)"
-                )
-                for rf in move_result["removed_folders"]:
-                    print(f"  - {rf['folder']} ({rf['type']} under {rf['firm']})")
-
-            if move_result.get("deleted_artifacts"):
-                print(
-                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                    f"Soft-deleted {len(move_result['deleted_artifacts'])} artifact(s)"
-                )
-                for da in move_result["deleted_artifacts"]:
-                    print(f"  - {da['file_name']} [{da['artifact_id']}]")
-
-            if move_result["errors"]:
-                for err in move_result["errors"]:
-                    print(f"  ERROR: {err}")
-
-            if (
-                not classify_result["new_folders_found"]
-                and not move_result["moved"]
-                and not move_result.get("new_folders")
-                and not move_result.get("new_artifacts")
-                and not move_result.get("removed_folders")
-                and not move_result.get("deleted_artifacts")
-                and not reconcile_result["relocated"]
-            ):
-                print(
-                    f"[{datetime.now().strftime('%H:%M:%S')}] No new emails or moves",
-                    end="\r",
-                )
-
-            if run_once:
-                print("\nSingle check completed.")
-                break
-
-            time.sleep(poll_interval)
-
-    except KeyboardInterrupt:
-        print("\n\nMonitoring stopped by user.")
-
-    return classify_result if run_once else None
 
 
 # =========================
@@ -4922,74 +4809,3 @@ def delete_fund_alias_from_firm(
         return False
 
 
-def main():
-    """Main entry point."""
-    import sys
-
-    print("=" * 60)
-    print("HEDGE FUND EMAIL CLASSIFIER")
-    print("=" * 60)
-    print("\nSelect mode:")
-    print("  1. Classify and organize all emails")
-    print("  2. Force reclassify all (ignore cache)")
-    print("  3. List known firms and funds")
-    print("  4. List all overrides")
-    print("  5. Add email override (specific address -> firm)")
-    print("  6. Add domain override (all from domain -> firm)")
-    print("  7. Reassign/rename firm (old firm -> new firm, merges if new exists)")
-    print("  8. Monitor for new emails + artifact moves (continuous)")
-    print("  9. Manage aliases (firm/fund)")
-    print()
-
-    if len(sys.argv) > 1:
-        mode = sys.argv[1]
-    else:
-        mode = input("Enter mode (1-9): ").strip()
-
-    if mode == "1":
-        classify_and_organize_emails()
-    elif mode == "2":
-        classify_and_organize_emails(force_reclassify=True)
-    elif mode == "3":
-        list_firms()
-    elif mode == "4":
-        list_overrides()
-    elif mode == "5":
-        email = input("Enter email address: ").strip()
-        firm = input("Enter firm name to assign: ").strip()
-        if email and firm:
-            add_email_override(email, firm)
-        else:
-            print("Email and firm name are required.")
-    elif mode == "6":
-        domain = input("Enter domain (without @): ").strip()
-        firm = input("Enter firm name to assign: ").strip()
-        if domain and firm:
-            add_domain_override(domain, firm)
-        else:
-            print("Domain and firm name are required.")
-    elif mode == "7":
-        old_firm = _interactive_firm_picker("Select OLD firm to reassign/remove")
-        if not old_firm:
-            print("No firm selected.")
-        else:
-            new_firm = _interactive_firm_picker(
-                "Select NEW firm (target)",
-                allow_new=True,
-            )
-            if not new_firm:
-                print("No target firm provided.")
-            else:
-                reassign_firm(old_firm, new_firm)
-    elif mode == "8":
-        interval = input("Poll interval in seconds (default 30): ").strip()
-        interval = int(interval) if interval.isdigit() else 30
-        monitoring(poll_interval=interval, run_once=False)
-    elif mode == "9":
-        manage_aliases()
-    else:
-        print("Invalid mode.")
-
-
-if __name__ == "__main__":
-    main()

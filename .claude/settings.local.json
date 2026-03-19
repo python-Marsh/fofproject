@@ -31,7 +31,18 @@
       "Bash(python -m venv /tmp/debug-venv)",
       "Bash(source /tmp/debug-venv/bin/activate)",
       "Bash(pip install:*)",
-      "Bash(python -m pytest /tmp/test_reconcile_stress.py -v --tb=short)"
+      "Bash(python -m pytest /tmp/test_reconcile_stress.py -v --tb=short)",
+      "Bash(fc-list :lang=zh)",
+      "Bash(fc-list)",
+      "Bash(apt list:*)",
+      "Bash(apt-cache search:*)",
+      "Bash(grep -iE noto.*cjk)",
+      "Bash(sudo apt-get:*)",
+      "Bash(python -m pytest /tmp/test_notion_sync_stress.py -v --tb=short)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''src/fofproject/classify.py''\\).read\\(\\)\\); print\\(''classify.py OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''src/fofproject/performance.py''\\).read\\(\\)\\); print\\(''performance.py OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''src/fofproject/classify.py'', encoding=''utf-8-sig''\\).read\\(\\)\\); print\\(''classify.py OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''src/fofproject/performance.py'', encoding=''utf-8-sig''\\).read\\(\\)\\); print\\(''performance.py OK''\\)\")"
     ],
     "additionalDirectories": [
       "/tmp"
