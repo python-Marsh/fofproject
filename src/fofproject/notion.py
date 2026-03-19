@@ -51,6 +51,9 @@ DEFAULT_WATCH_FOLDER = _PROJECT_ROOT / "output" / "testing" / "notion" / "firm"
 # Fund subfolder pattern: "{FUND_NAME} - {IDENTIFIER}"
 FUND_FOLDER_PATTERN = re.compile(r"^(.+?)\s*-\s*(\d+)$")
 
+# Prefix used by performance.py to flag identifier conflicts
+CONFLICT_IDENTIFIER_PREFIX = "404 multiple identifier"
+
 # File size limit for single-part upload (20 MB)
 MAX_SINGLE_UPLOAD_BYTES = 20 * 1024 * 1024
 
@@ -926,7 +929,12 @@ def get_firm_contents(firm_path: Path) -> tuple[list[Path], list[Path]]:
 
     for item in firm_path.iterdir():
         if item.is_dir():
-            if parse_fund_folder_name(item.name):
+            if item.name.startswith(CONFLICT_IDENTIFIER_PREFIX):
+                log.warning(
+                    "Skipping fund folder '%s' — flagged as identifier conflict",
+                    item.name,
+                )
+            elif parse_fund_folder_name(item.name):
                 fund_folders.append(item)
             else:
                 log.warning(
@@ -1122,6 +1130,12 @@ class NotionFolderHandler(FileSystemEventHandler):
             ).start()
         elif parent.parent == self.watch_folder:
             # New fund folder inside an existing firm
+            if new_path.name.startswith(CONFLICT_IDENTIFIER_PREFIX):
+                log.warning(
+                    "Skipping new fund folder '%s' — identifier conflict",
+                    new_path.name,
+                )
+                return
             parsed = parse_fund_folder_name(new_path.name)
             if parsed:
                 log.info("New fund folder detected: %s", new_path.name)

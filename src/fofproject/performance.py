@@ -11,6 +11,8 @@ from fofproject.classify import (
     load_firm_mappings,
     save_firm_mappings,
     DEFAULT_OUTPUT_DIR,
+    _parse_folder_identifier,
+    CONFLICT_IDENTIFIER_PREFIX,
 )
 from fofproject.load import process_single_pdf
 
@@ -36,10 +38,9 @@ def _find_unprocessed_performance_artifacts(mappings: dict, output_dir: Path) ->
 
         # Check firm-level artifacts
         for art_id, art_info in firm_data.get("artifacts", {}).items():
-            if (
-                art_info.get("contains_monthly_net_performance_update")
-                and not art_info.get("processed")
-            ):
+            if art_info.get(
+                "contains_monthly_net_performance_update"
+            ) and not art_info.get("processed"):
                 file_name = art_info.get("file_name", "")
                 if not file_name.lower().endswith(".pdf"):
                     continue
@@ -49,21 +50,22 @@ def _find_unprocessed_performance_artifacts(mappings: dict, output_dir: Path) ->
                     output_dir, firm_name, None, file_name, art_id
                 )
                 if file_path and file_path.exists():
-                    results.append({
-                        "firm": firm_name,
-                        "fund": None,
-                        "artifact_id": art_id,
-                        "file_name": file_name,
-                        "file_path": file_path,
-                    })
+                    results.append(
+                        {
+                            "firm": firm_name,
+                            "fund": None,
+                            "artifact_id": art_id,
+                            "file_name": file_name,
+                            "file_path": file_path,
+                        }
+                    )
 
         # Check fund-level artifacts
         for fund_name, fund_data in firm_data.get("funds", {}).items():
             for art_id, art_info in fund_data.get("artifacts", {}).items():
-                if (
-                    art_info.get("contains_monthly_net_performance_update")
-                    and not art_info.get("processed")
-                ):
+                if art_info.get(
+                    "contains_monthly_net_performance_update"
+                ) and not art_info.get("processed"):
                     file_name = art_info.get("file_name", "")
                     if not file_name.lower().endswith(".pdf"):
                         continue
@@ -71,13 +73,15 @@ def _find_unprocessed_performance_artifacts(mappings: dict, output_dir: Path) ->
                         output_dir, firm_name, fund_name, file_name, art_id
                     )
                     if file_path and file_path.exists():
-                        results.append({
-                            "firm": firm_name,
-                            "fund": fund_name,
-                            "artifact_id": art_id,
-                            "file_name": file_name,
-                            "file_path": file_path,
-                        })
+                        results.append(
+                            {
+                                "firm": firm_name,
+                                "fund": fund_name,
+                                "artifact_id": art_id,
+                                "file_name": file_name,
+                                "file_path": file_path,
+                            }
+                        )
 
     return results
 
@@ -89,11 +93,7 @@ def _resolve_artifact_path(
     file_name: str,
     artifact_id: str,
 ) -> Path | None:
-    """Resolve the actual file path for an artifact on disk.
-
-    Artifacts are stored with the artifact_id embedded in the filename.
-    The folder on disk matches the firm name (or an alias).
-    """
+    """Find the PDF file on disk by scanning firm/fund folders for a filename containing the artifact_id."""
     # The artifact filename on disk includes the artifact_id suffix
     # e.g. "factsheet [abc123].pdf"
     # But file_name in the registry is the base name without the id.
@@ -132,17 +132,107 @@ def _resolve_artifact_path(
 
 
 def _mark_artifact_processed(
-    mappings: dict, firm_name: str, fund_name: str | None, artifact_id: str
+    mappings: dict,
+    firm_name: str,
+    fund_name: str | None,
+    artifact_id: str,
+    identifier: str = "",
+    artifact_path: Path | None = None,
 ):
-    """Mark an artifact as processed in the mappings."""
+    """Mark an artifact as processed and write back its computed identifier.
+
+    The identifier is stored on the artifact record immediately.  Promotion
+    to the fund level is deferred until *all* performance artifacts in the
+    fund have been processed (see ``_try_promote_fund_identifier``).
+    """
     canonical = mappings.get("canonical_names", {}).get(firm_name, {})
     if fund_name:
-        artifacts = canonical.get("funds", {}).get(fund_name, {}).get("artifacts", {})
+        fund_data = canonical.get("funds", {}).get(fund_name, {})
+        artifacts = fund_data.get("artifacts", {})
     else:
+        fund_data = None
         artifacts = canonical.get("artifacts", {})
 
-    if artifact_id in artifacts:
-        artifacts[artifact_id]["processed"] = True
+    if artifact_id not in artifacts:
+        return None, None
+
+    artifacts[artifact_id]["processed"] = True
+
+    # Write identifier back to the artifact record
+    if identifier:
+        artifacts[artifact_id]["identifier"] = identifier
+
+    # Only attempt promotion for fund-level artifacts
+    if fund_data is None:
+        return None, None
+
+    # Skip if the fund already has an identifier
+    if fund_data.get("identifier"):
+        return None, None
+
+    return _try_promote_fund_identifier(fund_data, artifacts, artifact_path)
+
+
+def _try_promote_fund_identifier(
+    fund_data: dict,
+    artifacts: dict,
+    artifact_path: Path | None,
+) -> tuple[Path | None, Path | None]:
+    """Promote an identifier to the fund level once all performance artifacts are processed.
+
+    Waits until every artifact flagged with ``contains_monthly_net_performance_update``
+    has been processed.  Then picks the most common identifier among them:
+
+    - Single winner  → promoted as the fund identifier, folder renamed.
+    - Tie (≥2 identifiers share the highest count) → folder renamed to
+      ``404 multiple identifier_{fund_name}`` so downstream consumers
+      (Notion upload, sync) skip it.
+    """
+    # Check if any performance artifact is still unprocessed
+    for art_info in artifacts.values():
+        if art_info.get("contains_monthly_net_performance_update") and not art_info.get(
+            "processed"
+        ):
+            return None, None  # still waiting
+
+    # Collect identifiers only from performance artifacts
+    id_counts: dict[str, int] = {}
+    for art_info in artifacts.values():
+        if not art_info.get("contains_monthly_net_performance_update"):
+            continue
+        aid = art_info.get("identifier")
+        if aid:
+            id_counts[aid] = id_counts.get(aid, 0) + 1
+
+    if not id_counts:
+        return None, None
+
+    # Find the most common identifier
+    max_count = max(id_counts.values())
+    winners = [ident for ident, cnt in id_counts.items() if cnt == max_count]
+
+    if artifact_path is None:
+        return None, None
+    fund_dir = artifact_path.parent
+    if not fund_dir.exists():
+        return None, None
+    base_name, _ = _parse_folder_identifier(fund_dir.name)
+
+    if len(winners) == 1:
+        # Clear winner — promote to fund level
+        chosen = winners[0]
+        fund_data["identifier"] = chosen
+        new_folder_name = f"{base_name} - {chosen}"
+    else:
+        # Tie — flag as conflict
+        fund_data["identifier"] = None
+        new_folder_name = f"{CONFLICT_IDENTIFIER_PREFIX}_{base_name}"
+
+    new_dir = fund_dir.parent / new_folder_name
+    if fund_dir != new_dir:
+        fund_dir.rename(new_dir)
+        return fund_dir, new_dir
+    return None, None
 
 
 def process_performance_updates(
@@ -184,7 +274,19 @@ def process_performance_updates(
         try:
             result = process_single_pdf(file_path, save=save)
             results.append(result)
-            _mark_artifact_processed(mappings, firm, item["fund"], art_id)
+            old_dir, new_dir = _mark_artifact_processed(
+                mappings,
+                firm,
+                item["fund"],
+                art_id,
+                identifier=result.get("identifier", ""),
+                artifact_path=item["file_path"],
+            )
+            # If the fund folder was renamed, update paths for remaining items
+            if old_dir is not None and new_dir is not None:
+                for other in unprocessed:
+                    if other["file_path"].parent == old_dir:
+                        other["file_path"] = new_dir / other["file_path"].name
             print(f"  -> {result.get('fund_name', 'UNKNOWN')} processed successfully.")
         except Exception as e:
             print(f"  ERROR processing {item['file_name']}: {e}")
@@ -194,3 +296,7 @@ def process_performance_updates(
     print(f"\nDone. Processed {len(results)} of {len(unprocessed)} artifact(s).")
 
     return results
+
+
+if __name__ == "__main__":
+    process_performance_updates()

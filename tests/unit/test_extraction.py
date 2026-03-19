@@ -140,7 +140,7 @@ class TestExtraction:
     @pytest.mark.parametrize("pdf_path,expected_path,fund_label", _CASES)
     def test_extraction(self, pdf_path, expected_path, fund_label):
         # Late import so collection doesn't fail if openai isn't installed
-        from fofproject.loadcopy import gpt_process_pdf
+        from fofproject.load import gpt_process_pdf
 
         with open(expected_path, "r", encoding="utf-8") as f:
             expected = json.load(f)

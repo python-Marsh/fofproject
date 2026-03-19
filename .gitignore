@@ -10,6 +10,7 @@ input/
 *.env
 RETURN DATA.csv
 MANUAL INPUTS.csv
+BENCHMARK.csv
 
 # Streamlit secrets (contains password and shared folder path)
 .streamlit/secrets.toml

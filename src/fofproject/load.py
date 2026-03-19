@@ -528,9 +528,21 @@ def _save_json_result(result, json_folder):
 
     If a file with the same identifier already exists, keep the one
     with the longer performance track record.
+    Skips saving if identifier/fund_name is missing or performance is empty.
     """
+    # Skip if no meaningful identifier or fund_name
+    identifier = result.get('identifier', result.get('fund_name', ''))
+    if not identifier or not identifier.strip():
+        print("Skipping JSON save: no identifier or fund_name found.")
+        return
+
+    # Skip if performance is empty or invalid
+    perf = result.get('performance', [])
+    if not (isinstance(perf, list) and perf and all(isinstance(item, dict) for item in perf)):
+        print(f"Skipping JSON save for {identifier}: no valid performance data.")
+        return
+
     os.makedirs(json_folder, exist_ok=True)
-    identifier = result.get('identifier', result.get('fund_name', 'unknown'))
     output_path = os.path.join(json_folder, f"{identifier}.json")
 
     if os.path.exists(output_path):

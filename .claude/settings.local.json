@@ -27,7 +27,14 @@
       "Bash(poetry add python-docx python-pptx)",
       "Bash(python3:*)",
       "Bash(grep -E \"\\\\.\\(json|txt\\)$\")",
-      "Bash(poetry install:*)"
+      "Bash(poetry install:*)",
+      "Bash(python -m venv /tmp/debug-venv)",
+      "Bash(source /tmp/debug-venv/bin/activate)",
+      "Bash(pip install:*)",
+      "Bash(python -m pytest /tmp/test_reconcile_stress.py -v --tb=short)"
+    ],
+    "additionalDirectories": [
+      "/tmp"
     ]
   }
 }
