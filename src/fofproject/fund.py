@@ -11,10 +11,7 @@ from matplotlib.font_manager import FontProperties
 from fofproject.utils import hex_to_rgba, parse_month
 from dateutil.relativedelta import relativedelta
 
-current_dir = Path(__file__).parent
-save_dir = current_dir.parent.parent / "output"
-if not save_dir.exists():
-    save_dir.mkdir(parents=True, exist_ok=True)
+from fofproject.paths import SAVE_DIR as save_dir
 
 # Use a font that is available in this container environment.
 MEASURE_FONT_FAMILY = "DejaVu Sans"

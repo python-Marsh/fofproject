@@ -42,5 +42,8 @@
   },
   "forwardPorts": [
     8888
+  ],
+  "mounts": [
+    "source=/mnt/z/Research Team/Database,target=/data,type=bind"
   ]
 }

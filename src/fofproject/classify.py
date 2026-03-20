@@ -18,6 +18,7 @@ import json
 import re
 import shutil
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from html import unescape
 from datetime import datetime
 from typing import Optional  # noqa: F401 - kept for potential future use
@@ -26,6 +27,8 @@ from pydantic import BaseModel
 from agents import Agent, Runner
 from agents.tool import WebSearchTool
 from urllib.parse import urlparse, urljoin, parse_qsl, urlencode
+from fofproject.log import log, CLASSIFY
+from fofproject.paths import DEFAULT_EMAIL_INPUT_DIR, DEFAULT_OUTPUT_DIR
 
 
 class WebSearchFirmResult(BaseModel):
@@ -41,11 +44,6 @@ load_dotenv(dotenv_path=env_path)
 # CONFIGURATION
 # =========================
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
-# Default paths (can be overridden) — resolved relative to project root
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-DEFAULT_EMAIL_INPUT_DIR = _PROJECT_ROOT / "output" / "testing" / "email"
-DEFAULT_OUTPUT_DIR = _PROJECT_ROOT / "output" / "testing" / "fund firm identifier"
 
 # File names for persistent data
 FIRM_MAPPINGS_FILE = "firm_fund_mappings.json"  # Human-editable mappings
@@ -1259,9 +1257,10 @@ def _web_search_firm_for_fund(
         )
         result = Runner.run_sync(agent, prompt)
         ws_result: WebSearchFirmResult = result.final_output
-        print(
-            f"Web search response for fund '{fund_name}': "
-            f"firm='{ws_result.firm_name}', confidence={ws_result.confidence}"
+        log.detail(
+            f"Web search for '{fund_name}': "
+            f"firm='{ws_result.firm_name}', confidence={ws_result.confidence}",
+            phase=CLASSIFY,
         )
 
         if not ws_result.firm_name or ws_result.firm_name.upper() == "UNKNOWN":
@@ -1279,7 +1278,7 @@ def _web_search_firm_for_fund(
             confidence=ws_result.confidence,
         )
     except Exception as e:
-        print(f"Web search for firm failed (fund='{fund_name}'): {e}")
+        log.warn(f"Web search for firm failed (fund='{fund_name}'): {e}", phase=CLASSIFY)
         return empty
 
 
@@ -1703,9 +1702,10 @@ def classify_email_with_gpt(
     filter_log = candidates.get("_link_filter_log", [])
 
     if filter_log:
-        print(
+        log.detail(
             f"  [pre-filter] {len(filter_log)} link(s) filtered before LLM: "
-            + ", ".join(f"{e['reason']}" for e in filter_log)
+            + ", ".join(f"{e['reason']}" for e in filter_log),
+            phase=CLASSIFY,
         )
 
     total_candidates = len(attachments) + len(links)
@@ -2032,7 +2032,7 @@ IMPORTANT: You received {len(attachments)} attachment candidate(s) and {len(link
             result["artifact_assignments"]["filter_log"] = filter_log
         return result
     except Exception as e:
-        print(f"GPT classification error: {e}")
+        log.error(f"GPT classification error: {e}", phase=CLASSIFY)
         result = _default_classification(reason=f"Classification error: {str(e)}")
         result["_error"] = True
         result["artifact_assignments"] = _make_empty_artifact_assignments(
@@ -2534,22 +2534,22 @@ def _classify_single_email(
                 override_detail,
             ),
         }
-        print(f"{progress_label} (override) {subject[:50]}...")
+        log.detail(f"{progress_label} (override) {subject[:50]}...", phase=CLASSIFY)
         return classification
 
     # Check report lookup (skip GPT for already-classified emails)
     if use_lookup and email_id in classification_lookup:
-        print(f"{progress_label} (cached) {subject[:50]}...")
+        log.detail(f"{progress_label} (cached) {subject[:50]}...", phase=CLASSIFY)
         return classification_lookup[email_id]
 
     # Classify with GPT
-    print(f"{progress_label} Classifying: {subject[:50]}...")
+    log.detail(f"{progress_label} Classifying: {subject[:50]}...", phase=CLASSIFY)
     classification = classify_email_with_gpt(
         client, metadata, existing_firms, firm_mappings
     )
 
     if classification.get("_error"):
-        print("    -> GPT error, will retry next run")
+        log.error(f"  GPT error for {subject[:40]}..., will retry next run", phase=CLASSIFY)
         return None
 
     classification_lookup[email_id] = classification
@@ -2704,10 +2704,9 @@ def classify_and_organize_emails(
     print(f"Output directory: {output_dir}")
     print("-" * 60)
 
-    for i, email_folder in enumerate(email_folders):
-        report["total_emails"] += 1
-
-        # Load email metadata
+    # --- Phase 1: Load metadata and classify emails (GPT calls in parallel) ---
+    email_data = []  # list of (email_folder, metadata, email_id, from_address, subject)
+    for email_folder in email_folders:
         metadata_path = email_folder / "metadata.json"
         try:
             with open(metadata_path, "r", encoding="utf-8") as f:
@@ -2716,14 +2715,20 @@ def classify_and_organize_emails(
             print(f"Error loading {email_folder.name}: {e}")
             report["errors"] += 1
             continue
-
         email_id = metadata.get("id", email_folder.name)
         subject = metadata.get("subject", "No Subject")
         from_address = (
             metadata.get("from", {}).get("emailAddress", {}).get("address", "")
         )
+        email_data.append((email_folder, metadata, email_id, from_address, subject))
 
-        classification = _classify_single_email(
+    # Classify emails concurrently (GPT I/O bound); overrides and cache hits
+    # are fast but still safe to run in the pool.
+    max_workers = min(8, len(email_data)) or 1
+    classifications = {}  # email_id -> classification dict
+
+    def _classify_task(idx, email_folder, metadata, email_id, from_address, subject):
+        return email_id, _classify_single_email(
             client,
             metadata,
             email_id,
@@ -2732,8 +2737,26 @@ def classify_and_organize_emails(
             firm_mappings,
             classification_lookup,
             use_lookup=True,
-            progress_label=f"[{i + 1}/{len(email_folders)}]",
+            progress_label=f"[{idx + 1}/{len(email_data)}]",
         )
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(
+                _classify_task, i, ef, md, eid, fa, subj
+            ): eid
+            for i, (ef, md, eid, fa, subj) in enumerate(email_data)
+        }
+        for future in as_completed(futures):
+            email_id, classification = future.result()
+            if classification is not None:
+                classifications[email_id] = classification
+
+    # --- Phase 2: Post-process serially (mutates firm_mappings) ---
+    for email_folder, metadata, email_id, from_address, subject in email_data:
+        report["total_emails"] += 1
+
+        classification = classifications.get(email_id)
         if classification is None:
             continue
 
@@ -2859,7 +2882,7 @@ def classify_new_emails(
     if not new_folders:
         return {"new_folders_found": 0, "classifications": []}
 
-    print(f"\nFound {len(new_folders)} new email folder(s) to classify")
+    log.info(f"Found {len(new_folders)} new email(s) to classify.", phase=CLASSIFY)
 
     # Process only the new folders
     # We'll do this by temporarily filtering what classify_and_organize_emails processes
@@ -2880,7 +2903,7 @@ def classify_new_emails(
             with open(metadata_path, "r", encoding="utf-8") as f:
                 metadata = json.load(f)
         except Exception as e:
-            print(f"Error loading {email_folder.name}: {e}")
+            log.error(f"Error loading {email_folder.name}: {e}", phase=CLASSIFY)
             continue
 
         email_id = metadata.get("id", email_folder.name)
@@ -2918,7 +2941,7 @@ def classify_new_emails(
 
         email_cls = classification.get("email_classification", {})
         if not email_cls.get("is_hedge_fund_related"):
-            print("    -> Skipped: Not hedge fund related")
+            log.detail(f"  Skipped: {subject[:40]}... (not hedge fund related)", phase=CLASSIFY)
 
         results.append(entry)
 
@@ -3211,24 +3234,20 @@ def sync_moved_artifacts(output_dir: Path = None, *, mappings: dict = None) -> d
     seen_funds = {}  # (canonical_firm, fund_name) -> True
     seen_artifacts = set()  # artifact_ids found on disk
 
+    # Build a reverse lookup: upper-cased name/alias -> canonical name (O(1) matching)
+    _alias_to_canonical: dict[str, str] = {}
+    for canon, info in canonical_names.items():
+        if info.get("_deleted_at"):
+            continue
+        _alias_to_canonical[canon.upper()] = canon
+        for alias in info.get("aliases", []):
+            _alias_to_canonical[alias.upper()] = canon
+
     # --- Pass 1: Walk disk state and reconcile with registry ---
     for firm_folder_name, firm_disk in disk_state["firms"].items():
-        matched_canonical = None
-
-        # Primary: match folder name against canonical names and aliases
+        # Primary: O(1) match folder name against canonical names and aliases
         folder_upper = firm_folder_name.upper()
-        for canon, info in canonical_names.items():
-            if info.get("_deleted_at"):
-                continue
-            if folder_upper == canon.upper():
-                matched_canonical = canon
-                break
-            for alias in info.get("aliases", []):
-                if folder_upper == alias.upper():
-                    matched_canonical = canon
-                    break
-            if matched_canonical:
-                break
+        matched_canonical = _alias_to_canonical.get(folder_upper)
 
         if not matched_canonical:
             # Fallback: match by contents (fund subfolders + artifact filenames)
@@ -3258,6 +3277,8 @@ def sync_moved_artifacts(output_dir: Path = None, *, mappings: dict = None) -> d
                 "artifacts": {},
             }
             registry_index["firm_folders"][new_canonical] = []
+            _alias_to_canonical[new_canonical] = new_canonical
+            _alias_to_canonical[firm_folder_name.upper()] = new_canonical
             matched_canonical = new_canonical
             result["new_folders"].append(
                 {
@@ -3285,6 +3306,11 @@ def sync_moved_artifacts(output_dir: Path = None, *, mappings: dict = None) -> d
             canonical_names[new_canonical_candidate] = canonical_names.pop(
                 matched_canonical
             )
+            # Update reverse alias lookup: point all old aliases to new canonical
+            for alias_key, canon_val in list(_alias_to_canonical.items()):
+                if canon_val == matched_canonical:
+                    _alias_to_canonical[alias_key] = new_canonical_candidate
+            _alias_to_canonical[new_canonical_candidate] = new_canonical_candidate
             # Update registry index
             registry_index["firm_folders"][new_canonical_candidate] = registry_index[
                 "firm_folders"
@@ -4227,6 +4253,14 @@ def reassign_firm(old_firm_name: str, new_firm_name: str, output_dir: Path = Non
             new_firm_key = key
             break
 
+    # Self-merge guard: if old and new resolve to the same canonical entry, no-op
+    if old_firm_key and new_firm_key and old_firm_key == new_firm_key:
+        print(
+            f"'{old_firm_name}' and '{new_firm_name}' resolve to the same firm "
+            f"'{old_firm_key}'. Nothing to do."
+        )
+        return
+
     # Collect all aliases from old firm (if exists)
     old_aliases = set()
     if old_firm_key:
@@ -4243,6 +4277,28 @@ def reassign_firm(old_firm_name: str, new_firm_name: str, output_dir: Path = Non
         canonical_names[new_firm_key]["aliases"] = list(combined_aliases)
 
         if old_firm_key:
+            old_entry = canonical_names[old_firm_key]
+
+            # Merge funds: carry over funds from old firm that don't exist in new
+            old_funds = old_entry.get("funds", {})
+            new_funds = canonical_names[new_firm_key].setdefault("funds", {})
+            for fund_name, fund_data in old_funds.items():
+                if fund_name not in new_funds:
+                    new_funds[fund_name] = fund_data
+                else:
+                    # Fund exists in both — merge artifacts
+                    existing_arts = new_funds[fund_name].setdefault("artifacts", {})
+                    for art_id, art_data in fund_data.get("artifacts", {}).items():
+                        if art_id not in existing_arts:
+                            existing_arts[art_id] = art_data
+
+            # Merge firm-level artifacts
+            old_artifacts = old_entry.get("artifacts", {})
+            new_artifacts = canonical_names[new_firm_key].setdefault("artifacts", {})
+            for art_id, art_data in old_artifacts.items():
+                if art_id not in new_artifacts:
+                    new_artifacts[art_id] = art_data
+
             del canonical_names[old_firm_key]
             print(f"Merged '{old_firm_key}' into existing firm '{new_firm_key}'")
         else:
@@ -4278,9 +4334,14 @@ def reassign_firm(old_firm_name: str, new_firm_name: str, output_dir: Path = Non
         new_firm_key = new_canonical
 
     # Add folder reassignment so future classifications redirect properly
-    mappings["folder_reassignments"][old_firm_name.upper()] = (
-        new_firm_key or new_firm_name.upper()
-    )
+    target = new_firm_key or new_firm_name.upper()
+    mappings["folder_reassignments"][old_firm_name.upper()] = target
+
+    # Flatten existing reassignment chains: if any entry pointed to old_firm,
+    # update it to point directly to the new target
+    for src, dst in list(mappings["folder_reassignments"].items()):
+        if dst == old_firm_name.upper() and src != old_firm_name.upper():
+            mappings["folder_reassignments"][src] = target
 
     save_firm_mappings(mappings, output_dir)
 

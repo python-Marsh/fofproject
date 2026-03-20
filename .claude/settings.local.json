@@ -42,7 +42,8 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\(''src/fofproject/classify.py''\\).read\\(\\)\\); print\\(''classify.py OK''\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\(''src/fofproject/performance.py''\\).read\\(\\)\\); print\\(''performance.py OK''\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\(''src/fofproject/classify.py'', encoding=''utf-8-sig''\\).read\\(\\)\\); print\\(''classify.py OK''\\)\")",
-      "Bash(python -c \"import ast; ast.parse\\(open\\(''src/fofproject/performance.py'', encoding=''utf-8-sig''\\).read\\(\\)\\); print\\(''performance.py OK''\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''src/fofproject/performance.py'', encoding=''utf-8-sig''\\).read\\(\\)\\); print\\(''performance.py OK''\\)\")",
+      "Bash(python /tmp/stress_test_reassign.py)"
     ],
     "additionalDirectories": [
       "/tmp"

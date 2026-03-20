@@ -9,10 +9,11 @@ and runs load.py's process_single_pdf on them.
 import json
 import shutil
 from pathlib import Path
+from fofproject.log import log, PERF, GRAPHS, METRICS
+from fofproject.paths import DEFAULT_OUTPUT_DIR
 from fofproject.classify import (
     load_firm_mappings,
     save_firm_mappings,
-    DEFAULT_OUTPUT_DIR,
     _parse_folder_identifier,
     CONFLICT_IDENTIFIER_PREFIX,
 )
@@ -419,10 +420,10 @@ def process_performance_updates(
     unprocessed = _find_unprocessed_performance_artifacts(mappings, output_dir)
 
     if not unprocessed:
-        print("No unprocessed performance updates found.")
+        log.detail("No unprocessed performance updates found.", phase=PERF)
         return []
 
-    print(f"Found {len(unprocessed)} unprocessed performance artifact(s).")
+    log.info(f"Found {len(unprocessed)} unprocessed performance artifact(s).", phase=PERF)
 
     results = []
     for item in unprocessed:
@@ -431,7 +432,7 @@ def process_performance_updates(
         fund = item["fund"] or "(firm-level)"
         art_id = item["artifact_id"]
 
-        print(f"\nProcessing: {item['file_name']} [{firm} / {fund}]")
+        log.detail(f"Processing: {item['file_name']} [{firm} / {fund}]", phase=PERF)
         try:
             result = process_single_pdf(file_path, save=save)
             results.append(result)
@@ -448,14 +449,14 @@ def process_performance_updates(
                 for other in unprocessed:
                     if other["file_path"].parent == old_dir:
                         other["file_path"] = new_dir / other["file_path"].name
-            print(f"  -> {result.get('fund_name', 'UNKNOWN')} processed successfully.")
+            log.detail(f"  {result.get('fund_name', 'UNKNOWN')} processed successfully.", phase=PERF)
         except Exception as e:
-            print(f"  ERROR processing {item['file_name']}: {e}")
+            log.error(f"  Failed: {item['file_name']}: {e}", phase=PERF)
 
     # Save updated mappings with processed flags (skip if caller owns the mappings object)
     if _owns_mappings:
         save_firm_mappings(mappings, output_dir)
-    print(f"\nDone. Processed {len(results)} of {len(unprocessed)} artifact(s).")
+    log.info(f"Processed {len(results)}/{len(unprocessed)} performance artifact(s).", phase=PERF)
 
     return results
 
@@ -479,7 +480,7 @@ def generate_fund_graphs(output_dir: Path = None, benchmark_fund=None, language=
     """
     output_dir = output_dir or DEFAULT_OUTPUT_DIR
     if not output_dir.exists():
-        print("Output directory does not exist.")
+        log.warn("Output directory does not exist.", phase=GRAPHS)
         return []
 
     original_save_dir = fund_module.save_dir
@@ -511,7 +512,7 @@ def generate_fund_graphs(output_dir: Path = None, benchmark_fund=None, language=
                 with open(json_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
             except Exception as e:
-                print(f"  Warning: could not load {json_file.name}: {e}")
+                log.warn(f"Could not load {json_file.name}: {e}", phase=GRAPHS)
                 continue
 
             # Auto-wire benchmarks if no explicit benchmark_fund provided
@@ -549,14 +550,14 @@ def generate_fund_graphs(output_dir: Path = None, benchmark_fund=None, language=
                             "graph_dir": str(graph_dir),
                         }
                     )
-                    print(f"  Exported graphs for {fund_name} -> {graph_dir}")
+                    log.detail(f"  Exported graphs for {fund_name}", phase=GRAPHS)
                 except Exception as e:
-                    print(f"  ERROR generating graphs for {fund_name}: {e}")
+                    log.error(f"  Failed graphs for {fund_name}: {e}", phase=GRAPHS)
 
     # Restore original save_dir
     fund_module.save_dir = original_save_dir
 
-    print(f"\nDone. Generated graphs for {len(results)} fund(s).")
+    log.info(f"Generated graphs for {len(results)} fund(s).", phase=GRAPHS)
     return results
 
 
@@ -576,7 +577,7 @@ def backfill_computed_metrics(output_dir: Path = None):
     """
     output_dir = output_dir or DEFAULT_OUTPUT_DIR
     if not output_dir.exists():
-        print("Output directory does not exist.")
+        log.warn("Output directory does not exist.", phase=METRICS)
         return []
 
     updated = []
@@ -607,7 +608,7 @@ def backfill_computed_metrics(output_dir: Path = None):
                 with open(json_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
             except Exception as e:
-                print(f"  Warning: could not load {json_file.name}: {e}")
+                log.warn(f"Could not load {json_file.name}: {e}", phase=METRICS)
                 continue
 
             funds = init_funds([data])
@@ -638,13 +639,13 @@ def backfill_computed_metrics(output_dir: Path = None):
                         "json_file": str(json_file),
                     }
                 )
-                print(
-                    f"  Updated {fund.name}: "
-                    f"return_pa={data.get('return_pa')}, "
-                    f"volatility_pa={data.get('volatility_pa')}"
+                log.detail(
+                    f"  {fund.name}: return_pa={data.get('return_pa')}, "
+                    f"volatility_pa={data.get('volatility_pa')}",
+                    phase=METRICS,
                 )
 
-    print(f"\nDone. Updated metrics for {len(updated)} fund(s).")
+    log.info(f"Updated metrics for {len(updated)} fund(s).", phase=METRICS)
     return updated
 
 

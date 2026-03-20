@@ -13,23 +13,7 @@ from typing import Optional
 import requests
 import msal
 
-# =========================
-# EMAIL STORAGE CONFIG
-# =========================
-# Use EMAIL_STORAGE_DIR env var if set, otherwise fall back to platform-appropriate default
-_storage_override = os.getenv("EMAIL_STORAGE_DIR")
-if _storage_override:
-    EMAIL_STORAGE_DIR = Path(_storage_override)
-elif os.name == "nt":
-    # Windows: use the Z: network drive
-    EMAIL_STORAGE_DIR = Path(r"Z:\Research Team\Artificial Intelligence\emails")
-else:
-    # Docker / Linux: use /data/emails if mounted (Synology), otherwise local output
-    _nas_path = Path("/data/emails")
-    if _nas_path.exists():
-        EMAIL_STORAGE_DIR = _nas_path
-    else:
-        EMAIL_STORAGE_DIR = Path(__file__).resolve().parent.parent.parent / "output" / "emails"
+from fofproject.paths import EMAIL_STORAGE_DIR
 
 # =========================
 # CONFIG (fill in from .env)
@@ -643,6 +627,10 @@ def monitor_emails(token_func, base_dir: Path = None, poll_interval: int = 60,
     """
     Continuously monitor for new emails and download them.
 
+    Uses a receivedDateTime filter so that email bursts larger than a single
+    page are never missed, and keeps downloaded IDs in memory to avoid
+    re-reading the full index.json every cycle.
+
     Args:
         token_func: Callable that returns a valid access token (handles refresh)
         base_dir: Directory to save emails (default: EMAIL_STORAGE_DIR)
@@ -654,6 +642,11 @@ def monitor_emails(token_func, base_dir: Path = None, poll_interval: int = 60,
 
     start_time = time.time()
     total_downloaded = 0
+
+    # Load downloaded IDs once, then maintain in memory
+    downloaded_ids = get_downloaded_ids(base_dir)
+    # Track the high-water mark so we only ask for emails newer than this
+    last_check_time = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
     print(f"Starting email monitor. Checking every {poll_interval} seconds.", flush=True)
     print(f"Saving to: {base_dir}", flush=True)
@@ -674,30 +667,39 @@ def monitor_emails(token_func, base_dir: Path = None, poll_interval: int = 60,
                 time.sleep(poll_interval)
                 continue
 
-            downloaded_ids = get_downloaded_ids(base_dir)
             headers = {"Authorization": f"Bearer {token}"}
+            cycle_check_time = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
-            # Check for new emails (most recent 20)
+            # Use receivedDateTime filter so bursts of >1 page are fully captured
+            url = f"{GRAPH}/me/mailFolders/Inbox/messages"
             params = {
-                "$top": 20,
+                "$top": 50,
                 "$select": "id,subject,from,receivedDateTime,hasAttachments",
                 "$orderby": "receivedDateTime desc",
+                "$filter": f"receivedDateTime ge {last_check_time}",
             }
 
             try:
-                r = requests.get(f"{GRAPH}/me/mailFolders/Inbox/messages",
-                                headers=headers, params=params, timeout=30)
+                new_emails = []
+                # Paginate through all emails received since last_check_time
+                while url:
+                    r = requests.get(url, headers=headers, params=params, timeout=30)
 
-                # Handle token expiration specifically
-                if r.status_code == 401:
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Token expired, will refresh on next cycle.", flush=True)
-                    time.sleep(poll_interval)
-                    continue
+                    # Handle token expiration specifically
+                    if r.status_code == 401:
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] Token expired, will refresh on next cycle.", flush=True)
+                        break
 
-                r.raise_for_status()
-                messages = r.json().get("value", [])
+                    r.raise_for_status()
+                    data = r.json()
+                    messages = data.get("value", [])
 
-                new_emails = [m for m in messages if m["id"] not in downloaded_ids]
+                    for m in messages:
+                        if m["id"] not in downloaded_ids:
+                            new_emails.append(m)
+
+                    url = data.get("@odata.nextLink")
+                    params = {}  # nextLink already contains query params
 
                 if new_emails:
                     print(f"[{datetime.now().strftime('%H:%M:%S')}] Found {len(new_emails)} new email(s)",
@@ -711,6 +713,8 @@ def monitor_emails(token_func, base_dir: Path = None, poll_interval: int = 60,
                                 metadata = json.load(f)
                             update_index(base_dir, email_folder, metadata)
 
+                            # Keep in-memory set current
+                            downloaded_ids.add(msg["id"])
                             total_downloaded += 1
                             att_count = len(metadata.get("attachments", []))
                             print(f"  New email: {msg.get('subject', '')[:50]} [{att_count} att]",
@@ -720,6 +724,9 @@ def monitor_emails(token_func, base_dir: Path = None, poll_interval: int = 60,
                             print(f"  ERROR: {e}", flush=True)
                 else:
                     print(f"[{datetime.now().strftime('%H:%M:%S')}] No new emails.", flush=True)
+
+                # Advance the high-water mark after a successful cycle
+                last_check_time = cycle_check_time
 
             except requests.exceptions.RequestException as e:
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] API error: {e}", flush=True)

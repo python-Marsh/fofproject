@@ -8,13 +8,16 @@ classify.py and performance.py.
 """
 
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
 
+from fofproject.log import log, set_verbose, CLASSIFY, RECONCILE, SYNC, MONITOR, NOTION, EMAIL
+from fofproject.paths import DEFAULT_EMAIL_INPUT_DIR, DEFAULT_OUTPUT_DIR, EMAIL_STORAGE_DIR
+from fofproject.notion import watch_folder
+from fofproject.connection import monitor_emails, create_token_provider
 from fofproject.classify import (
-    DEFAULT_EMAIL_INPUT_DIR,
-    DEFAULT_OUTPUT_DIR,
     classify_and_organize_emails,
     classify_new_emails,
     load_firm_mappings,
@@ -36,12 +39,70 @@ from fofproject.performance import (
 )
 
 
+# ── Helpers ──────────────────────────────────────────────
+
+def _banner(email_input_dir, output_dir, poll_interval, run_once):
+    w = 60
+    print()
+    print("=" * w)
+    print("  FOF MONITOR")
+    print("=" * w)
+    print(f"  Email DL:  {EMAIL_STORAGE_DIR}")
+    print(f"  Emails:    {email_input_dir}")
+    print(f"  Output:    {output_dir}")
+    print(f"  Interval:  {poll_interval}s" + ("  (single run)" if run_once else ""))
+    if not run_once:
+        print("  Ctrl+C to stop")
+    print("=" * w)
+    print()
+
+
+def _cycle_header(cycle_num):
+    ts = datetime.now().strftime("%H:%M:%S")
+    label = f" Cycle #{cycle_num} "
+    w = 60
+    side = (w - len(label) - len(ts) - 4) // 2
+    print(f"\n{'─' * side}{label}{'─' * side}  {ts}")
+
+
+def _cycle_idle():
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"  {ts}   No changes detected.", end="\r")
+
+
+def _section(phase, summary):
+    """Print a phase summary header only when there's something to report."""
+    log.info(summary, phase=phase)
+
+
+def _run_notion_watcher(output_dir: Path):
+    """Run Notion folder watcher in a background thread."""
+    try:
+        log.info("Starting Notion folder watcher...", phase=NOTION)
+        watch_folder(output_dir)
+    except Exception as e:
+        log.error(f"Notion watcher crashed: {e}", phase=NOTION)
+
+
+def _run_email_monitor(poll_interval: int):
+    """Run email monitor in a background thread."""
+    try:
+        log.info("Starting email monitor...", phase=EMAIL)
+        token_func = create_token_provider()
+        monitor_emails(token_func, base_dir=EMAIL_STORAGE_DIR, poll_interval=poll_interval)
+    except Exception as e:
+        log.error(f"Email monitor crashed: {e}", phase=EMAIL)
+
+
+# ── Main loop ────────────────────────────────────────────
+
 def monitoring(
     email_input_dir: Path = None,
     output_dir: Path = None,
     poll_interval: int = 30,
     run_once: bool = False,
     interactive: bool = False,
+    verbose: bool = False,
 ):
     """
     Combined monitor: classify new emails, process performance updates,
@@ -50,156 +111,143 @@ def monitoring(
 
     Args:
         interactive: If True, show the interactive menu before starting.
+        verbose:     If True, show detailed sub-function output (DEBUG level).
     """
     if interactive:
         return _interactive_menu()
 
+    if verbose:
+        set_verbose(True)
+
     email_input_dir = email_input_dir or DEFAULT_EMAIL_INPUT_DIR
     output_dir = output_dir or DEFAULT_OUTPUT_DIR
 
-    print("=" * 60)
-    print("EMAIL + ARTIFACT MOVE MONITOR + PERFORMANCE UPDATES + RECONCILIATION")
-    print("=" * 60)
-    print(f"Emails:     {email_input_dir}")
-    print(f"Output:     {output_dir}")
-    print(f"Poll interval: {poll_interval} seconds")
-    if not run_once:
-        print("Press Ctrl+C to stop monitoring")
-    print("-" * 60)
+    _banner(email_input_dir, output_dir, poll_interval, run_once)
+
+    # ── Start Notion folder watcher in background ─────────
+    notion_thread = threading.Thread(
+        target=_run_notion_watcher, args=(output_dir,), daemon=True
+    )
+    notion_thread.start()
+
+    # ── Start email monitor in background ─────────────────
+    email_thread = threading.Thread(
+        target=_run_email_monitor, args=(poll_interval,), daemon=True
+    )
+    email_thread.start()
 
     classify_result = None
+    cycle = 0
     try:
         while True:
+            cycle += 1
+            had_activity = False
+
+            if not run_once or cycle == 1:
+                _cycle_header(cycle)
+
             # Load mappings once per iteration; all sub-functions share
             # the same object and the single save happens at the end.
             mappings = load_firm_mappings(output_dir)
 
-            # 1. Classify new emails
+            # ── 1. Classify new emails ───────────────────────
             classify_result = classify_new_emails(
                 email_input_dir, output_dir, mappings=mappings
             )
 
             if classify_result["new_folders_found"] > 0:
-                print(
-                    f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                    f"Processed {classify_result['new_folders_found']} new email(s)"
-                )
+                had_activity = True
+                _section(CLASSIFY, f"Classified {classify_result['new_folders_found']} new email(s)")
                 for item in classify_result["classifications"]:
                     firm = item.get("firm")
                     if firm:
-                        print(f"  + {item['subject'][:40]}... -> {firm}")
+                        log.info(f"  + {item['subject'][:45]}  ->  {firm}", phase=CLASSIFY)
                     else:
-                        print(
-                            f"  - {item['subject'][:40]}... ({item.get('reason', 'skipped')})"
+                        log.info(
+                            f"  - {item['subject'][:45]}  ({item.get('reason', 'skipped')})",
+                            phase=CLASSIFY,
                         )
 
-            # 2. Process performance updates, generate graphs, backfill metrics
+            # ── 2. Process performance updates ───────────────
             perf_results = process_performance_updates(output_dir, mappings=mappings)
 
             if perf_results:
-                print(
-                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                    f"Processed {len(perf_results)} performance update(s)"
-                )
+                had_activity = True
                 generate_fund_graphs(output_dir)
                 backfill_computed_metrics(output_dir)
 
-            # 3. Reconcile misplaced artifacts by identifier matching
+            # ── 3. Reconcile misplaced artifacts ─────────────
             reconcile_result = reconcile_misplaced_artifacts(
                 output_dir, mappings=mappings
             )
 
             if reconcile_result["relocated"]:
-                print(
-                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                    f"Relocated {len(reconcile_result['relocated'])} misplaced artifact(s)"
-                )
+                had_activity = True
+                _section(RECONCILE, f"Relocated {len(reconcile_result['relocated'])} misplaced artifact(s)")
                 for r in reconcile_result["relocated"]:
-                    print(
+                    log.info(
                         f"  >> {r['file_name']} [{r['artifact_id']}]"
-                        f" : {r['from']} -> {r['to']}"
+                        f"  {r['from']} -> {r['to']}",
+                        phase=RECONCILE,
                     )
-            if reconcile_result["errors"]:
-                for err in reconcile_result["errors"]:
-                    print(f"  ERROR (reconcile): {err}")
+            for err in reconcile_result.get("errors", []):
+                log.error(f"  {err}", phase=RECONCILE)
 
-            # 4. Sync manually moved artifacts
+            # ── 4. Sync manually moved artifacts ─────────────
             move_result = sync_moved_artifacts(output_dir, mappings=mappings)
 
             # Single save for all mutations this iteration
             save_firm_mappings(mappings, output_dir)
 
             if move_result["moved"]:
-                print(
-                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                    f"Synced {len(move_result['moved'])} moved artifact(s)"
-                )
+                had_activity = True
+                _section(SYNC, f"Synced {len(move_result['moved'])} moved artifact(s)")
                 for m in move_result["moved"]:
-                    print(
+                    log.info(
                         f"  ~ {m.get('old_file', '?')} [{m.get('artifact_id', '')}]"
-                        f" : {m.get('from', '?')} -> {m.get('to', '?')}"
+                        f"  {m.get('from', '?')} -> {m.get('to', '?')}",
+                        phase=SYNC,
                     )
 
             if move_result.get("new_folders"):
-                print(
-                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                    f"Registered {len(move_result['new_folders'])} new folder(s)"
-                )
+                had_activity = True
+                _section(SYNC, f"Registered {len(move_result['new_folders'])} new folder(s)")
                 for nf in move_result["new_folders"]:
-                    print(f"  + {nf['folder']} -> {nf['firm']}")
+                    log.info(f"  + {nf['folder']}  ->  {nf['firm']}", phase=SYNC)
 
             if move_result.get("new_artifacts"):
-                print(
-                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                    f"Tagged {len(move_result['new_artifacts'])} new artifact(s)"
-                )
+                had_activity = True
+                _section(SYNC, f"Tagged {len(move_result['new_artifacts'])} new artifact(s)")
                 for na in move_result["new_artifacts"]:
                     loc = na["firm"] + (f"/{na['fund']}" if na.get("fund") else "")
-                    print(f"  + {na['file_name']} [{na['artifact_id']}] -> {loc}")
+                    log.info(f"  + {na['file_name']} [{na['artifact_id']}]  ->  {loc}", phase=SYNC)
 
             if move_result.get("removed_folders"):
-                print(
-                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                    f"Soft-deleted {len(move_result['removed_folders'])} folder(s)"
-                )
+                had_activity = True
+                _section(SYNC, f"Soft-deleted {len(move_result['removed_folders'])} folder(s)")
                 for rf in move_result["removed_folders"]:
-                    print(f"  - {rf['folder']} ({rf['type']} under {rf['firm']})")
+                    log.info(f"  - {rf['folder']} ({rf['type']} under {rf['firm']})", phase=SYNC)
 
             if move_result.get("deleted_artifacts"):
-                print(
-                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                    f"Soft-deleted {len(move_result['deleted_artifacts'])} artifact(s)"
-                )
+                had_activity = True
+                _section(SYNC, f"Soft-deleted {len(move_result['deleted_artifacts'])} artifact(s)")
                 for da in move_result["deleted_artifacts"]:
-                    print(f"  - {da['file_name']} [{da['artifact_id']}]")
+                    log.info(f"  - {da['file_name']} [{da['artifact_id']}]", phase=SYNC)
 
-            if move_result["errors"]:
-                for err in move_result["errors"]:
-                    print(f"  ERROR: {err}")
+            for err in move_result.get("errors", []):
+                log.error(f"  {err}", phase=SYNC)
 
-            if (
-                not classify_result["new_folders_found"]
-                and not perf_results
-                and not move_result["moved"]
-                and not move_result.get("new_folders")
-                and not move_result.get("new_artifacts")
-                and not move_result.get("removed_folders")
-                and not move_result.get("deleted_artifacts")
-                and not reconcile_result["relocated"]
-            ):
-                print(
-                    f"[{datetime.now().strftime('%H:%M:%S')}] No new emails or moves",
-                    end="\r",
-                )
+            if not had_activity:
+                _cycle_idle()
 
             if run_once:
-                print("\nSingle check completed.")
+                log.info("Single check completed.", phase=MONITOR)
                 break
 
             time.sleep(poll_interval)
 
     except KeyboardInterrupt:
-        print("\n\nMonitoring stopped by user.")
+        print("\n\n  Monitoring stopped.\n")
 
     return classify_result if run_once else None
 
@@ -264,7 +312,8 @@ def _interactive_menu():
     elif mode == "8":
         interval = input("Poll interval in seconds (default 30): ").strip()
         interval = int(interval) if interval.isdigit() else 30
-        monitoring(poll_interval=interval, run_once=False)
+        verbose = input("Verbose output? (y/N): ").strip().lower() == "y"
+        monitoring(poll_interval=interval, run_once=False, verbose=verbose)
     elif mode == "9":
         manage_aliases()
     else:
@@ -272,4 +321,5 @@ def _interactive_menu():
 
 
 if __name__ == "__main__":
-    monitoring(interactive=False)
+    verbose_flag = "--verbose" in sys.argv or "-v" in sys.argv
+    monitoring(interactive=False, verbose=verbose_flag)

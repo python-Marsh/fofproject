@@ -35,6 +35,7 @@ import time
 import mimetypes
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 from watchdog.observers import Observer
@@ -45,6 +46,7 @@ from fofproject.classify import (
     FIRM_MAPPINGS_FILE,
     _parse_artifact_id_from_filename,
 )
+from fofproject.paths import DEFAULT_WATCH_FOLDER
 
 # Load .env from the same directory as this script
 env_path = Path(__file__).parent / ".env"
@@ -56,10 +58,6 @@ load_dotenv(dotenv_path=env_path)
 NOTION_SECRET = os.getenv("NOTION_SECRET")
 NOTION_VERSION = "2025-09-03"
 BASE_URL = "https://api.notion.com/v1"
-
-# Default watch folder — same as classify.py's output directory
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-DEFAULT_WATCH_FOLDER = _PROJECT_ROOT / "output" / "testing" / "fund firm identifier"
 
 # Fund subfolder pattern: "{FUND_NAME} - {IDENTIFIER}"
 FUND_FOLDER_PATTERN = re.compile(r"^(.+?)\s*-\s*(\d+)$")
@@ -1542,19 +1540,97 @@ def upload_json_folder_to_fund(fund_page_id: str, fund_path: Path):
 # =========================
 
 
+# Page-ID cache TTL (seconds). Lookups within this window return cached results.
+_PAGE_CACHE_TTL = 60
+
+
+class _PageIdCache:
+    """Thread-safe TTL cache for Notion page-ID lookups."""
+
+    def __init__(self, ttl: int = _PAGE_CACHE_TTL):
+        self._ttl = ttl
+        self._lock = threading.Lock()
+        self._store: dict[tuple[str, str, str], tuple[dict | None, float]] = {}
+
+    def get(self, db_id: str, title: str, title_prop: str) -> dict | None:
+        key = (db_id, title, title_prop)
+        with self._lock:
+            entry = self._store.get(key)
+            if entry and (time.time() - entry[1]) < self._ttl:
+                return entry[0]
+        # Cache miss — query Notion
+        result = _query_database_by_title(db_id, title, title_prop)
+        with self._lock:
+            self._store[key] = (result, time.time())
+        return result
+
+    def invalidate(self, db_id: str, title: str, title_prop: str):
+        with self._lock:
+            self._store.pop((db_id, title, title_prop), None)
+
+
 class NotionFolderHandler(FileSystemEventHandler):
-    """Watches for new firm/fund folders and files, syncs to Notion."""
+    """Watches for new firm/fund folders and files, syncs to Notion.
+
+    Scalability features:
+    - Bounded ThreadPoolExecutor (max 4 workers) prevents thread explosion
+    - TTL page-ID cache avoids redundant Notion API lookups
+    - Debounce timer coalesces rapid file events into batched operations
+    """
+
+    # Debounce window (seconds): events for the same parent are coalesced
+    _DEBOUNCE_SECONDS = 2.0
 
     def __init__(self, watch_folder: Path, firm_db_id: str, fund_db_id: str):
         super().__init__()
         self.watch_folder = watch_folder
         self.firm_db_id = firm_db_id
         self.fund_db_id = fund_db_id
+        self._pool = ThreadPoolExecutor(max_workers=4)
+        self._page_cache = _PageIdCache()
+        # Debounce state: parent_path -> threading.Timer
+        self._debounce_timers: dict[str, threading.Timer] = {}
+        self._debounce_lock = threading.Lock()
+        # Pending file events accumulated during debounce window
+        self._pending_files: dict[str, list[Path]] = {}
+
+    def shutdown(self):
+        """Cancel pending timers and shut down the thread pool."""
+        with self._debounce_lock:
+            for timer in self._debounce_timers.values():
+                timer.cancel()
+            self._debounce_timers.clear()
+        self._pool.shutdown(wait=False)
+
+    def _submit(self, fn, *args):
+        """Submit work to the bounded thread pool."""
+        self._pool.submit(fn, *args)
+
+    def _lookup_firm(self, firm_name: str) -> dict | None:
+        return self._page_cache.get(self.firm_db_id, firm_name, FIRM_TITLE_PROP)
+
+    def _lookup_fund(self, fund_name: str) -> dict | None:
+        return self._page_cache.get(self.fund_db_id, fund_name, FUND_TITLE_PROP)
 
     def on_created(self, event):
         if not event.is_directory:
-            # A new file was added — figure out where it belongs
-            self._handle_new_file(Path(event.src_path))
+            # Debounce file events — accumulate and flush after a short window
+            file_path = Path(event.src_path)
+            parent_key = str(file_path.parent)
+            with self._debounce_lock:
+                self._pending_files.setdefault(parent_key, []).append(file_path)
+                # Reset the debounce timer for this parent
+                existing = self._debounce_timers.get(parent_key)
+                if existing:
+                    existing.cancel()
+                timer = threading.Timer(
+                    self._DEBOUNCE_SECONDS,
+                    self._flush_pending_files,
+                    args=(parent_key,),
+                )
+                timer.daemon = True
+                self._debounce_timers[parent_key] = timer
+                timer.start()
             return
 
         new_path = Path(event.src_path)
@@ -1563,11 +1639,7 @@ class NotionFolderHandler(FileSystemEventHandler):
         if parent == self.watch_folder:
             # New firm folder created
             log.info("New firm folder detected: %s", new_path.name)
-            threading.Thread(
-                target=sync_firm,
-                args=(new_path, self.firm_db_id, self.fund_db_id),
-                daemon=True,
-            ).start()
+            self._submit(sync_firm, new_path, self.firm_db_id, self.fund_db_id)
         elif parent.parent == self.watch_folder:
             # New fund folder inside an existing firm
             if new_path.name.startswith(CONFLICT_IDENTIFIER_PREFIX):
@@ -1580,19 +1652,11 @@ class NotionFolderHandler(FileSystemEventHandler):
             if parsed:
                 log.info("New fund folder detected: %s", new_path.name)
                 firm_name = parent.name
-                existing_firm = _query_database_by_title(
-                    self.firm_db_id, firm_name, FIRM_TITLE_PROP
-                )
+                existing_firm = self._lookup_firm(firm_name)
                 if existing_firm:
-                    threading.Thread(
-                        target=sync_fund,
-                        args=(
-                            new_path,
-                            self.fund_db_id,
-                            existing_firm["id"],
-                        ),
-                        daemon=True,
-                    ).start()
+                    self._submit(
+                        sync_fund, new_path, self.fund_db_id, existing_firm["id"]
+                    )
                 else:
                     log.warning(
                         "Fund folder '%s' appeared but firm '%s' not found "
@@ -1600,11 +1664,17 @@ class NotionFolderHandler(FileSystemEventHandler):
                         new_path.name,
                         firm_name,
                     )
-                    threading.Thread(
-                        target=sync_firm,
-                        args=(parent, self.firm_db_id, self.fund_db_id),
-                        daemon=True,
-                    ).start()
+                    self._submit(
+                        sync_firm, parent, self.firm_db_id, self.fund_db_id
+                    )
+
+    def _flush_pending_files(self, parent_key: str):
+        """Flush accumulated file events for a single parent directory."""
+        with self._debounce_lock:
+            files = self._pending_files.pop(parent_key, [])
+            self._debounce_timers.pop(parent_key, None)
+        for file_path in files:
+            self._handle_new_file(file_path)
 
     def _handle_new_file(self, file_path: Path):
         """Handle a new file added to an existing firm or fund folder."""
@@ -1616,20 +1686,18 @@ class NotionFolderHandler(FileSystemEventHandler):
             firm_folder = fund_folder.parent
             if firm_folder.parent == self.watch_folder:
                 fund_name = _resolve_fund_name(fund_folder.name)
-                existing_fund = _query_database_by_title(
-                    self.fund_db_id, fund_name, FUND_TITLE_PROP
-                )
+                existing_fund = self._lookup_fund(fund_name)
                 if existing_fund:
                     log.info(
                         "New graph file in fund '%s': %s",
                         fund_name,
                         file_path.name,
                     )
-                    threading.Thread(
-                        target=self._upload_graph_file_to_section,
-                        args=(existing_fund["id"], file_path),
-                        daemon=True,
-                    ).start()
+                    self._submit(
+                        self._upload_graph_file_to_section,
+                        existing_fund["id"],
+                        file_path,
+                    )
             return
 
         # Handle files in json/ subfolder — upload properties to fund page
@@ -1638,20 +1706,14 @@ class NotionFolderHandler(FileSystemEventHandler):
             firm_folder = fund_folder.parent
             if firm_folder.parent == self.watch_folder:
                 fund_name = _resolve_fund_name(fund_folder.name)
-                existing_fund = _query_database_by_title(
-                    self.fund_db_id, fund_name, FUND_TITLE_PROP
-                )
+                existing_fund = self._lookup_fund(fund_name)
                 if existing_fund:
                     log.info(
                         "New JSON file in fund '%s': %s",
                         fund_name,
                         file_path.name,
                     )
-                    threading.Thread(
-                        target=upload_json_to_fund_page,
-                        args=(existing_fund["id"], file_path),
-                        daemon=True,
-                    ).start()
+                    self._submit(upload_json_to_fund_page, existing_fund["id"], file_path)
             return
 
         # Skip files inside other managed subfolders (meetings/, researches/)
@@ -1668,39 +1730,33 @@ class NotionFolderHandler(FileSystemEventHandler):
         # File in a fund folder
         if grandparent.parent == self.watch_folder:
             fund_name = _resolve_fund_name(parent.name)
-            existing_fund = _query_database_by_title(
-                self.fund_db_id, fund_name, FUND_TITLE_PROP
-            )
+            existing_fund = self._lookup_fund(fund_name)
             if existing_fund:
                 log.info(
                     "New file in fund '%s': %s",
                     fund_name,
                     file_path.name,
                 )
-                threading.Thread(
-                    target=self._upload_fund_file_to_section,
-                    args=(existing_fund["id"], file_path),
-                    daemon=True,
-                ).start()
+                self._submit(
+                    self._upload_fund_file_to_section,
+                    existing_fund["id"],
+                    file_path,
+                )
                 return
 
         # File in a firm folder (direct child)
         if parent.parent == self.watch_folder:
             firm_name = parent.name
-            existing_firm = _query_database_by_title(
-                self.firm_db_id, firm_name, FIRM_TITLE_PROP
-            )
+            existing_firm = self._lookup_firm(firm_name)
             if existing_firm:
                 log.info(
                     "New file in firm '%s': %s",
                     firm_name,
                     file_path.name,
                 )
-                threading.Thread(
-                    target=_upload_firm_files_to_property,
-                    args=(existing_firm["id"], [file_path]),
-                    daemon=True,
-                ).start()
+                self._submit(
+                    _upload_firm_files_to_property, existing_firm["id"], [file_path]
+                )
 
     def _upload_fund_file_to_section(self, fund_page_id: str, file_path: Path):
         """Upload a single fund file into the correct Data Packs section."""
@@ -1750,19 +1806,13 @@ class NotionFolderHandler(FileSystemEventHandler):
             return
 
         fund_name = _resolve_fund_name(fund_folder.name)
-        existing_fund = _query_database_by_title(
-            self.fund_db_id, fund_name, FUND_TITLE_PROP
-        )
+        existing_fund = self._lookup_fund(fund_name)
         if existing_fund:
             log.info(
                 "JSON file modified in fund '%s': %s",
                 fund_name, file_path.name,
             )
-            threading.Thread(
-                target=upload_json_to_fund_page,
-                args=(existing_fund["id"], file_path),
-                daemon=True,
-            ).start()
+            self._submit(upload_json_to_fund_page, existing_fund["id"], file_path)
 
     def on_deleted(self, event):
         """Handle file or folder deletion — remove corresponding content from Notion."""
@@ -1787,39 +1837,29 @@ class NotionFolderHandler(FileSystemEventHandler):
         # File deleted from a fund folder
         if grandparent.parent == self.watch_folder:
             fund_name = _resolve_fund_name(parent.name)
-            existing_fund = _query_database_by_title(
-                self.fund_db_id, fund_name, FUND_TITLE_PROP
-            )
+            existing_fund = self._lookup_fund(fund_name)
             if existing_fund:
                 log.info(
                     "File deleted from fund '%s': %s",
                     fund_name,
                     filename,
                 )
-                threading.Thread(
-                    target=_remove_file_from_page,
-                    args=(existing_fund["id"], filename),
-                    daemon=True,
-                ).start()
+                self._submit(_remove_file_from_page, existing_fund["id"], filename)
             return
 
         # File deleted from a firm folder
         if parent.parent == self.watch_folder:
             firm_name = parent.name
-            existing_firm = _query_database_by_title(
-                self.firm_db_id, firm_name, FIRM_TITLE_PROP
-            )
+            existing_firm = self._lookup_firm(firm_name)
             if existing_firm:
                 log.info(
                     "File deleted from firm '%s': %s",
                     firm_name,
                     filename,
                 )
-                threading.Thread(
-                    target=_remove_file_from_firm_property,
-                    args=(existing_firm["id"], filename),
-                    daemon=True,
-                ).start()
+                self._submit(
+                    _remove_file_from_firm_property, existing_firm["id"], filename
+                )
 
     def _handle_folder_deleted(self, deleted_path: Path):
         """Handle a folder being deleted — archive the corresponding Notion page."""
@@ -1828,31 +1868,25 @@ class NotionFolderHandler(FileSystemEventHandler):
         # Fund folder deleted (child of a firm folder)
         if parent.parent == self.watch_folder:
             fund_name = _resolve_fund_name(deleted_path.name)
-            existing_fund = _query_database_by_title(
-                self.fund_db_id, fund_name, FUND_TITLE_PROP
-            )
+            existing_fund = self._lookup_fund(fund_name)
             if existing_fund:
                 log.info("Fund folder deleted: '%s' — archiving Notion page", deleted_path.name)
-                threading.Thread(
-                    target=_archive_page,
-                    args=(existing_fund["id"],),
-                    daemon=True,
-                ).start()
+                self._submit(_archive_page, existing_fund["id"])
+                self._page_cache.invalidate(
+                    self.fund_db_id, fund_name, FUND_TITLE_PROP
+                )
             return
 
         # Firm folder deleted (direct child of watch folder)
         if parent == self.watch_folder:
             firm_name = deleted_path.name
-            existing_firm = _query_database_by_title(
-                self.firm_db_id, firm_name, FIRM_TITLE_PROP
-            )
+            existing_firm = self._lookup_firm(firm_name)
             if existing_firm:
                 log.info("Firm folder deleted: '%s' — archiving Notion page", firm_name)
-                threading.Thread(
-                    target=_archive_page,
-                    args=(existing_firm["id"],),
-                    daemon=True,
-                ).start()
+                self._submit(_archive_page, existing_firm["id"])
+                self._page_cache.invalidate(
+                    self.firm_db_id, firm_name, FIRM_TITLE_PROP
+                )
 
     def on_moved(self, event):
         """Handle file or folder rename/move — update Notion accordingly."""
@@ -1872,16 +1906,15 @@ class NotionFolderHandler(FileSystemEventHandler):
         if parent == self.watch_folder:
             old_name = old_path.name
             new_name = new_path.name
-            existing_firm = _query_database_by_title(
-                self.firm_db_id, old_name, FIRM_TITLE_PROP
-            )
+            existing_firm = self._lookup_firm(old_name)
             if existing_firm:
                 log.info("Firm folder renamed: '%s' -> '%s'", old_name, new_name)
-                threading.Thread(
-                    target=_rename_page_title,
-                    args=(existing_firm["id"], new_name, FIRM_TITLE_PROP),
-                    daemon=True,
-                ).start()
+                self._submit(
+                    _rename_page_title, existing_firm["id"], new_name, FIRM_TITLE_PROP
+                )
+                self._page_cache.invalidate(
+                    self.firm_db_id, old_name, FIRM_TITLE_PROP
+                )
             return
 
         # Fund folder renamed (child of a firm folder)
@@ -1900,9 +1933,7 @@ class NotionFolderHandler(FileSystemEventHandler):
                 new_fund_name = new_path.name
                 new_identifier = ""
 
-            existing_fund = _query_database_by_title(
-                self.fund_db_id, old_fund_name, FUND_TITLE_PROP
-            )
+            existing_fund = self._lookup_fund(old_fund_name)
             if existing_fund:
                 log.info(
                     "Fund folder renamed: '%s' -> '%s'",
@@ -1925,11 +1956,12 @@ class NotionFolderHandler(FileSystemEventHandler):
                         },
                     )
 
-                threading.Thread(
-                    target=_rename_fund,
-                    args=(existing_fund["id"], new_fund_name, new_identifier),
-                    daemon=True,
-                ).start()
+                self._submit(
+                    _rename_fund, existing_fund["id"], new_fund_name, new_identifier
+                )
+                self._page_cache.invalidate(
+                    self.fund_db_id, old_fund_name, FUND_TITLE_PROP
+                )
 
     def _handle_file_rename(self, old_path: Path, new_path: Path):
         """Handle a file being renamed or moved — rename block or move between pages."""
@@ -1951,9 +1983,7 @@ class NotionFolderHandler(FileSystemEventHandler):
         # File renamed within a fund folder
         if parent.parent.parent == self.watch_folder:
             fund_name = _resolve_fund_name(parent.name)
-            existing_fund = _query_database_by_title(
-                self.fund_db_id, fund_name, FUND_TITLE_PROP
-            )
+            existing_fund = self._lookup_fund(fund_name)
             if existing_fund:
                 log.info(
                     "File renamed in fund '%s': '%s' -> '%s'",
@@ -1961,19 +1991,18 @@ class NotionFolderHandler(FileSystemEventHandler):
                     old_path.name,
                     new_path.name,
                 )
-                threading.Thread(
-                    target=_rename_file_on_page,
-                    args=(existing_fund["id"], old_path.name, new_path.name),
-                    daemon=True,
-                ).start()
+                self._submit(
+                    _rename_file_on_page,
+                    existing_fund["id"],
+                    old_path.name,
+                    new_path.name,
+                )
             return
 
         # File renamed within a firm folder
         if parent.parent == self.watch_folder:
             firm_name = parent.name
-            existing_firm = _query_database_by_title(
-                self.firm_db_id, firm_name, FIRM_TITLE_PROP
-            )
+            existing_firm = self._lookup_firm(firm_name)
             if existing_firm:
                 log.info(
                     "File renamed in firm '%s': '%s' -> '%s'",
@@ -1981,11 +2010,12 @@ class NotionFolderHandler(FileSystemEventHandler):
                     old_path.name,
                     new_path.name,
                 )
-                threading.Thread(
-                    target=_rename_file_on_page,
-                    args=(existing_firm["id"], old_path.name, new_path.name),
-                    daemon=True,
-                ).start()
+                self._submit(
+                    _rename_file_on_page,
+                    existing_firm["id"],
+                    old_path.name,
+                    new_path.name,
+                )
 
     def _resolve_page_for_path(self, file_path: Path) -> tuple[str | None, str]:
         """Resolve a file path to its Notion page ID and page type ('fund' or 'firm').
@@ -1997,9 +2027,7 @@ class NotionFolderHandler(FileSystemEventHandler):
         # File in a fund folder (watch/firm/fund/file)
         if parent.parent.parent == self.watch_folder:
             fund_name = _resolve_fund_name(parent.name)
-            existing = _query_database_by_title(
-                self.fund_db_id, fund_name, FUND_TITLE_PROP
-            )
+            existing = self._lookup_fund(fund_name)
             if existing:
                 return existing["id"], "fund"
             return None, ""
@@ -2007,9 +2035,7 @@ class NotionFolderHandler(FileSystemEventHandler):
         # File in a firm folder (watch/firm/file)
         if parent.parent == self.watch_folder:
             firm_name = parent.name
-            existing = _query_database_by_title(
-                self.firm_db_id, firm_name, FIRM_TITLE_PROP
-            )
+            existing = self._lookup_firm(firm_name)
             if existing:
                 return existing["id"], "firm"
 
@@ -2056,7 +2082,7 @@ class NotionFolderHandler(FileSystemEventHandler):
             "File moved across folders: '%s' -> '%s'",
             old_path, new_path,
         )
-        threading.Thread(target=_do_cross_folder_move, daemon=True).start()
+        self._submit(_do_cross_folder_move)
 
 
 # =========================
@@ -2505,9 +2531,15 @@ class NotionPoller:
     Regular files are NOT downloaded — the local folder is the source
     of truth and uploads are handled by the watchdog.
 
-    Uses two polling speeds:
-      - Fast (30s) for pages created within the last 10 minutes
-      - Slow (5min) for routine checks on all other pages
+    Scalability features vs the previous version:
+    - Initial scan queries ALL pages once to build the page→folder mapping.
+    - Subsequent cycles use a last_edited_time filter so only recently
+      modified pages are re-queried, avoiding a full DB scan each cycle.
+    - Only pages that were actually modified since the last poll are synced,
+      instead of iterating every tracked page.
+    - Uses two polling speeds:
+        - Fast (30s) when any tracked page was created within the last 10 min
+        - Slow (10min) for routine checks
     """
 
     def __init__(
@@ -2524,13 +2556,20 @@ class NotionPoller:
         # Resolved mappings: page_id -> local_folder (cached, only for pages with folders)
         self._page_folders: dict[str, Path] = {}
         self._stop_event = threading.Event()
+        # High-water mark: only query pages edited after this timestamp
+        self._last_poll_time: str | None = None
 
-    def _query_all_fund_pages(self) -> list[dict]:
-        """Query all pages in the fund database."""
+    def _query_fund_pages(self, since: str | None = None) -> list[dict]:
+        """Query fund pages, optionally filtered by last_edited_time."""
         pages = []
         start_cursor = None
         while True:
             body: dict = {"page_size": 100}
+            if since:
+                body["filter"] = {
+                    "timestamp": "last_edited_time",
+                    "last_edited_time": {"on_or_after": since},
+                }
             if start_cursor:
                 body["start_cursor"] = start_cursor
             data = _notion_request(
@@ -2553,14 +2592,28 @@ class NotionPoller:
         except Exception:
             return False
 
-    def _resolve_pages_with_folders(self):
-        """
-        Build/refresh the mapping from fund page IDs to local folders.
+    def _resolve_page_folder(self, page: dict) -> Path | None:
+        """Resolve a single page to its local folder (or None)."""
+        fund_name, _, firm_page_id = _get_fund_page_info(page)
+        if not fund_name:
+            return None
+        local_folder = _resolve_local_fund_folder(
+            self.watch_folder,
+            firm_page_id,
+            self.firm_db_id,
+            fund_name,
+        )
+        if local_folder and local_folder.exists():
+            return local_folder
+        return None
 
-        Only pages that have a corresponding local folder are tracked.
+    def _full_scan(self):
+        """
+        Full scan: query ALL pages and build the page→folder mapping from scratch.
+        Used only on startup.
         """
         try:
-            pages = self._query_all_fund_pages()
+            pages = self._query_fund_pages(since=None)
         except Exception as e:
             log.error("Failed to query fund pages: %s", e)
             return
@@ -2572,17 +2625,8 @@ class NotionPoller:
             if page_id not in self._creation_times:
                 self._creation_times[page_id] = created_time
 
-            fund_name, _, firm_page_id = _get_fund_page_info(page)
-            if not fund_name:
-                continue
-
-            local_folder = _resolve_local_fund_folder(
-                self.watch_folder,
-                firm_page_id,
-                self.firm_db_id,
-                fund_name,
-            )
-            if local_folder and local_folder.exists():
+            local_folder = self._resolve_page_folder(page)
+            if local_folder:
                 self._page_folders[page_id] = local_folder
 
             # Small delay between pages to avoid API call bursts
@@ -2593,12 +2637,53 @@ class NotionPoller:
             len(self._page_folders),
         )
 
-    def _poll_once(self):
+    def _incremental_refresh(self) -> list[str]:
         """
-        Run one poll cycle: for each tracked page, sync meeting notes
-        and researches from Notion relation properties to local subfolders.
+        Query only pages modified since the last poll.  Updates the
+        page→folder mapping and returns the list of page IDs that
+        need syncing.
         """
-        for page_id, local_folder in self._page_folders.items():
+        try:
+            pages = self._query_fund_pages(since=self._last_poll_time)
+        except Exception as e:
+            log.error("Failed to query fund pages (incremental): %s", e)
+            return []
+
+        modified_ids = []
+        for page in pages:
+            page_id = page["id"]
+            created_time = page.get("created_time", "")
+            if page_id not in self._creation_times:
+                self._creation_times[page_id] = created_time
+
+            local_folder = self._resolve_page_folder(page)
+            if local_folder:
+                self._page_folders[page_id] = local_folder
+                modified_ids.append(page_id)
+            elif page_id in self._page_folders:
+                # Folder no longer exists locally
+                del self._page_folders[page_id]
+
+            time.sleep(0.3)
+
+        if modified_ids:
+            log.info(
+                "Poller: %d page(s) modified since last poll",
+                len(modified_ids),
+            )
+        return modified_ids
+
+    def _poll_once(self, page_ids: list[str] | None = None):
+        """
+        Run one poll cycle: sync meeting notes and researches for
+        the given page IDs (or all tracked pages if None).
+        """
+        targets = (
+            {pid: self._page_folders[pid] for pid in page_ids if pid in self._page_folders}
+            if page_ids is not None
+            else self._page_folders
+        )
+        for page_id, local_folder in targets.items():
             if self._stop_event.is_set():
                 break
             if not local_folder.exists():
@@ -2628,23 +2713,28 @@ class NotionPoller:
 
     def run(self):
         """Run the poller loop (blocking). Call stop() from another thread."""
+        from datetime import datetime, timezone
+
         log.info(
             "Notion poller started (fast=%ds, slow=%ds)",
             POLL_INTERVAL_FAST,
             POLL_INTERVAL_SLOW,
         )
 
-        # Build initial page-to-folder mapping and poll immediately
-        self._resolve_pages_with_folders()
+        # Full scan on startup, then poll all tracked pages
+        self._full_scan()
+        self._last_poll_time = datetime.now(timezone.utc).isoformat()
         self._poll_once()
 
         while not self._stop_event.is_set():
             interval = self._get_sleep_interval()
             if self._stop_event.wait(timeout=interval):
                 break
-            # Periodically refresh the folder mapping (picks up new local folders)
-            self._resolve_pages_with_folders()
-            self._poll_once()
+            # Incremental: only query pages modified since last poll
+            modified_ids = self._incremental_refresh()
+            self._last_poll_time = datetime.now(timezone.utc).isoformat()
+            if modified_ids:
+                self._poll_once(page_ids=modified_ids)
 
         log.info("Notion poller stopped.")
 
@@ -2709,6 +2799,7 @@ def watch_folder(folder_path: Path | str | None = None):
             time.sleep(1)
     except KeyboardInterrupt:
         log.info("Stopping watcher...")
+        handler.shutdown()
         poller.stop()
         observer.stop()
     observer.join()
