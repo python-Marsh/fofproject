@@ -16,6 +16,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _NAS_EMAIL_STORAGE = Path("/data/emails")
 _NAS_OUTPUT = Path("/data/output")
 _NAS_FUND_FIRM = Path("/data/fund_firm_identifier")
+_NAS_INPUT = Path("/data/Input")
 
 
 def _resolve(env_var: str, nas_path: Path, local_path: Path) -> Path:
@@ -34,14 +35,14 @@ def _resolve(env_var: str, nas_path: Path, local_path: Path) -> Path:
 EMAIL_STORAGE_DIR = _resolve(
     "EMAIL_STORAGE_DIR",
     _NAS_EMAIL_STORAGE,
-    _PROJECT_ROOT / "output" / "emails",
+    _PROJECT_ROOT / "testing" / "emails",
 )
 
 # Where classify.py reads emails from
 DEFAULT_EMAIL_INPUT_DIR = _resolve(
     "EMAIL_INPUT_DIR",
     _NAS_EMAIL_STORAGE,
-    _PROJECT_ROOT / "output" / "testing" / "email",
+    _PROJECT_ROOT / "testing" / "email",
 )
 
 # Where classify.py writes the firm/fund folder structure
@@ -49,7 +50,7 @@ DEFAULT_EMAIL_INPUT_DIR = _resolve(
 DEFAULT_OUTPUT_DIR = _resolve(
     "OUTPUT_DIR",
     _NAS_FUND_FIRM,
-    _PROJECT_ROOT / "output" / "testing" / "fund firm identifier",
+    _PROJECT_ROOT /"testing" / "hedge funds",
 )
 
 # Notion watches the same directory as classify output
@@ -62,3 +63,10 @@ SAVE_DIR = _resolve(
     _PROJECT_ROOT / "output",
 )
 SAVE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Where load_all_data reads CSVs and JSON subfolders from
+DEFAULT_INPUT_DIR = _resolve(
+    "INPUT_DIR",
+    _NAS_INPUT,
+    _PROJECT_ROOT,
+)

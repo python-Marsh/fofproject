@@ -6,6 +6,7 @@ env_path = Path(__file__).parent / ".env"
 load_dotenv(dotenv_path=env_path)
 from typing import List, Dict
 from fofproject.fund import Fund
+from fofproject.log import log, LOAD
 from openai import OpenAI
 from datetime import datetime
 import pandas as pd
@@ -331,8 +332,9 @@ def _ytd_cross_validate_rows(
                 for e in entries:
                     e["value"] = round(e["value"] / 100, 4)
                 monthly_vals = [e["value"] for e in entries]
-                print(
-                    f"YTD cross-validation ({fund_name}, {year}): applied /100 scale correction"
+                log.detail(
+                    f"{fund_name} ({year}): applied /100 scale correction.",
+                    phase=LOAD,
                 )
 
         # Scale YTD: use the once-for-all ytd_is_pct decision, or auto_scaled flag
@@ -343,17 +345,16 @@ def _ytd_cross_validate_rows(
         compound = _compound(monthly_vals)
         error = abs(compound - ytd_expected)
         if error > 0.0002:
-            print(
-                f"YTD cross-validation ({fund_name}, {year}): "
-                f"compound={compound:.6f} vs YTD={ytd_expected:.6f} "
-                f"(error={error:.6f}, likely minor OCR discrepancy)"
+            log.detail(
+                f"{fund_name} ({year}): YTD mismatch — compound={compound:.6f} vs expected={ytd_expected:.6f} (error={error:.6f}).",
+                phase=LOAD,
             )
 
 
 def process_performance(data):
     # GPT's own screening
     if data["fund_name"] == "ERROR":
-        print(f"No performance table found by GPT in {data['fund_name']}")
+        log.detail(f"{data['fund_name']}: no performance table found by GPT.", phase=LOAD)
         return []
 
     table = data["performance"]["table"]
@@ -361,12 +362,13 @@ def process_performance(data):
     non_month_header = set(data["performance"]["non_month_header"])
 
     if len(month_header) != 12:
-        print(
-            f"Wrongly assigned a month header of {len(month_header)} from {data['fund_name']}, would result in extra values in earliest and latest months"
+        log.warn(
+            f"{data['fund_name']}: month header has {len(month_header)} entries (expected 12).",
+            phase=LOAD,
         )
 
     if not table:
-        print(f"Empty values in performance table of {data['fund_name']}")
+        log.detail(f"{data['fund_name']}: empty performance table.", phase=LOAD)
         return []
 
     # Extract header
@@ -425,7 +427,7 @@ def process_performance(data):
                 year = year_counter
                 years.append(year)
                 year_counter -= 1
-                print(f"No valid year found in {data}, appending {year}")
+                log.detail(f"No valid year found in row, defaulting to {year}.", phase=LOAD)
             raw_row_lengths[year] = len(data)
             results.append({year: values})
 
@@ -435,8 +437,9 @@ def process_performance(data):
     earliest_year = min(years)
     latest_year = max(years)
     if earliest_year == latest_year:
-        print(
-            f"Only one year {earliest_year} found in table of {data['fund_name']}, returned empty list"
+        log.detail(
+            f"{data['fund_name']}: only one year ({earliest_year}) found, skipping.",
+            phase=LOAD,
         )
         return []
 
@@ -467,8 +470,9 @@ def process_performance(data):
                     :12
                 ]  # drop last elements till 12, assume there are no values appended in the front
             elif len(values) < 12:
-                print(
-                    f"Less than 12 months found in table of {data['fund_name']}, returned empty list"
+                log.warn(
+                    f"{data['fund_name']}: fewer than 12 months in year {year}, skipping.",
+                    phase=LOAD,
                 )
                 return []
         if year == earliest_year:
@@ -481,8 +485,9 @@ def process_performance(data):
                 try:
                     num = float(val.strip("%")) / 100 if "%" in val else float(val)
                 except Exception:
-                    print(
-                        f"Non-number found in {data['fund_name']}'s latest month, returned empty list"
+                    log.warn(
+                        f"{data['fund_name']}: non-numeric value in latest month, skipping.",
+                        phase=LOAD,
                     )
                     return []
                 cleaned_rows.append({"date": date_str, "value": num})
@@ -495,14 +500,16 @@ def process_performance(data):
                 try:
                     num = float(val.strip("%")) / 100 if "%" in val else float(val)
                 except Exception:
-                    print(
-                        f"Non-number found in {data['fund_name']}'s earliest month, returned empty list"
+                    log.warn(
+                        f"{data['fund_name']}: non-numeric value in earliest month, skipping.",
+                        phase=LOAD,
                     )
                     return []
                 cleaned_rows.append({"date": date_str, "value": num})
                 if year != latest_year and len(values) != 12:
-                    print(
-                        f"Parsing error: Year {year} has {len(values)} values (expected 12)."
+                    log.warn(
+                        f"{data['fund_name']}: year {year} has {len(values)} values (expected 12), skipping.",
+                        phase=LOAD,
                     )
                     return []
 
@@ -624,13 +631,13 @@ def _save_json_result(result, json_folder):
     # Skip if no meaningful identifier or fund_name
     identifier = result.get('identifier', result.get('fund_name', ''))
     if not identifier or not identifier.strip():
-        print("Skipping JSON save: no identifier or fund_name found.")
+        log.detail("Skipping JSON save: no identifier or fund name found.", phase=LOAD)
         return
 
     # Skip if performance is empty or invalid
     perf = result.get('performance', [])
     if not (isinstance(perf, list) and perf and all(isinstance(item, dict) for item in perf)):
-        print(f"Skipping JSON save for {identifier}: no valid performance data.")
+        log.detail(f"Skipping JSON save for {identifier}: no valid performance data.", phase=LOAD)
         return
 
     os.makedirs(json_folder, exist_ok=True)
@@ -783,15 +790,16 @@ def gpt_process_pdf(file_path: str):
     # Cannot parse pdf into text, try uploading pdf directly
     if not text:
         data = _gpt_extract_from_file(client, file_path)
-        print(f"{data['fund_name']} uses pdf screening. Values can be unstable...")
+        log.detail(f"{data['fund_name']}: using PDF image extraction (values may be unstable).", phase=LOAD)
         data["fund_name"] = f"{data['fund_name']} from_pdf"
     else:
         data = _gpt_extract_from_text(client, text)
         # Fallback: if text extraction yielded no performance, retry with PDF upload
         # (handles cases where performance table is embedded as an image)
         if not data.get("performance"):
-            print(
-                f"{data['fund_name']} text extraction found no performance, retrying with PDF upload..."
+            log.detail(
+                f"{data['fund_name']}: text extraction found no performance, retrying with PDF upload.",
+                phase=LOAD,
             )
             pdf_data = _gpt_extract_from_file(client, file_path)
             if pdf_data.get("performance"):
@@ -848,7 +856,7 @@ def process_single_pdf(file_path, save=True, funds=None):
 
     folder_path = os.path.dirname(file_path) or "."
 
-    print(f"Processing: {file_path}")
+    log.detail(f"Processing: {file_path}.", phase=LOAD)
     result = gpt_process_pdf(file_path)
 
     if save:
@@ -885,7 +893,7 @@ def process_pdfs_in_folder(folder_path="input", save=False, prefix_hint="_parsed
     for file_name in os.listdir(folder_path):
         if file_name.lower().endswith(".pdf"):
             file_path = os.path.join(folder_path, file_name)
-            print(f"Processing: {file_path}")
+            log.detail(f"Processing: {file_path}.", phase=LOAD)
             result = gpt_process_pdf(file_path)
             _collect_result(result, result["fund_name"], results, no_perf_list, folder_path, save)
             # Renaming of the pdf. file
@@ -912,7 +920,7 @@ def rerun_no_perf_files(folder_path="input", save=False):
     """
     no_perf_path = os.path.join(folder_path, "No Performance Found.txt")
     if not os.path.exists(no_perf_path):
-        print("No Performance Found.txt not found.")
+        log.detail("No Performance Found.txt not found.", phase=LOAD)
         return []
 
     # Read fund_name prefixes from the file
@@ -920,7 +928,7 @@ def rerun_no_perf_files(folder_path="input", save=False):
         fund_prefixes = [line.strip() for line in f if line.strip()]
 
     if not fund_prefixes:  # file is empty or only blank lines
-        print("No entries found in No Performance Found.txt.")
+        log.detail("No entries found in No Performance Found.txt.", phase=LOAD)
         return []
 
     results = []
@@ -936,7 +944,7 @@ def rerun_no_perf_files(folder_path="input", save=False):
         for prefix in fund_prefixes:
             if base.startswith(prefix):
                 file_path = os.path.join(folder_path, file_name)
-                print(f"Re-processing (no performance before): {file_path}")
+                log.detail(f"Re-processing: {file_path} (no performance before).", phase=LOAD)
                 result = gpt_process_pdf(file_path)
 
                 # Check performance again
@@ -979,7 +987,7 @@ def continue_running(folder_path="input", save=False, prefix_hint="_parsed from_
                 continue
 
             file_path = os.path.join(folder_path, file_name)
-            print(f"Processing: {file_path}")
+            log.detail(f"Processing: {file_path}.", phase=LOAD)
             result = gpt_process_pdf(file_path)
 
             _collect_result(result, result["fund_name"], results, no_perf_list, folder_path, save)
@@ -1008,7 +1016,7 @@ def load_saved_json(folder_path="input"):
     json_folder = os.path.join(folder_path, "json")
 
     if not os.path.exists(json_folder):
-        print(f"No 'json' folder found in {folder_path}.")
+        log.detail(f"No json/ folder found in {folder_path}.", phase=LOAD)
         return results
 
     # Iterate through all .json files and load them
@@ -1020,7 +1028,7 @@ def load_saved_json(folder_path="input"):
                     result = json.load(f)
                     results.append(result)
             except Exception as e:
-                print(f"⚠️ Error loading {file_name}: {e}")
+                log.error(f"Failed to load {file_name}: {e}.", phase=LOAD)
     return results
 
 
@@ -1044,7 +1052,7 @@ def results_to_csv(results, folder_path="input"):
         perf_data = result.get("performance", [])
         # Skip if 'performance' is missing or is not a list
         if not isinstance(perf_data, list) or not perf_data:
-            print(f"⚠️ Skipping {fund_name} (no performance data).")
+            log.detail(f"Skipping {fund_name} (no performance data).", phase=LOAD)
             continue
 
         for perf in perf_data:
@@ -1052,8 +1060,9 @@ def results_to_csv(results, folder_path="input"):
             try:
                 date = datetime.strptime(perf["date"], "%d/%m/%Y").date()
             except Exception as e:
-                print(
-                    f"⚠️ Skipping due to wrong date format '{perf.get('date')}' for {fund_name}: {e}"
+                log.warn(
+                    f"{fund_name}: invalid date format '{perf.get('date')}': {e}.",
+                    phase=LOAD,
                 )
                 continue
 
@@ -1084,13 +1093,11 @@ def results_to_csv(results, folder_path="input"):
         # Sort by date if needed
         df_combined = df_combined.sort_values(by="date")
 
-        print(
-            f"🔄 Existing CSV found. Updated with new data and saved to {output_path}"
-        )
+        log.detail(f"Updated existing CSV at {output_path}.", phase=LOAD)
     else:
         # If no CSV exists, just use the new data
         df_combined = df_new
-        print(f"✅ No existing CSV found. Created new CSV at {output_path}")
+        log.detail(f"Created new CSV at {output_path}.", phase=LOAD)
 
     # Save to CSV
     df_combined["date"] = pd.to_datetime(
@@ -1141,7 +1148,7 @@ def init_funds(funds_data: List[Dict], benchmarks: Dict[str, Fund] = None) -> Di
             initialized_funds[f"{fund.name}"] = fund
         except ValueError as e:
             # Skip invalid funds and log the issue
-            print(f"Skipping fund {data.get('fund_name', 'UNKNOWN')}: {e}")
+            log.detail(f"{data.get('fund_name', 'UNKNOWN')}: skipped ({e}).", phase=LOAD)
 
     if benchmarks:
         from fofproject.fund import assign_benchmarks
@@ -1250,6 +1257,94 @@ def merge_funds(dict1: dict, dict2: dict) -> dict:
         if name in merged:
             merged[name].default_benchmark = bm
     return merged
+
+
+def load_all_data(
+    base_path=None,
+    benchmark_csv="BENCHMARK.csv",
+    return_csv="RETURN DATA.csv",
+    manual_csv="MANUAL OVERWRITE.csv",
+    json_folders=None,
+):
+    """Load all fund data in sequence: benchmarks, CSV returns, JSON folders, manual overwrite.
+
+    Parameters
+    ----------
+    base_path : str or Path, optional
+        Root folder containing all input data. CSVs and JSON subfolders
+        are resolved relative to this path.
+        If None, uses the resolved default: NAS mount (/data/Input) if
+        available, otherwise falls back to the local ``input/`` folder.
+    benchmark_csv : str
+        Filename of the benchmark CSV inside base_path.
+    return_csv : str
+        Filename of the portfolio returns CSV inside base_path.
+    manual_csv : str
+        Filename of the manual overwrite CSV inside base_path.
+        Funds in this file will overwrite performance of matching funds.
+    json_folders : list[str], optional
+        List of subfolder names under base_path to load JSONs from.
+        If None, auto-discovers all subfolders that contain a 'json/' directory.
+
+    Returns
+    -------
+    dict
+        Dictionary of {fund_name: Fund} with all data merged.
+    """
+    from fofproject.fund import load_benchmarks, input_monthly_returns
+    from fofproject.paths import DEFAULT_INPUT_DIR
+
+    if base_path is None:
+        base_path = str(DEFAULT_INPUT_DIR)
+
+    benchmark_path = os.path.join(base_path, benchmark_csv)
+    return_path = os.path.join(base_path, return_csv)
+    manual_path = os.path.join(base_path, manual_csv)
+
+    # 1. Load benchmarks
+    benchmarks = {}
+    if os.path.exists(benchmark_path):
+        benchmarks = load_benchmarks(benchmark_path)
+        log.detail(f"Loaded {len(benchmarks)} benchmark(s) from {benchmark_path}.", phase=LOAD)
+    else:
+        log.warn(f"Benchmark file not found: {benchmark_path}.", phase=LOAD)
+
+    # 2. Load portfolio returns from CSV (includes benchmarks)
+    funds = {}
+    if os.path.exists(return_path):
+        funds = input_monthly_returns(return_path, benchmark_csv=benchmark_path if benchmarks else None)
+        log.detail(f"Loaded {len(funds)} fund(s) from {return_path}.", phase=LOAD)
+    else:
+        log.warn(f"Return CSV not found: {return_path}.", phase=LOAD)
+
+    # 3. Load all JSON subfolders
+    if json_folders is None:
+        # Auto-discover subfolders with a json/ directory
+        json_folders = []
+        if os.path.isdir(base_path):
+            for name in sorted(os.listdir(base_path)):
+                sub = os.path.join(base_path, name)
+                if os.path.isdir(sub) and os.path.isdir(os.path.join(sub, "json")):
+                    json_folders.append(name)
+
+    for folder_name in json_folders:
+        folder_path = os.path.join(base_path, folder_name)
+        json_data = load_saved_json(folder_path=folder_path)
+        if json_data:
+            json_funds = init_funds(json_data, benchmarks=benchmarks or None)
+            funds = merge_funds(json_funds, funds)
+            log.detail(f"Loaded {len(json_funds)} fund(s) from {folder_path}/json/.", phase=LOAD)
+
+    # 4. Manual overwrite CSV (overwrites performance of matching funds)
+    if os.path.exists(manual_path):
+        manual_funds = input_monthly_returns(manual_path)
+        funds = merge_funds(manual_funds, funds)
+        log.detail(f"Applied manual overwrite from {manual_path} ({len(manual_funds)} fund(s)).", phase=LOAD)
+    else:
+        log.detail(f"Manual overwrite file not found: {manual_path}.", phase=LOAD)
+
+    log.info(f"Total funds loaded: {len(funds)}.", phase=LOAD)
+    return funds
 
 
 def parse_from_marquee(

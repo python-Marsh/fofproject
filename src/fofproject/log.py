@@ -24,6 +24,7 @@ CLASSIFY = "CLASSIFY"
 PERF = "PERF"
 GRAPHS = "GRAPHS"
 METRICS = "METRICS"
+LOAD = "LOAD"
 RECONCILE = "RECONCILE"
 SYNC = "SYNC"
 MONITOR = "MONITOR"
@@ -49,15 +50,17 @@ class _PhaseFormatter(logging.Formatter):
         return f"  {ts} {sym} {phase_str} {record.getMessage()}"
 
 
-def _ensure_handler():
+def _init_logger():
     logger = logging.getLogger(_LOGGER_NAME)
-    if not logger.handlers:
-        h = logging.StreamHandler(sys.stdout)
-        h.setFormatter(_PhaseFormatter())
-        logger.addHandler(h)
-        logger.setLevel(logging.INFO)
-        logger.propagate = False
+    h = logging.StreamHandler(sys.stdout)
+    h.setFormatter(_PhaseFormatter())
+    logger.addHandler(h)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
     return logger
+
+
+_logger = _init_logger()
 
 
 # ── Public API ───────────────────────────────────────────
@@ -67,22 +70,22 @@ class log:
 
     @staticmethod
     def info(msg, phase=""):
-        _ensure_handler().info(msg, extra={"phase": phase})
+        _logger.info(msg, extra={"phase": phase})
 
     @staticmethod
     def detail(msg, phase=""):
         """Visible only in verbose mode (DEBUG level)."""
-        _ensure_handler().debug(msg, extra={"phase": phase})
+        _logger.debug(msg, extra={"phase": phase})
 
     @staticmethod
     def warn(msg, phase=""):
-        _ensure_handler().warning(msg, extra={"phase": phase})
+        _logger.warning(msg, extra={"phase": phase})
 
     @staticmethod
     def error(msg, phase=""):
-        _ensure_handler().error(msg, extra={"phase": phase})
+        _logger.error(msg, extra={"phase": phase})
 
 
 def set_verbose(verbose: bool = True):
     """Toggle DEBUG-level output (shows sub-function internals)."""
-    _ensure_handler().setLevel(logging.DEBUG if verbose else logging.INFO)
+    _logger.setLevel(logging.DEBUG if verbose else logging.INFO)

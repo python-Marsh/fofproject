@@ -18,6 +18,7 @@ import json
 import re
 import shutil
 import uuid
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from html import unescape
 from datetime import datetime
@@ -2493,6 +2494,7 @@ def _classify_single_email(
     existing_firms: list,
     firm_mappings: dict,
     classification_lookup: dict,
+    lookup_lock: threading.Lock = None,
     use_lookup: bool = True,
     progress_label: str = "",
 ):
@@ -2538,9 +2540,15 @@ def _classify_single_email(
         return classification
 
     # Check report lookup (skip GPT for already-classified emails)
-    if use_lookup and email_id in classification_lookup:
-        log.detail(f"{progress_label} (cached) {subject[:50]}...", phase=CLASSIFY)
-        return classification_lookup[email_id]
+    if use_lookup:
+        if lookup_lock:
+            with lookup_lock:
+                cached = classification_lookup.get(email_id)
+        else:
+            cached = classification_lookup.get(email_id)
+        if cached is not None:
+            log.detail(f"{progress_label} (cached) {subject[:50]}...", phase=CLASSIFY)
+            return cached
 
     # Classify with GPT
     log.detail(f"{progress_label} Classifying: {subject[:50]}...", phase=CLASSIFY)
@@ -2552,7 +2560,11 @@ def _classify_single_email(
         log.error(f"  GPT error for {subject[:40]}..., will retry next run", phase=CLASSIFY)
         return None
 
-    classification_lookup[email_id] = classification
+    if lookup_lock:
+        with lookup_lock:
+            classification_lookup[email_id] = classification
+    else:
+        classification_lookup[email_id] = classification
     return classification
 
 
@@ -2637,12 +2649,14 @@ def _process_classified_email(
         classification_entry["needs_review_count"] = org_result["needs_review_count"]
 
         if org_result["organized_count"] > 0:
-            print(
-                f"    -> Organized {org_result['organized_count']} artifact(s) to firm folders"
+            log.detail(
+                f"  Organized {org_result['organized_count']} artifact(s) to firm folders",
+                phase=CLASSIFY,
             )
         if org_result["needs_review_count"] > 0:
-            print(
-                f"    -> {org_result['needs_review_count']} artifact(s) sent to {NEEDS_REVIEW_FOLDER}/"
+            log.detail(
+                f"  {org_result['needs_review_count']} artifact(s) sent to {NEEDS_REVIEW_FOLDER}/",
+                phase=CLASSIFY,
             )
 
     classification_entry["_canonical_name"] = canonical_name
@@ -2700,9 +2714,8 @@ def classify_and_organize_emails(
         if f.is_dir() and (f / "metadata.json").exists()
     ]
 
-    print(f"Found {len(email_folders)} email folders to process")
-    print(f"Output directory: {output_dir}")
-    print("-" * 60)
+    log.info(f"Found {len(email_folders)} email folders to process", phase=CLASSIFY)
+    log.info(f"Output directory: {output_dir}", phase=CLASSIFY)
 
     # --- Phase 1: Load metadata and classify emails (GPT calls in parallel) ---
     email_data = []  # list of (email_folder, metadata, email_id, from_address, subject)
@@ -2712,7 +2725,7 @@ def classify_and_organize_emails(
             with open(metadata_path, "r", encoding="utf-8") as f:
                 metadata = json.load(f)
         except Exception as e:
-            print(f"Error loading {email_folder.name}: {e}")
+            log.error(f"Error loading {email_folder.name}: {e}", phase=CLASSIFY)
             report["errors"] += 1
             continue
         email_id = metadata.get("id", email_folder.name)
@@ -2726,6 +2739,7 @@ def classify_and_organize_emails(
     # are fast but still safe to run in the pool.
     max_workers = min(8, len(email_data)) or 1
     classifications = {}  # email_id -> classification dict
+    _lookup_lock = threading.Lock()
 
     def _classify_task(idx, email_folder, metadata, email_id, from_address, subject):
         return email_id, _classify_single_email(
@@ -2736,6 +2750,7 @@ def classify_and_organize_emails(
             existing_firms,
             firm_mappings,
             classification_lookup,
+            lookup_lock=_lookup_lock,
             use_lookup=True,
             progress_label=f"[{idx + 1}/{len(email_data)}]",
         )
@@ -2798,10 +2813,10 @@ def classify_and_organize_emails(
                 if not canonical_name:
                     report["hedge_fund_related"] -= 1
                     report["non_hedge_fund"] += 1
-                print("    -> Hedge fund related but no artifacts could be organized")
+                log.detail("  Hedge fund related but no artifacts could be organized", phase=CLASSIFY)
         else:
             report["non_hedge_fund"] += 1
-            print("    -> Not hedge fund related")
+            log.detail("  Not hedge fund related", phase=CLASSIFY)
 
         report["classifications"].append(entry)
 
@@ -2813,21 +2828,19 @@ def classify_and_organize_emails(
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
 
-    # Print summary
-    print("\n" + "=" * 60)
-    print("CLASSIFICATION SUMMARY")
-    print("=" * 60)
-    print(f"Total emails processed: {report['total_emails']}")
-    print(f"Hedge fund related: {report['hedge_fund_related']}")
-    print(f"Non-hedge fund: {report['non_hedge_fund']}")
-    print(f"Errors: {report['errors']}")
-    print(f"\nFirms identified: {len(report['firms_found'])}")
+    # Summary
+    log.info("CLASSIFICATION SUMMARY", phase=CLASSIFY)
+    log.info(f"Total emails processed: {report['total_emails']}", phase=CLASSIFY)
+    log.info(f"Hedge fund related: {report['hedge_fund_related']}", phase=CLASSIFY)
+    log.info(f"Non-hedge fund: {report['non_hedge_fund']}", phase=CLASSIFY)
+    log.info(f"Errors: {report['errors']}", phase=CLASSIFY)
+    log.info(f"Firms identified: {len(report['firms_found'])}", phase=CLASSIFY)
 
     for firm, info in sorted(report["firms_found"].items()):
-        print(f"  - {firm}: {info['email_count']} email(s)")
+        log.detail(f"  - {firm}: {info['email_count']} email(s)", phase=CLASSIFY)
 
-    print(f"\nReport saved to: {report_path}")
-    print(f"Firm mappings saved to: {output_dir / FIRM_MAPPINGS_FILE}")
+    log.info(f"Report saved to: {report_path}", phase=CLASSIFY)
+    log.info(f"Firm mappings saved to: {output_dir / FIRM_MAPPINGS_FILE}", phase=CLASSIFY)
 
     return report
 

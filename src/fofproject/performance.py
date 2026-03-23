@@ -191,11 +191,16 @@ def _try_promote_fund_identifier(
       ``404 multiple identifier_{fund_name}`` so downstream consumers
       (Notion upload, sync) skip it.
     """
-    # Check if any performance artifact is still unprocessed
+    # Check if any performance PDF artifact is still unprocessed
+    # (skip non-PDF artifacts like .link.json — they can't be processed by
+    # process_single_pdf so they should not block promotion)
     for art_info in artifacts.values():
-        if art_info.get("contains_monthly_net_performance_update") and not art_info.get(
-            "processed"
-        ):
+        if not art_info.get("contains_monthly_net_performance_update"):
+            continue
+        file_name = art_info.get("file_name", "")
+        if not file_name.lower().endswith(".pdf"):
+            continue
+        if not art_info.get("processed"):
             return None, None  # still waiting
 
     # Collect identifiers only from performance artifacts
@@ -461,7 +466,7 @@ def process_performance_updates(
     return results
 
 
-def generate_fund_graphs(output_dir: Path = None, benchmark_fund=None, language="en"):
+def generate_fund_graphs(output_dir: Path = None, benchmark_fund=None, language="en", identifiers: set = None):
     """Load JSON from each fund's json/ folder and export summary graphs.
 
     For each fund subfolder, parses the folder identifier (e.g.
@@ -486,6 +491,14 @@ def generate_fund_graphs(output_dir: Path = None, benchmark_fund=None, language=
     original_save_dir = fund_module.save_dir
     results = []
 
+    # Pre-load benchmarks once (instead of per-fund) when no explicit benchmark
+    bm_dict_preloaded = None
+    if benchmark_fund is None:
+        try:
+            bm_dict_preloaded = load_benchmarks()
+        except Exception:
+            pass  # BENCHMARK.csv not available, skip
+
     for firm_folder in sorted(output_dir.iterdir()):
         if not firm_folder.is_dir() or firm_folder.name.startswith("."):
             continue
@@ -498,6 +511,9 @@ def generate_fund_graphs(output_dir: Path = None, benchmark_fund=None, language=
 
             _, identifier = _parse_folder_identifier(subfolder.name)
             if not identifier:
+                continue
+
+            if identifiers is not None and identifier not in identifiers:
                 continue
 
             json_dir = subfolder / "json"
@@ -515,15 +531,7 @@ def generate_fund_graphs(output_dir: Path = None, benchmark_fund=None, language=
                 log.warn(f"Could not load {json_file.name}: {e}", phase=GRAPHS)
                 continue
 
-            # Auto-wire benchmarks if no explicit benchmark_fund provided
-            bm_dict = None
-            if benchmark_fund is None:
-                try:
-                    bm_dict = load_benchmarks()
-                except Exception:
-                    pass  # BENCHMARK.csv not available, skip
-
-            funds = init_funds([data], benchmarks=bm_dict)
+            funds = init_funds([data], benchmarks=bm_dict_preloaded)
             if not funds:
                 continue
 
@@ -561,7 +569,7 @@ def generate_fund_graphs(output_dir: Path = None, benchmark_fund=None, language=
     return results
 
 
-def backfill_computed_metrics(output_dir: Path = None):
+def backfill_computed_metrics(output_dir: Path = None, identifiers: set = None):
     """Update each fund's JSON file with computed return_pa and volatility_pa.
 
     Walks the same folder structure as generate_fund_graphs(), loads each
@@ -594,6 +602,9 @@ def backfill_computed_metrics(output_dir: Path = None):
 
             _, identifier = _parse_folder_identifier(subfolder.name)
             if not identifier:
+                continue
+
+            if identifiers is not None and identifier not in identifiers:
                 continue
 
             json_dir = subfolder / "json"

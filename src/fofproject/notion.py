@@ -44,6 +44,8 @@ from watchdog.events import FileSystemEventHandler
 from fofproject.classify import (
     SKIP_SUBFOLDERS,
     FIRM_MAPPINGS_FILE,
+    NEEDS_REVIEW_FOLDER,
+    SYSTEM_FILES,
     _parse_artifact_id_from_filename,
 )
 from fofproject.paths import DEFAULT_WATCH_FOLDER
@@ -65,6 +67,11 @@ FUND_FOLDER_PATTERN = re.compile(r"^(.+?)\s*-\s*(\d+)$")
 # Prefix used by performance.py to flag identifier conflicts
 CONFLICT_IDENTIFIER_PREFIX = "404 multiple identifier"
 
+
+# Folders that should never be treated as firms or funds by the Notion watcher.
+# Includes the classify.py review folder, system/mappings files, and
+# the conflict-identifier prefix.
+_NOTION_SKIP_FOLDERS = {NEEDS_REVIEW_FOLDER}
 
 # File size limit for single-part upload (20 MB)
 MAX_SINGLE_UPLOAD_BYTES = 20 * 1024 * 1024
@@ -88,11 +95,25 @@ PRESENTATION_KEYWORDS = [
     "ppt",
 ]
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
-log = logging.getLogger(__name__)
+from fofproject.log import log as _log, NOTION
+
+
+class _NotionLog:
+    """Adapter: forwards stdlib-style log calls to fofproject.log with phase=NOTION."""
+    @staticmethod
+    def info(msg, *args):
+        _log.info(msg % args if args else msg, phase=NOTION)
+    @staticmethod
+    def warning(msg, *args):
+        _log.warn(msg % args if args else msg, phase=NOTION)
+    @staticmethod
+    def error(msg, *args):
+        _log.error(msg % args if args else msg, phase=NOTION)
+    @staticmethod
+    def debug(msg, *args):
+        _log.detail(msg % args if args else msg, phase=NOTION)
+
+log = _NotionLog()
 
 # =========================
 # LOW-LEVEL API HELPERS
@@ -1103,14 +1124,10 @@ def get_firm_contents(firm_path: Path) -> tuple[list[Path], list[Path]]:
                     "Skipping fund folder '%s' — flagged as identifier conflict",
                     item.name,
                 )
-            elif parse_fund_folder_name(item.name):
-                fund_folders.append(item)
+            elif item.name in SKIP_SUBFOLDERS or item.name in _NOTION_SKIP_FOLDERS:
+                continue
             else:
-                log.warning(
-                    "Skipping subdirectory '%s' — doesn't match fund pattern "
-                    "'{FUND_NAME} - {ID}'",
-                    item.name,
-                )
+                fund_folders.append(item)
         elif item.is_file():
             firm_files.append(item)
 
@@ -1144,6 +1161,10 @@ def sync_fund(
     """
     Sync a single fund folder to the Notion Fund database.
 
+    Accepts fund folders with or without identifiers:
+    - "FUND_NAME - 12345" -> fund_name="FUND_NAME", identifier="12345"
+    - "FUND_NAME"         -> fund_name="FUND_NAME", identifier=""
+
     Args:
         fund_path: Path to the fund folder
         fund_db_id: Notion Fund database ID
@@ -1153,12 +1174,12 @@ def sync_fund(
         The fund page ID, or None if skipped
     """
     parsed = parse_fund_folder_name(fund_path.name)
-    if not parsed:
-        log.warning("Cannot parse fund folder name: '%s'", fund_path.name)
-        return None
-
-    fund_name, identifier = parsed
-    log.info("Syncing fund: %s (identifier: %s)", fund_name, identifier)
+    if parsed:
+        fund_name, identifier = parsed
+    else:
+        fund_name = fund_path.name.strip()
+        identifier = ""
+    log.info("Syncing fund: %s (identifier: %s)", fund_name, identifier or "none")
 
     # Check if fund already exists
     existing = _query_database_by_title(fund_db_id, fund_name, FUND_TITLE_PROP)
@@ -1169,11 +1190,12 @@ def sync_fund(
 
     # Create fund page with Identifier and AM Firm relation
     extra_properties = {
-        "Identifier": {
-            "rich_text": [{"type": "text", "text": {"content": identifier}}]
-        },
         "AM Firm": {"relation": [{"id": firm_page_id}]},
     }
+    if identifier:
+        extra_properties["Identifier"] = {
+            "rich_text": [{"type": "text", "text": {"content": identifier}}]
+        }
     fund_page_id = _create_page(
         fund_db_id,
         fund_name,
@@ -1233,6 +1255,33 @@ def sync_fund(
     return fund_page_id
 
 
+def _resolve_firm_name_from_mappings(folder_name: str, watch_folder: Path) -> str:
+    """Resolve a firm folder name to its canonical name from the mappings registry.
+
+    Falls back to the raw folder name if no mapping is found.
+    This keeps Notion page titles consistent with the canonical names
+    used by classify.py (typically upper-cased).
+    """
+    mappings = _load_mappings(watch_folder)
+    canonical_names = mappings.get("canonical_names", {})
+
+    # Direct match against canonical keys
+    upper = folder_name.upper()
+    if upper in canonical_names:
+        return upper
+
+    # Match against aliases
+    for canon, info in canonical_names.items():
+        if info.get("_deleted_at"):
+            continue
+        for alias in info.get("aliases", []):
+            if alias.upper() == upper:
+                return canon
+
+    # No match — return raw name
+    return folder_name
+
+
 def sync_firm(firm_path: Path, firm_db_id: str, fund_db_id: str):
     """
     Sync a firm folder (and its fund subfolders) to Notion.
@@ -1242,11 +1291,25 @@ def sync_firm(firm_path: Path, firm_db_id: str, fund_db_id: str):
         firm_db_id: Notion Firm database ID
         fund_db_id: Notion Fund database ID
     """
-    firm_name = firm_path.name
+    if _is_skippable_folder(firm_path.name):
+        return
+
+    # Resolve to canonical firm name from classify.py mappings
+    watch_folder_path = firm_path.parent
+    firm_name = _resolve_firm_name_from_mappings(firm_path.name, watch_folder_path)
     log.info("=== Syncing firm: %s ===", firm_name)
 
-    # Check if firm already exists
+    # Check if firm already exists (try canonical name first, then raw folder name)
     existing = _query_database_by_title(firm_db_id, firm_name, FIRM_TITLE_PROP)
+    if not existing and firm_name != firm_path.name:
+        existing = _query_database_by_title(firm_db_id, firm_path.name, FIRM_TITLE_PROP)
+        if existing:
+            # Page exists under old name — rename to canonical
+            log.info(
+                "Firm page found under '%s', renaming to canonical '%s'",
+                firm_path.name, firm_name,
+            )
+            _rename_page_title(existing["id"], firm_name, FIRM_TITLE_PROP)
     if existing:
         firm_page_id = existing["id"]
         log.info("Firm '%s' already exists -> %s", firm_name, firm_page_id)
@@ -1607,7 +1670,15 @@ class NotionFolderHandler(FileSystemEventHandler):
         self._pool.submit(fn, *args)
 
     def _lookup_firm(self, firm_name: str) -> dict | None:
-        return self._page_cache.get(self.firm_db_id, firm_name, FIRM_TITLE_PROP)
+        # Try the given name first
+        result = self._page_cache.get(self.firm_db_id, firm_name, FIRM_TITLE_PROP)
+        if result:
+            return result
+        # Try canonical name from mappings (e.g. raw folder name -> UPPER canonical)
+        canonical = _resolve_firm_name_from_mappings(firm_name, self.watch_folder)
+        if canonical != firm_name:
+            return self._page_cache.get(self.firm_db_id, canonical, FIRM_TITLE_PROP)
+        return None
 
     def _lookup_fund(self, fund_name: str) -> dict | None:
         return self._page_cache.get(self.fund_db_id, fund_name, FUND_TITLE_PROP)
@@ -1638,6 +1709,8 @@ class NotionFolderHandler(FileSystemEventHandler):
 
         if parent == self.watch_folder:
             # New firm folder created
+            if _is_skippable_folder(new_path.name):
+                return
             log.info("New firm folder detected: %s", new_path.name)
             self._submit(sync_firm, new_path, self.firm_db_id, self.fund_db_id)
         elif parent.parent == self.watch_folder:
@@ -1648,25 +1721,25 @@ class NotionFolderHandler(FileSystemEventHandler):
                     new_path.name,
                 )
                 return
-            parsed = parse_fund_folder_name(new_path.name)
-            if parsed:
-                log.info("New fund folder detected: %s", new_path.name)
-                firm_name = parent.name
-                existing_firm = self._lookup_firm(firm_name)
-                if existing_firm:
-                    self._submit(
-                        sync_fund, new_path, self.fund_db_id, existing_firm["id"]
-                    )
-                else:
-                    log.warning(
-                        "Fund folder '%s' appeared but firm '%s' not found "
-                        "in Notion. Syncing entire firm.",
-                        new_path.name,
-                        firm_name,
-                    )
-                    self._submit(
-                        sync_firm, parent, self.firm_db_id, self.fund_db_id
-                    )
+            if new_path.name in SKIP_SUBFOLDERS or new_path.name in _NOTION_SKIP_FOLDERS:
+                return
+            log.info("New fund folder detected: %s", new_path.name)
+            firm_name = parent.name
+            existing_firm = self._lookup_firm(firm_name)
+            if existing_firm:
+                self._submit(
+                    sync_fund, new_path, self.fund_db_id, existing_firm["id"]
+                )
+            else:
+                log.warning(
+                    "Fund folder '%s' appeared but firm '%s' not found "
+                    "in Notion. Syncing entire firm.",
+                    new_path.name,
+                    firm_name,
+                )
+                self._submit(
+                    sync_firm, parent, self.firm_db_id, self.fund_db_id
+                )
 
     def _flush_pending_files(self, parent_key: str):
         """Flush accumulated file events for a single parent directory."""
@@ -1674,7 +1747,7 @@ class NotionFolderHandler(FileSystemEventHandler):
             files = self._pending_files.pop(parent_key, [])
             self._debounce_timers.pop(parent_key, None)
         for file_path in files:
-            self._handle_new_file(file_path)
+            self._submit(self._handle_new_file, file_path)
 
     def _handle_new_file(self, file_path: Path):
         """Handle a new file added to an existing firm or fund folder."""
@@ -1905,7 +1978,10 @@ class NotionFolderHandler(FileSystemEventHandler):
         # Firm folder renamed (direct child of watch folder)
         if parent == self.watch_folder:
             old_name = old_path.name
-            new_name = new_path.name
+            # Resolve to canonical so Notion title stays consistent
+            new_name = _resolve_firm_name_from_mappings(
+                new_path.name, self.watch_folder
+            )
             existing_firm = self._lookup_firm(old_name)
             if existing_firm:
                 log.info("Firm folder renamed: '%s' -> '%s'", old_name, new_name)
@@ -1962,6 +2038,29 @@ class NotionFolderHandler(FileSystemEventHandler):
                 self._page_cache.invalidate(
                     self.fund_db_id, old_fund_name, FUND_TITLE_PROP
                 )
+            else:
+                # No existing Notion page (e.g. folder had no identifier before
+                # and was never synced). Create the page and upload all files.
+                log.info(
+                    "Fund folder renamed '%s' -> '%s' but no Notion page exists "
+                    "— creating page and uploading files",
+                    old_path.name,
+                    new_path.name,
+                )
+                firm_name = parent.name
+                existing_firm = self._lookup_firm(firm_name)
+                if existing_firm:
+                    self._submit(
+                        sync_fund, new_path, self.fund_db_id, existing_firm["id"]
+                    )
+                else:
+                    log.warning(
+                        "Firm '%s' not found in Notion — syncing entire firm",
+                        firm_name,
+                    )
+                    self._submit(
+                        sync_firm, parent, self.firm_db_id, self.fund_db_id
+                    )
 
     def _handle_file_rename(self, old_path: Path, new_path: Path):
         """Handle a file being renamed or moved — rename block or move between pages."""
@@ -2748,6 +2847,16 @@ class NotionPoller:
 # =========================
 
 
+def _is_skippable_folder(name: str) -> bool:
+    """Return True if a folder should never be treated as a firm or fund."""
+    return (
+        name.startswith(".")
+        or name in _NOTION_SKIP_FOLDERS
+        or name in SYSTEM_FILES
+        or name.startswith(CONFLICT_IDENTIFIER_PREFIX)
+    )
+
+
 def initial_scan(watch_folder: Path, firm_db_id: str, fund_db_id: str):
     """Scan existing folders and sync any that aren't yet in Notion."""
     if not watch_folder.exists():
@@ -2755,7 +2864,7 @@ def initial_scan(watch_folder: Path, firm_db_id: str, fund_db_id: str):
         return
 
     for firm_folder in watch_folder.iterdir():
-        if firm_folder.is_dir():
+        if firm_folder.is_dir() and not _is_skippable_folder(firm_folder.name):
             sync_firm(firm_folder, firm_db_id, fund_db_id)
 
 

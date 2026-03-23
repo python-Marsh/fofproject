@@ -8,11 +8,12 @@ import os
 import json
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 import requests
 import msal
 
+from fofproject.log import log, EMAIL
 from fofproject.paths import EMAIL_STORAGE_DIR
 
 # =========================
@@ -464,10 +465,13 @@ def get_downloaded_ids(base_dir: Path) -> set:
     if not index_path.exists():
         return set()
 
-    with open(index_path, 'r', encoding='utf-8') as f:
-        index = json.load(f)
-
-    return set(index.get("emails", {}).keys())
+    try:
+        with open(index_path, 'r', encoding='utf-8') as f:
+            index = json.load(f)
+        return set(index.get("emails", {}).keys())
+    except (json.JSONDecodeError, KeyError):
+        log.warn(f"Corrupted index.json at {index_path}, treating as empty.", phase=EMAIL)
+        return set()
 
 
 # =============================================================================
@@ -646,29 +650,29 @@ def monitor_emails(token_func, base_dir: Path = None, poll_interval: int = 60,
     # Load downloaded IDs once, then maintain in memory
     downloaded_ids = get_downloaded_ids(base_dir)
     # Track the high-water mark so we only ask for emails newer than this
-    last_check_time = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    last_check_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    print(f"Starting email monitor. Checking every {poll_interval} seconds.", flush=True)
-    print(f"Saving to: {base_dir}", flush=True)
-    print("Press Ctrl+C to stop.", flush=True)
+    log.info(f"Starting email monitor. Checking every {poll_interval} seconds.", phase=EMAIL)
+    log.info(f"Saving to: {base_dir}", phase=EMAIL)
+    log.info("Press Ctrl+C to stop.", phase=EMAIL)
 
     try:
         while True:
             # Check runtime limit
             if max_runtime and (time.time() - start_time) > max_runtime:
-                print(f"Max runtime reached ({max_runtime}s). Stopping.", flush=True)
+                log.info(f"Max runtime reached ({max_runtime}s). Stopping.", phase=EMAIL)
                 break
 
             try:
                 # Get fresh token for each poll cycle to handle expiration
                 token = token_func()
             except Exception as e:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Token refresh failed: {e}", flush=True)
+                log.error(f"Token refresh failed: {e}", phase=EMAIL)
                 time.sleep(poll_interval)
                 continue
 
             headers = {"Authorization": f"Bearer {token}"}
-            cycle_check_time = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+            cycle_check_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
             # Use receivedDateTime filter so bursts of >1 page are fully captured
             url = f"{GRAPH}/me/mailFolders/Inbox/messages"
@@ -681,13 +685,15 @@ def monitor_emails(token_func, base_dir: Path = None, poll_interval: int = 60,
 
             try:
                 new_emails = []
+                cycle_failed = False
                 # Paginate through all emails received since last_check_time
                 while url:
                     r = requests.get(url, headers=headers, params=params, timeout=30)
 
                     # Handle token expiration specifically
                     if r.status_code == 401:
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] Token expired, will refresh on next cycle.", flush=True)
+                        log.warn("Token expired, will refresh on next cycle.", phase=EMAIL)
+                        cycle_failed = True
                         break
 
                     r.raise_for_status()
@@ -701,9 +707,12 @@ def monitor_emails(token_func, base_dir: Path = None, poll_interval: int = 60,
                     url = data.get("@odata.nextLink")
                     params = {}  # nextLink already contains query params
 
+                if cycle_failed:
+                    time.sleep(poll_interval)
+                    continue
+
                 if new_emails:
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Found {len(new_emails)} new email(s)",
-                          flush=True)
+                    log.info(f"Found {len(new_emails)} new email(s)", phase=EMAIL)
 
                     for msg in new_emails:
                         try:
@@ -717,27 +726,26 @@ def monitor_emails(token_func, base_dir: Path = None, poll_interval: int = 60,
                             downloaded_ids.add(msg["id"])
                             total_downloaded += 1
                             att_count = len(metadata.get("attachments", []))
-                            print(f"  New email: {msg.get('subject', '')[:50]} [{att_count} att]",
-                                  flush=True)
+                            log.detail(f"  New email: {msg.get('subject', '')[:50]} [{att_count} att]", phase=EMAIL)
 
                         except Exception as e:
-                            print(f"  ERROR: {e}", flush=True)
+                            log.error(f"  {e}", phase=EMAIL)
                 else:
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] No new emails.", flush=True)
+                    log.detail("No new emails.", phase=EMAIL)
 
                 # Advance the high-water mark after a successful cycle
                 last_check_time = cycle_check_time
 
             except requests.exceptions.RequestException as e:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] API error: {e}", flush=True)
+                log.error(f"API error: {e}", phase=EMAIL)
 
             # Wait before next check
             time.sleep(poll_interval)
 
     except KeyboardInterrupt:
-        print("\nMonitor stopped by user.", flush=True)
+        log.info("Monitor stopped by user.", phase=EMAIL)
 
-    print(f"Total emails downloaded during session: {total_downloaded}", flush=True)
+    log.info(f"Total emails downloaded during session: {total_downloaded}", phase=EMAIL)
 
 
 def main():

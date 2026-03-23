@@ -43,7 +43,12 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\(''src/fofproject/performance.py''\\).read\\(\\)\\); print\\(''performance.py OK''\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\(''src/fofproject/classify.py'', encoding=''utf-8-sig''\\).read\\(\\)\\); print\\(''classify.py OK''\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\(''src/fofproject/performance.py'', encoding=''utf-8-sig''\\).read\\(\\)\\); print\\(''performance.py OK''\\)\")",
-      "Bash(python /tmp/stress_test_reassign.py)"
+      "Bash(python /tmp/stress_test_reassign.py)",
+      "Bash(source /workspaces/fofproject/.venv/bin/activate)",
+      "Bash(python -c \"import fofproject; print\\(''OK''\\)\")",
+      "Bash(python -c \":*)",
+      "Bash(source .venv/bin/activate)",
+      "Bash(python /tmp/stress_test_connection.py)"
     ],
     "additionalDirectories": [
       "/tmp"

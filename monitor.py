@@ -130,7 +130,7 @@ def monitoring(
     )
     notion_thread.start()
 
-    # ── Start email monitor in background ─────────────────
+    # # ── Start email monitor in background ─────────────────
     email_thread = threading.Thread(
         target=_run_email_monitor, args=(poll_interval,), daemon=True
     )
@@ -161,9 +161,9 @@ def monitoring(
                 for item in classify_result["classifications"]:
                     firm = item.get("firm")
                     if firm:
-                        log.info(f"  + {item['subject'][:45]}  ->  {firm}", phase=CLASSIFY)
+                        log.detail(f"  + {item['subject'][:45]}  ->  {firm}", phase=CLASSIFY)
                     else:
-                        log.info(
+                        log.detail(
                             f"  - {item['subject'][:45]}  ({item.get('reason', 'skipped')})",
                             phase=CLASSIFY,
                         )
@@ -173,8 +173,9 @@ def monitoring(
 
             if perf_results:
                 had_activity = True
-                generate_fund_graphs(output_dir)
-                backfill_computed_metrics(output_dir)
+                affected_ids = {r["identifier"] for r in perf_results if r.get("identifier")}
+                generate_fund_graphs(output_dir, identifiers=affected_ids or None)
+                backfill_computed_metrics(output_dir, identifiers=affected_ids or None)
 
             # ── 3. Reconcile misplaced artifacts ─────────────
             reconcile_result = reconcile_misplaced_artifacts(
@@ -185,7 +186,7 @@ def monitoring(
                 had_activity = True
                 _section(RECONCILE, f"Relocated {len(reconcile_result['relocated'])} misplaced artifact(s)")
                 for r in reconcile_result["relocated"]:
-                    log.info(
+                    log.detail(
                         f"  >> {r['file_name']} [{r['artifact_id']}]"
                         f"  {r['from']} -> {r['to']}",
                         phase=RECONCILE,
@@ -203,7 +204,7 @@ def monitoring(
                 had_activity = True
                 _section(SYNC, f"Synced {len(move_result['moved'])} moved artifact(s)")
                 for m in move_result["moved"]:
-                    log.info(
+                    log.detail(
                         f"  ~ {m.get('old_file', '?')} [{m.get('artifact_id', '')}]"
                         f"  {m.get('from', '?')} -> {m.get('to', '?')}",
                         phase=SYNC,
@@ -213,26 +214,26 @@ def monitoring(
                 had_activity = True
                 _section(SYNC, f"Registered {len(move_result['new_folders'])} new folder(s)")
                 for nf in move_result["new_folders"]:
-                    log.info(f"  + {nf['folder']}  ->  {nf['firm']}", phase=SYNC)
+                    log.detail(f"  + {nf['folder']}  ->  {nf['firm']}", phase=SYNC)
 
             if move_result.get("new_artifacts"):
                 had_activity = True
                 _section(SYNC, f"Tagged {len(move_result['new_artifacts'])} new artifact(s)")
                 for na in move_result["new_artifacts"]:
                     loc = na["firm"] + (f"/{na['fund']}" if na.get("fund") else "")
-                    log.info(f"  + {na['file_name']} [{na['artifact_id']}]  ->  {loc}", phase=SYNC)
+                    log.detail(f"  + {na['file_name']} [{na['artifact_id']}]  ->  {loc}", phase=SYNC)
 
             if move_result.get("removed_folders"):
                 had_activity = True
                 _section(SYNC, f"Soft-deleted {len(move_result['removed_folders'])} folder(s)")
                 for rf in move_result["removed_folders"]:
-                    log.info(f"  - {rf['folder']} ({rf['type']} under {rf['firm']})", phase=SYNC)
+                    log.detail(f"  - {rf['folder']} ({rf['type']} under {rf['firm']})", phase=SYNC)
 
             if move_result.get("deleted_artifacts"):
                 had_activity = True
                 _section(SYNC, f"Soft-deleted {len(move_result['deleted_artifacts'])} artifact(s)")
                 for da in move_result["deleted_artifacts"]:
-                    log.info(f"  - {da['file_name']} [{da['artifact_id']}]", phase=SYNC)
+                    log.detail(f"  - {da['file_name']} [{da['artifact_id']}]", phase=SYNC)
 
             for err in move_result.get("errors", []):
                 log.error(f"  {err}", phase=SYNC)
