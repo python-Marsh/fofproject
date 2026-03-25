@@ -16,9 +16,6 @@ poetry install
 poetry run python automation.py
 poetry run python with_intelligence_award.py
 
-# Streamlit web UI
-poetry run streamlit run app.py
-
 # Jupyter notebook
 poetry run jupyter lab fund_workstation.ipynb
 
@@ -53,8 +50,6 @@ poetry run pytest
 ### Root-Level Scripts
 
 - **automation.py** - Automated monthly reporting. `presentation_data_update(month)` generates comprehensive performance metrics, PNG tables, and cumulative return plots for the portfolio.
-
-- **app.py** - Streamlit web UI for interactive portfolio comparison, risk analysis, performance visualization, and optimization. Password-protected.
 
 - **with_intelligence_award.py** - Award calculation script. Screens funds by Sharpe ratio quartile and ranks by return.
 
@@ -123,7 +118,7 @@ Tests are in `tests/` using pytest:
 - **PDF**: pymupdf (fitz)
 - **AI**: openai, openai-agents
 - **Documents**: python-docx, python-pptx, fpdf2
-- **Web/API**: requests, selenium, beautifulsoup4, streamlit
+- **Web/API**: requests, selenium, beautifulsoup4
 - **Auth**: msal, python-dotenv
 - **Monitoring**: watchdog
 - **Dev**: pytest, pytest-cov, ruff

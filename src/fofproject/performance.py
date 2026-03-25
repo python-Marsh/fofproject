@@ -466,6 +466,38 @@ def process_performance_updates(
     return results
 
 
+def find_funds_missing_graphs(output_dir: Path = None) -> set:
+    """Return identifiers of funds that have JSON data but no exported graphs.
+
+    This catches resolved 404-conflict folders (renamed from
+    ``404 multiple identifier_X`` to ``X - ID``) and any other funds
+    whose graphs haven't been generated yet.
+    """
+    output_dir = output_dir or DEFAULT_OUTPUT_DIR
+    if not output_dir.exists():
+        return set()
+
+    missing = set()
+    for firm_folder in output_dir.iterdir():
+        if not firm_folder.is_dir() or firm_folder.name.startswith("."):
+            continue
+        for subfolder in firm_folder.iterdir():
+            if not subfolder.is_dir() or subfolder.name.startswith("."):
+                continue
+            if subfolder.name.startswith(CONFLICT_IDENTIFIER_PREFIX):
+                continue
+            _, identifier = _parse_folder_identifier(subfolder.name)
+            if not identifier:
+                continue
+            json_file = subfolder / "json" / f"{identifier}.json"
+            if not json_file.is_file():
+                continue
+            graph_dir = subfolder / "graph"
+            if not graph_dir.is_dir() or not any(graph_dir.iterdir()):
+                missing.add(identifier)
+    return missing
+
+
 def generate_fund_graphs(output_dir: Path = None, benchmark_fund=None, language="en", identifiers: set = None):
     """Load JSON from each fund's json/ folder and export summary graphs.
 

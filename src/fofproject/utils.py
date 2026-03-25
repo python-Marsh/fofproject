@@ -31,3 +31,38 @@ def hex_to_rgba(hex_color: str, alpha: float = 0.2) -> str:
     r, g, b = tuple(int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
     return f"rgba({r},{g},{b},{alpha})"
 
+
+def compute_identifier(performance_data):
+    """Compute a fund identifier from the first 5 months of performance data.
+
+    Takes the last 2 decimal digits of each of the first 5 monthly returns
+    and concatenates them. For example, if the first 5 returns are
+    3.17%, 0.01%, -0.51%, 3.33%, -7.81% (stored as 0.0317, 0.0001, -0.0051,
+    0.0333, -0.0781), the identifier is "1701513381".
+
+    The values are sorted chronologically (earliest first), so we take the
+    first 5 dates in ascending order.
+    """
+    if not isinstance(performance_data, list) or len(performance_data) < 5:
+        return ""
+
+    # Sort by date ascending and take first 5
+    sorted_perf = sorted(
+        performance_data, key=lambda x: datetime.strptime(x["date"], "%d/%m/%Y")
+    )
+    first_five = sorted_perf[:5]
+
+    identifier_parts = []
+    for entry in first_five:
+        # Multiply by 100 to get percentage, e.g. 0.0317 -> 3.17
+        pct_value = entry["value"] * 100
+        # Format to 2 decimal places and take last 2 digits of the decimal
+        formatted = f"{abs(pct_value):.2f}"
+        # Get the 2 decimal digits (after the dot)
+        decimal_part = formatted.split(".")[1]
+        identifier_parts.append(decimal_part)
+
+    identifier = "".join(identifier_parts)
+    # Ensure identifier is always exactly 10 digits
+    return identifier[:10].ljust(10, "0")
+

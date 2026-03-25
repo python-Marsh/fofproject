@@ -51,7 +51,8 @@
       "Bash(python /tmp/stress_test_connection.py)"
     ],
     "additionalDirectories": [
-      "/tmp"
+      "/tmp",
+      "/workspaces/fofproject"
     ]
   }
 }

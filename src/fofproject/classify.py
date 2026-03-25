@@ -3140,6 +3140,7 @@ def _scan_disk_state(output_dir: Path) -> dict:
                 f.is_file()
                 and not f.name.startswith(".")
                 and f.name not in SYSTEM_FILES
+                and not _is_zone_identifier(f.name)
             ):
                 if f.suffix.lower() == ".json" and ".link.json" not in f.name.lower():
                     continue
@@ -3178,6 +3179,7 @@ def _scan_disk_state(output_dir: Path) -> dict:
                     f.is_file()
                     and not f.name.startswith(".")
                     and f.name not in SYSTEM_FILES
+                    and not _is_zone_identifier(f.name)
                 ):
                     if (
                         f.suffix.lower() == ".json"
@@ -4186,6 +4188,14 @@ SYSTEM_FILES = {
 }
 
 SKIP_SUBFOLDERS = {"json", "graph", "meetings", "researches"}
+
+# Windows Zone.Identifier alternate data streams (exposed as files on WSL2)
+_ZONE_ID_SUFFIX = ".identifier"
+
+
+def _is_zone_identifier(filename: str) -> bool:
+    """Return True if the file is a Windows Zone.Identifier ADS artifact."""
+    return filename.lower().endswith(_ZONE_ID_SUFFIX)
 
 
 def add_email_override(email_address: str, firm_name: str, output_dir: Path = None):

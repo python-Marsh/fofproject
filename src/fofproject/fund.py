@@ -1,14 +1,15 @@
 from __future__ import annotations
 import math
+from collections import OrderedDict
+from collections.abc import MutableMapping
 from datetime import datetime
-from pathlib import Path
 from typing import Dict, List, Union, Optional
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from matplotlib.font_manager import FontProperties
-from fofproject.utils import hex_to_rgba, parse_month
+from fofproject.utils import hex_to_rgba, parse_month, compute_identifier
 from dateutil.relativedelta import relativedelta
 
 from fofproject.paths import SAVE_DIR as save_dir
@@ -109,19 +110,21 @@ def load_benchmarks(file_path="BENCHMARK.csv"):
         Dictionary mapping benchmark names to Fund objects.
     """
     df = pd.read_csv(file_path)
-    funds = {}
+    funds = FundDict()
     for col in df.columns:
         if col == "date":
             continue
         returns = [
             {"date": d, "value": v} for d, v in zip(df["date"], df[col]) if pd.notna(v)
         ]
-        funds[col] = Fund(
+        fund = Fund(
             name=col,
             monthly_returns=returns,
+            identifier=compute_identifier(returns),
             performance_fee=0,
             management_fee=0,
         )
+        funds[col] = fund
     return funds
 
 
@@ -143,6 +146,155 @@ def assign_benchmarks(funds, benchmarks):
         name = getattr(fund, "suggested_benchmark_name", None)
         if name and name in benchmarks:
             fund.default_benchmark = benchmarks[name]
+
+
+class FundDict(MutableMapping):
+    """A dict-like container that keys funds by identifier internally.
+
+    Externally it behaves like a regular ``dict[str, Fund]`` keyed by
+    fund *name* — iteration, ``in``, ``keys()``, ``items()`` all expose
+    names so that downstream code (batch.py, automation.py, …) works
+    unchanged.
+
+    When two funds share the same *name* but have different *identifiers*,
+    both are stored without overwriting.  A name-based lookup in that case
+    raises ``KeyError`` listing the ambiguous identifiers so the caller
+    can disambiguate.
+
+    Direct identifier-based access (``fd[identifier_string]``) also works.
+    """
+
+    def __init__(self, *args, **kwargs):
+        # _store: identifier → Fund  (the authoritative store)
+        self._store: OrderedDict[str, "Fund"] = OrderedDict()
+        # _name_index: name → [identifier, …]  (insertion-ordered)
+        self._name_index: dict[str, list[str]] = {}
+        # Bootstrap from a plain dict / iterable of pairs
+        if args or kwargs:
+            tmp = dict(*args, **kwargs)
+            for v in tmp.values():
+                self._insert(v)
+
+    # ---- internal helpers ------------------------------------------------
+
+    def _insert(self, fund: "Fund"):
+        ident = fund.identifier or fund.name
+        self._store[ident] = fund
+        self._name_index.setdefault(fund.name, [])
+        if ident not in self._name_index[fund.name]:
+            self._name_index[fund.name].append(ident)
+
+    def _resolve_key(self, key: str) -> str:
+        """Return the identifier for *key* (which may be a name or identifier)."""
+        # Direct identifier hit
+        if key in self._store:
+            return key
+        # Name-based lookup
+        ids = self._name_index.get(key)
+        if ids is None:
+            raise KeyError(key)
+        if len(ids) == 1:
+            return ids[0]
+        raise KeyError(
+            f"Ambiguous fund name '{key}' maps to {len(ids)} funds "
+            f"(identifiers: {ids}). Use the identifier to access the "
+            f"specific fund."
+        )
+
+    # ---- MutableMapping interface ----------------------------------------
+
+    def __getitem__(self, key: str) -> "Fund":
+        return self._store[self._resolve_key(key)]
+
+    def __setitem__(self, key: str, fund: "Fund"):
+        # ``key`` is ignored in favour of the fund's own identifier.
+        self._insert(fund)
+
+    def __delitem__(self, key: str):
+        ident = self._resolve_key(key)
+        fund = self._store.pop(ident)
+        ids = self._name_index.get(fund.name, [])
+        if ident in ids:
+            ids.remove(ident)
+        if not ids:
+            self._name_index.pop(fund.name, None)
+
+    def __contains__(self, key) -> bool:
+        try:
+            self._resolve_key(key)
+            return True
+        except KeyError:
+            return False
+
+    def __len__(self) -> int:
+        return len(self._store)
+
+    def __iter__(self):
+        """Yield fund *names* in insertion order (backward compat)."""
+        for fund in self._store.values():
+            yield fund.name
+
+    def __repr__(self):
+        names = [f.name for f in self._store.values()]
+        return f"FundDict({names})"
+
+    # ---- dict-style conveniences -----------------------------------------
+
+    def keys(self):
+        return list(self)
+
+    def values(self):
+        return list(self._store.values())
+
+    def items(self):
+        return [(f.name, f) for f in self._store.values()]
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def update(self, other=None, **kwargs):
+        if other is not None:
+            if isinstance(other, FundDict):
+                for fund in other._store.values():
+                    self._insert(fund)
+            elif isinstance(other, dict):
+                for v in other.values():
+                    self._insert(v)
+            else:
+                for k, v in other:
+                    self._insert(v)
+        for v in kwargs.values():
+            self._insert(v)
+
+    def pop(self, key, *args):
+        try:
+            ident = self._resolve_key(key)
+        except KeyError:
+            if args:
+                return args[0]
+            raise
+        fund = self._store.pop(ident)
+        ids = self._name_index.get(fund.name, [])
+        if ident in ids:
+            ids.remove(ident)
+        if not ids:
+            self._name_index.pop(fund.name, None)
+        return fund
+
+    def by_identifier(self, identifier: str) -> "Fund":
+        """Direct lookup by identifier, bypassing name resolution."""
+        return self._store[identifier]
+
+    def identifiers(self):
+        """Return list of all identifiers in insertion order."""
+        return list(self._store.keys())
+
+    def has_duplicate_names(self) -> dict[str, list[str]]:
+        """Return {name: [ids]} for names that map to multiple funds."""
+        return {n: ids for n, ids in self._name_index.items() if len(ids) > 1}
 
 
 def input_monthly_returns(
@@ -188,7 +340,9 @@ def input_monthly_returns(
     """
     # Read CSV file
     df = pd.read_csv(file_path)
-    funds = {}
+    # Drop unnamed columns caused by trailing commas in the CSV
+    df = df.loc[:, ~df.columns.str.startswith("Unnamed")]
+    funds = FundDict()
     for col in df.columns:
         if col == "date":
             continue  # skip the date column
@@ -198,12 +352,14 @@ def input_monthly_returns(
         ]
 
         # Create a Fund instance
-        funds[col] = Fund(
+        fund = Fund(
             name=col,
             monthly_returns=returns,
+            identifier=compute_identifier(returns),
             performance_fee=performance_fee,
             management_fee=management_fee,
         )
+        funds[col] = fund
 
     # Auto-load benchmarks from separate CSV
     if benchmark_csv:
@@ -244,8 +400,12 @@ def subset_of_funds(funds, keys=["RDGFF", "MSCI CHINA", "MSCI GLOBAL"]):
     >>> selected = subset_of_funds(all_funds, ["RDGFF", "MSCI CHINA"])
     >>> plot_cumulative_returns(selected)
     """
-    funds_to_be_plot = {k: funds.get(k, None) for k in keys}
-    return funds_to_be_plot
+    result = FundDict()
+    for k in keys:
+        fund = funds.get(k, None)
+        if fund is not None:
+            result[k] = fund
+    return result
 
 
 class Fund:
@@ -1001,7 +1161,9 @@ class Fund:
         """
         benchmark_fund = benchmark_fund or self.default_benchmark
         if benchmark_fund is None:
-            raise ValueError(f"{self.name}: benchmark_fund required but none provided and no default_benchmark set")
+            raise ValueError(
+                f"{self.name}: benchmark_fund required but none provided and no default_benchmark set"
+            )
         fund1 = self.monthly_returns  # market returns
         fund2 = benchmark_fund.monthly_returns  # stock returns
 
@@ -1061,7 +1223,9 @@ class Fund:
         """
         benchmark_fund = benchmark_fund or self.default_benchmark
         if benchmark_fund is None:
-            raise ValueError(f"{self.name}: benchmark_fund required but none provided and no default_benchmark set")
+            raise ValueError(
+                f"{self.name}: benchmark_fund required but none provided and no default_benchmark set"
+            )
         fund1_values, fund2_values = self.join_two_funds(
             benchmark_fund=benchmark_fund, start_month=start_month, end_month=end_month
         )
@@ -1108,7 +1272,9 @@ class Fund:
         """
         benchmark_fund = benchmark_fund or self.default_benchmark
         if benchmark_fund is None:
-            raise ValueError(f"{self.name}: benchmark_fund required but none provided and no default_benchmark set")
+            raise ValueError(
+                f"{self.name}: benchmark_fund required but none provided and no default_benchmark set"
+            )
         fund1_values, fund2_values = self.join_two_funds(
             benchmark_fund=benchmark_fund, start_month=start_month, end_month=end_month
         )
@@ -1124,7 +1290,9 @@ class Fund:
 
         return beta
 
-    def upside_capture_ratio(self, benchmark_fund=None, start_month=None, end_month=None):
+    def upside_capture_ratio(
+        self, benchmark_fund=None, start_month=None, end_month=None
+    ):
         """
         Calculate upside capture ratio relative to a benchmark.
 
@@ -1159,7 +1327,9 @@ class Fund:
         """
         benchmark_fund = benchmark_fund or self.default_benchmark
         if benchmark_fund is None:
-            raise ValueError(f"{self.name}: benchmark_fund required but none provided and no default_benchmark set")
+            raise ValueError(
+                f"{self.name}: benchmark_fund required but none provided and no default_benchmark set"
+            )
         fund_values, benchmark_values = self.join_two_funds(
             benchmark_fund=benchmark_fund, start_month=start_month, end_month=end_month
         )
@@ -1187,7 +1357,9 @@ class Fund:
 
         return (fund_compound / bench_compound) * 100
 
-    def downside_capture_ratio(self, benchmark_fund=None, start_month=None, end_month=None):
+    def downside_capture_ratio(
+        self, benchmark_fund=None, start_month=None, end_month=None
+    ):
         """
         Calculate downside capture ratio relative to a benchmark.
 
@@ -1222,7 +1394,9 @@ class Fund:
         """
         benchmark_fund = benchmark_fund or self.default_benchmark
         if benchmark_fund is None:
-            raise ValueError(f"{self.name}: benchmark_fund required but none provided and no default_benchmark set")
+            raise ValueError(
+                f"{self.name}: benchmark_fund required but none provided and no default_benchmark set"
+            )
         fund_values, benchmark_values = self.join_two_funds(
             benchmark_fund=benchmark_fund, start_month=start_month, end_month=end_month
         )
@@ -1284,7 +1458,9 @@ class Fund:
         """
         benchmark_fund = benchmark_fund or self.default_benchmark
         if benchmark_fund is None:
-            raise ValueError(f"{self.name}: benchmark_fund required but none provided and no default_benchmark set")
+            raise ValueError(
+                f"{self.name}: benchmark_fund required but none provided and no default_benchmark set"
+            )
         upside = self.upside_capture_ratio(benchmark_fund, start_month, end_month)
         downside = self.downside_capture_ratio(benchmark_fund, start_month, end_month)
 
@@ -1577,7 +1753,9 @@ class Fund:
         """
         benchmark_fund = benchmark_fund or self.default_benchmark
         if benchmark_fund is None:
-            raise ValueError(f"{self.name}: benchmark_fund required but none provided and no default_benchmark set")
+            raise ValueError(
+                f"{self.name}: benchmark_fund required but none provided and no default_benchmark set"
+            )
 
         # Align both series by date
         fund_returns = self.monthly_returns

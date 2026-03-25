@@ -13,7 +13,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from fofproject.log import log, set_verbose, CLASSIFY, RECONCILE, SYNC, MONITOR, NOTION, EMAIL
+from fofproject.log import log, set_verbose, CLASSIFY, RECONCILE, SYNC, MONITOR, NOTION, EMAIL, GRAPHS
 from fofproject.paths import DEFAULT_EMAIL_INPUT_DIR, DEFAULT_OUTPUT_DIR, EMAIL_STORAGE_DIR
 from fofproject.notion import watch_folder
 from fofproject.connection import monitor_emails, create_token_provider
@@ -36,6 +36,7 @@ from fofproject.performance import (
     process_performance_updates,
     generate_fund_graphs,
     backfill_computed_metrics,
+    find_funds_missing_graphs,
 )
 
 
@@ -176,6 +177,14 @@ def monitoring(
                 affected_ids = {r["identifier"] for r in perf_results if r.get("identifier")}
                 generate_fund_graphs(output_dir, identifiers=affected_ids or None)
                 backfill_computed_metrics(output_dir, identifiers=affected_ids or None)
+
+            # ── 2b. Generate graphs for resolved conflicts ──
+            missing_ids = find_funds_missing_graphs(output_dir)
+            if missing_ids:
+                had_activity = True
+                _section(GRAPHS, f"Generating graphs for {len(missing_ids)} fund(s) missing graphs")
+                generate_fund_graphs(output_dir, identifiers=missing_ids)
+                backfill_computed_metrics(output_dir, identifiers=missing_ids)
 
             # ── 3. Reconcile misplaced artifacts ─────────────
             reconcile_result = reconcile_misplaced_artifacts(

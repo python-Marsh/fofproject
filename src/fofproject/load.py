@@ -5,7 +5,8 @@ from pathlib import Path
 env_path = Path(__file__).parent / ".env"
 load_dotenv(dotenv_path=env_path)
 from typing import List, Dict
-from fofproject.fund import Fund
+from fofproject.fund import Fund, FundDict
+from fofproject.utils import compute_identifier  # noqa: F401 — re-exported
 from fofproject.log import log, LOAD
 from openai import OpenAI
 from datetime import datetime
@@ -354,7 +355,9 @@ def _ytd_cross_validate_rows(
 def process_performance(data):
     # GPT's own screening
     if data["fund_name"] == "ERROR":
-        log.detail(f"{data['fund_name']}: no performance table found by GPT.", phase=LOAD)
+        log.detail(
+            f"{data['fund_name']}: no performance table found by GPT.", phase=LOAD
+        )
         return []
 
     table = data["performance"]["table"]
@@ -427,7 +430,9 @@ def process_performance(data):
                 year = year_counter
                 years.append(year)
                 year_counter -= 1
-                log.detail(f"No valid year found in row, defaulting to {year}.", phase=LOAD)
+                log.detail(
+                    f"No valid year found in row, defaulting to {year}.", phase=LOAD
+                )
             raw_row_lengths[year] = len(data)
             results.append({year: values})
 
@@ -540,41 +545,6 @@ def process_performance(data):
     return cleaned_rows
 
 
-def compute_identifier(performance_data):
-    """Compute a fund identifier from the first 5 months of performance data.
-
-    Takes the last 2 decimal digits of each of the first 5 monthly returns
-    and concatenates them. For example, if the first 5 returns are
-    3.17%, 0.01%, -0.51%, 3.33%, -7.81% (stored as 0.0317, 0.0001, -0.0051,
-    0.0333, -0.0781), the identifier is "1701513381".
-
-    The values are sorted chronologically (earliest first), so we take the
-    first 5 dates in ascending order.
-    """
-    if not isinstance(performance_data, list) or len(performance_data) < 5:
-        return ""
-
-    # Sort by date ascending and take first 5
-    sorted_perf = sorted(
-        performance_data, key=lambda x: datetime.strptime(x["date"], "%d/%m/%Y")
-    )
-    first_five = sorted_perf[:5]
-
-    identifier_parts = []
-    for entry in first_five:
-        # Multiply by 100 to get percentage, e.g. 0.0317 -> 3.17
-        pct_value = entry["value"] * 100
-        # Format to 2 decimal places and take last 2 digits of the decimal
-        formatted = f"{abs(pct_value):.2f}"
-        # Get the 2 decimal digits (after the dot)
-        decimal_part = formatted.split(".")[1]
-        identifier_parts.append(decimal_part)
-
-    identifier = "".join(identifier_parts)
-    # Ensure identifier is always exactly 10 digits
-    return identifier[:10].ljust(10, "0")
-
-
 def _try_merge_performance(a, b, tolerance=1e-6):
     """Try to merge two result dicts whose performance overlaps numerically.
 
@@ -629,15 +599,20 @@ def _save_json_result(result, json_folder):
     Skips saving if identifier/fund_name is missing or performance is empty.
     """
     # Skip if no meaningful identifier or fund_name
-    identifier = result.get('identifier', result.get('fund_name', ''))
+    identifier = result.get("identifier", result.get("fund_name", ""))
     if not identifier or not identifier.strip():
         log.detail("Skipping JSON save: no identifier or fund name found.", phase=LOAD)
         return
 
     # Skip if performance is empty or invalid
-    perf = result.get('performance', [])
-    if not (isinstance(perf, list) and perf and all(isinstance(item, dict) for item in perf)):
-        log.detail(f"Skipping JSON save for {identifier}: no valid performance data.", phase=LOAD)
+    perf = result.get("performance", [])
+    if not (
+        isinstance(perf, list) and perf and all(isinstance(item, dict) for item in perf)
+    ):
+        log.detail(
+            f"Skipping JSON save for {identifier}: no valid performance data.",
+            phase=LOAD,
+        )
         return
 
     os.makedirs(json_folder, exist_ok=True)
@@ -685,7 +660,11 @@ def _save_json_result(result, json_folder):
 def _has_valid_performance(result):
     """Return True if result contains a non-empty list of performance dicts."""
     val = result.get("performance")
-    return isinstance(val, list) and len(val) > 0 and all(isinstance(item, dict) for item in val)
+    return (
+        isinstance(val, list)
+        and len(val) > 0
+        and all(isinstance(item, dict) for item in val)
+    )
 
 
 def _collect_result(result, fund_name, results, no_perf_list, folder_path, save):
@@ -790,7 +769,10 @@ def gpt_process_pdf(file_path: str):
     # Cannot parse pdf into text, try uploading pdf directly
     if not text:
         data = _gpt_extract_from_file(client, file_path)
-        log.detail(f"{data['fund_name']}: using PDF image extraction (values may be unstable).", phase=LOAD)
+        log.detail(
+            f"{data['fund_name']}: using PDF image extraction (values may be unstable).",
+            phase=LOAD,
+        )
         data["fund_name"] = f"{data['fund_name']} from_pdf"
     else:
         data = _gpt_extract_from_text(client, text)
@@ -883,7 +865,9 @@ def process_single_pdf(file_path, save=True, funds=None):
     return result
 
 
-def process_pdfs_in_folder(folder_path="input", save=False, prefix_hint="_parsed from_"):
+def process_pdfs_in_folder(
+    folder_path="input", save=False, prefix_hint="_parsed from_"
+):
     """
     Iterates through all PDFs in the same folder as this script (relative path).
     Returns a list of JSON results.
@@ -895,7 +879,9 @@ def process_pdfs_in_folder(folder_path="input", save=False, prefix_hint="_parsed
             file_path = os.path.join(folder_path, file_name)
             log.detail(f"Processing: {file_path}.", phase=LOAD)
             result = gpt_process_pdf(file_path)
-            _collect_result(result, result["fund_name"], results, no_perf_list, folder_path, save)
+            _collect_result(
+                result, result["fund_name"], results, no_perf_list, folder_path, save
+            )
             # Renaming of the pdf. file
             base, ext = os.path.splitext(file_name)
             if prefix_hint in base:
@@ -944,7 +930,9 @@ def rerun_no_perf_files(folder_path="input", save=False):
         for prefix in fund_prefixes:
             if base.startswith(prefix):
                 file_path = os.path.join(folder_path, file_name)
-                log.detail(f"Re-processing: {file_path} (no performance before).", phase=LOAD)
+                log.detail(
+                    f"Re-processing: {file_path} (no performance before).", phase=LOAD
+                )
                 result = gpt_process_pdf(file_path)
 
                 # Check performance again
@@ -990,7 +978,9 @@ def continue_running(folder_path="input", save=False, prefix_hint="_parsed from_
             log.detail(f"Processing: {file_path}.", phase=LOAD)
             result = gpt_process_pdf(file_path)
 
-            _collect_result(result, result["fund_name"], results, no_perf_list, folder_path, save)
+            _collect_result(
+                result, result["fund_name"], results, no_perf_list, folder_path, save
+            )
 
             # Renaming the file with prefix_hint
             new_file_name = f"{result['fund_name']}{prefix_hint}{base}{ext}"
@@ -1108,7 +1098,9 @@ def results_to_csv(results, folder_path="input"):
     return df_combined
 
 
-def init_funds(funds_data: List[Dict], benchmarks: Dict[str, Fund] = None) -> Dict[str, Fund]:
+def init_funds(
+    funds_data: List[Dict], benchmarks: Dict[str, Fund] = None
+) -> Dict[str, Fund]:
     """Initialize Fund objects from a list of dicts.
 
     Args:
@@ -1119,7 +1111,7 @@ def init_funds(funds_data: List[Dict], benchmarks: Dict[str, Fund] = None) -> Di
     Returns:
         Dict{Fund_name: fund}: Successfully initialized Fund objects
     """
-    initialized_funds = {}
+    initialized_funds = FundDict()
     for data in funds_data:
         try:
             fund = Fund(
@@ -1145,13 +1137,16 @@ def init_funds(funds_data: List[Dict], benchmarks: Dict[str, Fund] = None) -> Di
                 performance_fee=data.get("performance_fee"),
                 suggested_benchmark_name=data.get("suggested_benchmark"),
             )
-            initialized_funds[f"{fund.name}"] = fund
+            initialized_funds[fund.name] = fund
         except ValueError as e:
             # Skip invalid funds and log the issue
-            log.detail(f"{data.get('fund_name', 'UNKNOWN')}: skipped ({e}).", phase=LOAD)
+            log.detail(
+                f"{data.get('fund_name', 'UNKNOWN')}: skipped ({e}).", phase=LOAD
+            )
 
     if benchmarks:
         from fofproject.fund import assign_benchmarks
+
         assign_benchmarks(initialized_funds, benchmarks)
 
     return initialized_funds
@@ -1228,13 +1223,14 @@ def save_changes_in_fund(funds: Dict[str, Fund], folder_path="input"):
     return funds
 
 
-def merge_funds(dict1: dict, dict2: dict) -> dict:
+def merge_funds(dict1, dict2) -> FundDict:
     """
-    Merge two dictionaries of {fund_name: fund_object}.
+    Merge two fund containers (FundDict or plain dict).
     Keep dict2's fund objects, but if a fund_name exists in both,
     overwrite only the 'monthly_returns' attribute from dict1.
     """
-    merged = dict2.copy()
+    merged = FundDict()
+    merged.update(dict2)
 
     for fund_name, fund_obj in dict1.items():
         if fund_name in merged:
@@ -1265,6 +1261,7 @@ def load_all_data(
     return_csv="RETURN DATA.csv",
     manual_csv="MANUAL OVERWRITE.csv",
     json_folders=None,
+    firms_folder="Test",
 ):
     """Load all fund data in sequence: benchmarks, CSV returns, JSON folders, manual overwrite.
 
@@ -1305,43 +1302,78 @@ def load_all_data(
     benchmarks = {}
     if os.path.exists(benchmark_path):
         benchmarks = load_benchmarks(benchmark_path)
-        log.detail(f"Loaded {len(benchmarks)} benchmark(s) from {benchmark_path}.", phase=LOAD)
+        log.detail(
+            f"Loaded {len(benchmarks)} benchmark(s) from {benchmark_path}.", phase=LOAD
+        )
     else:
         log.warn(f"Benchmark file not found: {benchmark_path}.", phase=LOAD)
 
     # 2. Load portfolio returns from CSV (includes benchmarks)
-    funds = {}
+    funds = FundDict()
     if os.path.exists(return_path):
-        funds = input_monthly_returns(return_path, benchmark_csv=benchmark_path if benchmarks else None)
+        funds = input_monthly_returns(
+            return_path, benchmark_csv=benchmark_path if benchmarks else None
+        )
         log.detail(f"Loaded {len(funds)} fund(s) from {return_path}.", phase=LOAD)
     else:
         log.warn(f"Return CSV not found: {return_path}.", phase=LOAD)
 
-    # 3. Load all JSON subfolders
+    # 3. Load all JSON from firms_folder/<Firm>/<Fund>/json/
+    firms_path = os.path.join(base_path, firms_folder)
     if json_folders is None:
-        # Auto-discover subfolders with a json/ directory
+        # Auto-discover: firms_path/<firm>/<fund>/json/
         json_folders = []
-        if os.path.isdir(base_path):
-            for name in sorted(os.listdir(base_path)):
-                sub = os.path.join(base_path, name)
-                if os.path.isdir(sub) and os.path.isdir(os.path.join(sub, "json")):
-                    json_folders.append(name)
+        if os.path.isdir(firms_path):
+            for firm_name in sorted(os.listdir(firms_path)):
+                firm_dir = os.path.join(firms_path, firm_name)
+                if not os.path.isdir(firm_dir):
+                    continue
+                for fund_name in sorted(os.listdir(firm_dir)):
+                    fund_dir = os.path.join(firm_dir, fund_name)
+                    if os.path.isdir(fund_dir) and os.path.isdir(os.path.join(fund_dir, "json")):
+                        json_folders.append(os.path.join(firm_name, fund_name))
 
-    for folder_name in json_folders:
-        folder_path = os.path.join(base_path, folder_name)
+    json_metadata = {}  # Save JSON metadata to restore after performance merges
+    _META_FIELDS = ("one_liner", "geo_focus", "strategy", "asset_class", "ir_name",
+                     "email", "phone", "base", "fund_inception", "aum_size",
+                     "min_ticket", "net_exposure", "suggested_benchmark_name",
+                     "management_fee", "performance_fee")
+
+    for folder_rel in json_folders:
+        folder_path = os.path.join(firms_path, folder_rel)
         json_data = load_saved_json(folder_path=folder_path)
         if json_data:
             json_funds = init_funds(json_data, benchmarks=benchmarks or None)
+            # Capture metadata from JSON (wins over CSV for metadata)
+            for name, jf in json_funds.items():
+                meta = {f: getattr(jf, f, None) for f in _META_FIELDS}
+                meta = {f: v for f, v in meta.items() if v is not None}
+                if name in json_metadata:
+                    json_metadata[name].update(meta)
+                else:
+                    json_metadata[name] = meta
             funds = merge_funds(json_funds, funds)
-            log.detail(f"Loaded {len(json_funds)} fund(s) from {folder_path}/json/.", phase=LOAD)
+            log.detail(
+                f"Loaded {len(json_funds)} fund(s) from {folder_path}/json/.",
+                phase=LOAD,
+            )
 
     # 4. Manual overwrite CSV (overwrites performance of matching funds)
     if os.path.exists(manual_path):
         manual_funds = input_monthly_returns(manual_path)
         funds = merge_funds(manual_funds, funds)
-        log.detail(f"Applied manual overwrite from {manual_path} ({len(manual_funds)} fund(s)).", phase=LOAD)
+        log.detail(
+            f"Applied manual overwrite from {manual_path} ({len(manual_funds)} fund(s)).",
+            phase=LOAD,
+        )
     else:
         log.detail(f"Manual overwrite file not found: {manual_path}.", phase=LOAD)
+
+    # 5. Restore JSON metadata (always takes priority for non-performance fields)
+    for name, meta in json_metadata.items():
+        if name in funds:
+            for field, value in meta.items():
+                setattr(funds[name], field, value)
 
     log.info(f"Total funds loaded: {len(funds)}.", phase=LOAD)
     return funds
@@ -1719,7 +1751,9 @@ def rerun_no_table_list(folder_path=r"input\marquee", save=False, show=False):
         else:
             result = gpt_process_text(page_html)
             print(f"{result['fund_name']} processed successfully.")
-            _collect_result(result, result["fund_name"], results, no_perf_list, folder_path, save)
+            _collect_result(
+                result, result["fund_name"], results, no_perf_list, folder_path, save
+            )
             found_list = found_list + [fund_name]
             filter_list = [item for item in filter_list if item not in found_list]
             # Write the updated list back to the file
