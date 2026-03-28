@@ -1,6 +1,8 @@
 from datetime import datetime
 from typing import Union
 
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import plotly.io as pio
 import pandas as pd

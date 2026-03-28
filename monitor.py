@@ -16,7 +16,7 @@ from pathlib import Path
 from fofproject.log import log, set_verbose, CLASSIFY, RECONCILE, SYNC, MONITOR, NOTION, EMAIL, GRAPHS
 from fofproject.paths import DEFAULT_EMAIL_INPUT_DIR, DEFAULT_OUTPUT_DIR, EMAIL_STORAGE_DIR
 from fofproject.notion import watch_folder
-from fofproject.connection import monitor_emails, create_token_provider
+from fofproject.connection import monitor_emails, download_all_emails, create_token_provider
 from fofproject.classify import (
     classify_and_organize_emails,
     classify_new_emails,
@@ -86,10 +86,18 @@ def _run_notion_watcher(output_dir: Path):
 
 
 def _run_email_monitor(poll_interval: int):
-    """Run email monitor in a background thread."""
+    """Download all undownloaded emails, then monitor for new ones."""
     try:
-        log.info("Starting email monitor...", phase=EMAIL)
         token_func = create_token_provider()
+
+        # First, download all emails not yet downloaded
+        log.info("Downloading all undownloaded emails...", phase=EMAIL)
+        token = token_func()
+        count = download_all_emails(token, base_dir=EMAIL_STORAGE_DIR, skip_existing=True)
+        log.info(f"Initial download complete: {count} email(s) downloaded.", phase=EMAIL)
+
+        # Then start monitoring for new emails
+        log.info("Starting email monitor...", phase=EMAIL)
         monitor_emails(token_func, base_dir=EMAIL_STORAGE_DIR, poll_interval=poll_interval)
     except Exception as e:
         log.error(f"Email monitor crashed: {e}", phase=EMAIL)

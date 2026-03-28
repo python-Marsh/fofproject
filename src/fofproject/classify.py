@@ -3168,13 +3168,7 @@ def _scan_disk_state(output_dir: Path) -> dict:
                 "untagged_files": [],
             }
 
-            for f in sorted(subfolder.rglob("*")):
-                # Skip files inside SKIP_SUBFOLDERS (e.g. graph/) nested within fund folders
-                if any(
-                    part in SKIP_SUBFOLDERS
-                    for part in f.relative_to(subfolder).parts[:-1]
-                ):
-                    continue
+            for f in sorted(subfolder.iterdir()):
                 if (
                     f.is_file()
                     and not f.name.startswith(".")

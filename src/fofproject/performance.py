@@ -9,7 +9,7 @@ and runs load.py's process_single_pdf on them.
 import json
 import shutil
 from pathlib import Path
-from fofproject.log import log, PERF, GRAPHS, METRICS
+from fofproject.log import log, PERF, GRAPHS, METRICS, RECONCILE
 from fofproject.paths import DEFAULT_OUTPUT_DIR
 from fofproject.classify import (
     load_firm_mappings,
@@ -331,10 +331,10 @@ def relocate_misplaced_artifacts(output_dir: Path = None) -> list:
                         "destination": str(dest_path),
                     }
                 )
-                print(
-                    f"  Moved artifact '{source_path.name}' "
+                log.detail(
+                    f"Moved artifact '{source_path.name}' "
                     f"from '{fund_name}' -> '{target['fund_name']}' "
-                    f"(identifier: {art_identifier})"
+                    f"(identifier: {art_identifier})", phase=RECONCILE
                 )
 
     # --- Pass 2: JSON file relocation ---
@@ -385,16 +385,16 @@ def relocate_misplaced_artifacts(output_dir: Path = None) -> list:
                         "destination": str(dest_path),
                     }
                 )
-                print(
-                    f"  Moved JSON '{json_file.name}' "
+                log.detail(
+                    f"Moved JSON '{json_file.name}' "
                     f"from '{subfolder.name}' -> '{target['fund_folder'].name}' "
-                    f"(identifier: {json_identifier})"
+                    f"(identifier: {json_identifier})", phase=RECONCILE
                 )
 
     if relocated:
-        print(f"\nRelocated {len(relocated)} misplaced file(s).")
+        log.info(f"Relocated {len(relocated)} misplaced file(s).", phase=RECONCILE)
     else:
-        print("No misplaced artifacts or JSON files found.")
+        log.detail("No misplaced artifacts or JSON files found.", phase=RECONCILE)
 
     return relocated
 

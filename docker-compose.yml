@@ -1,0 +1,43 @@
+version: "3.8"
+
+services:
+  # ── Python backend: FastAPI web API ──────────────────────
+  backend:
+    build: .
+    command: uvicorn web.backend.main:app --host 0.0.0.0 --port 8000
+    volumes:
+      - ${DATA_ROOT:-/volume1/fof}/Input:/data/Input
+      - ${DATA_ROOT:-/volume1/fof}/output:/data/output
+      - ${DATA_ROOT:-/volume1/fof}/fund_firm_identifier:/data/fund_firm_identifier
+      - ${DATA_ROOT:-/volume1/fof}/emails:/data/emails
+    ports:
+      - "8000:8000"
+    env_file: src/fofproject/.env
+    environment:
+      - MPLBACKEND=Agg
+    restart: unless-stopped
+
+  # ── Monitor: email classify, performance, notion sync ────
+  monitor:
+    build: .
+    command: python monitor.py
+    volumes:
+      - ${DATA_ROOT:-/volume1/fof}/Input:/data/Input
+      - ${DATA_ROOT:-/volume1/fof}/output:/data/output
+      - ${DATA_ROOT:-/volume1/fof}/fund_firm_identifier:/data/fund_firm_identifier
+      - ${DATA_ROOT:-/volume1/fof}/emails:/data/emails
+    env_file: src/fofproject/.env
+    environment:
+      - MPLBACKEND=Agg
+    restart: unless-stopped
+
+  # ── Frontend: nginx serving React build ──────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: web/frontend/Dockerfile
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped

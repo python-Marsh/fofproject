@@ -86,6 +86,15 @@ H3_QUANTITATIVE_SCREENINGS = "Quantitative Screenings"
 # Callout text that marks where python-generated graphs should be inserted after
 GRAPH_CALLOUT_TEXT = "Please attach python-generated graphs here."
 
+# Windows NTFS Alternate Data Stream suffixes and other OS junk to ignore
+_JUNK_FILE_SUFFIXES = {":Zone.Identifier"}
+
+
+def _is_junk_file(path: Path) -> bool:
+    """Return True if the file is a Windows ADS zone identifier or similar junk."""
+    return any(path.name.endswith(suffix) for suffix in _JUNK_FILE_SUFFIXES)
+
+
 # Keywords used to classify files into sections (case-insensitive)
 PRESENTATION_KEYWORDS = [
     "deck",
@@ -258,6 +267,23 @@ def _query_database_by_title(
         "filter": {
             "property": title_property,
             "title": {"equals": title},
+        },
+        "page_size": 1,
+    }
+    data = _notion_request("post", f"/data_sources/{db_id}/query", json=body)
+    results = data.get("results", [])
+    return results[0] if results else None
+
+
+def _query_database_by_identifier(
+    db_id: str,
+    identifier: str,
+) -> dict | None:
+    """Query a database for a page with the given Identifier rich_text. Returns page or None."""
+    body = {
+        "filter": {
+            "property": "Identifier",
+            "rich_text": {"equals": identifier},
         },
         "page_size": 1,
     }
@@ -1128,7 +1154,7 @@ def get_firm_contents(firm_path: Path) -> tuple[list[Path], list[Path]]:
                 continue
             else:
                 fund_folders.append(item)
-        elif item.is_file():
+        elif item.is_file() and not _is_junk_file(item):
             firm_files.append(item)
 
     return firm_files, fund_folders
@@ -1174,15 +1200,17 @@ def sync_fund(
         The fund page ID, or None if skipped
     """
     parsed = parse_fund_folder_name(fund_path.name)
-    if parsed:
-        fund_name, identifier = parsed
-    else:
-        fund_name = fund_path.name.strip()
-        identifier = ""
-    log.info("Syncing fund: %s (identifier: %s)", fund_name, identifier or "none")
+    if not parsed:
+        log.info(
+            "Skipping fund folder '%s' — no identifier assigned",
+            fund_path.name,
+        )
+        return None
+    fund_name, identifier = parsed
+    log.info("Syncing fund: %s (identifier: %s)", fund_name, identifier)
 
-    # Check if fund already exists
-    existing = _query_database_by_title(fund_db_id, fund_name, FUND_TITLE_PROP)
+    # Check if fund already exists by identifier
+    existing = _query_database_by_identifier(fund_db_id, identifier)
     if existing:
         fund_page_id = existing["id"]
         log.info("Fund '%s' already exists -> %s, skipping uploads", fund_name, fund_page_id)
@@ -1191,11 +1219,10 @@ def sync_fund(
     # Create fund page with Identifier and AM Firm relation
     extra_properties = {
         "AM Firm": {"relation": [{"id": firm_page_id}]},
-    }
-    if identifier:
-        extra_properties["Identifier"] = {
+        "Identifier": {
             "rich_text": [{"type": "text", "text": {"content": identifier}}]
-        }
+        },
+    }
     fund_page_id = _create_page(
         fund_db_id,
         fund_name,
@@ -1211,7 +1238,7 @@ def sync_fund(
     section_callouts = _find_section_callout_ids(fund_page_id)
 
     # Upload fund files into the correct sections
-    fund_files = [f for f in fund_path.iterdir() if f.is_file()]
+    fund_files = [f for f in fund_path.iterdir() if f.is_file() and not _is_junk_file(f)]
     if fund_files:
         log.info("Uploading %d file(s) for fund '%s'", len(fund_files), fund_name)
         if section_callouts:
@@ -1226,7 +1253,7 @@ def sync_fund(
     # Upload graph/ subfolder files as inline images after the graph callout
     graph_dir = fund_path / "graph"
     if graph_dir.is_dir():
-        graph_files = [f for f in graph_dir.iterdir() if f.is_file()]
+        graph_files = [f for f in graph_dir.iterdir() if f.is_file() and not _is_junk_file(f)]
         if graph_files:
             callout_id = _find_graph_callout(fund_page_id)
             if callout_id:
@@ -1627,9 +1654,25 @@ class _PageIdCache:
             self._store[key] = (result, time.time())
         return result
 
+    def get_by_identifier(self, db_id: str, identifier: str) -> dict | None:
+        key = (db_id, identifier, "Identifier")
+        with self._lock:
+            entry = self._store.get(key)
+            if entry and (time.time() - entry[1]) < self._ttl:
+                return entry[0]
+        # Cache miss — query Notion
+        result = _query_database_by_identifier(db_id, identifier)
+        with self._lock:
+            self._store[key] = (result, time.time())
+        return result
+
     def invalidate(self, db_id: str, title: str, title_prop: str):
         with self._lock:
             self._store.pop((db_id, title, title_prop), None)
+
+    def invalidate_by_identifier(self, db_id: str, identifier: str):
+        with self._lock:
+            self._store.pop((db_id, identifier, "Identifier"), None)
 
 
 class NotionFolderHandler(FileSystemEventHandler):
@@ -1643,6 +1686,8 @@ class NotionFolderHandler(FileSystemEventHandler):
 
     # Debounce window (seconds): events for the same parent are coalesced
     _DEBOUNCE_SECONDS = 2.0
+    # Grace window (seconds): deletes are buffered to detect delete+create moves
+    _DELETE_GRACE_SECONDS = 0.5
 
     def __init__(self, watch_folder: Path, firm_db_id: str, fund_db_id: str):
         super().__init__()
@@ -1656,6 +1701,9 @@ class NotionFolderHandler(FileSystemEventHandler):
         self._debounce_lock = threading.Lock()
         # Pending file events accumulated during debounce window
         self._pending_files: dict[str, list[Path]] = {}
+        # Pending deletes: filename -> (deleted_path, is_directory, Timer)
+        self._pending_deletes: dict[str, tuple[Path, bool, threading.Timer]] = {}
+        self._pending_deletes_lock = threading.Lock()
 
     def shutdown(self):
         """Cancel pending timers and shut down the thread pool."""
@@ -1663,6 +1711,10 @@ class NotionFolderHandler(FileSystemEventHandler):
             for timer in self._debounce_timers.values():
                 timer.cancel()
             self._debounce_timers.clear()
+        with self._pending_deletes_lock:
+            for _, _, timer in self._pending_deletes.values():
+                timer.cancel()
+            self._pending_deletes.clear()
         self._pool.shutdown(wait=False)
 
     def _submit(self, fn, *args):
@@ -1680,13 +1732,51 @@ class NotionFolderHandler(FileSystemEventHandler):
             return self._page_cache.get(self.firm_db_id, canonical, FIRM_TITLE_PROP)
         return None
 
-    def _lookup_fund(self, fund_name: str) -> dict | None:
+    def _lookup_fund(self, fund_name: str, identifier: str = "") -> dict | None:
+        """Look up a fund page, preferring identifier match over title match."""
+        if identifier:
+            result = self._page_cache.get_by_identifier(self.fund_db_id, identifier)
+            if result:
+                return result
         return self._page_cache.get(self.fund_db_id, fund_name, FUND_TITLE_PROP)
 
+    def _lookup_fund_by_folder(self, folder_name: str) -> dict | None:
+        """Look up a fund page from a folder name, extracting identifier if present.
+
+        If the folder has no identifier, returns None (folders without
+        identifiers are not eligible for Notion sync).
+        """
+        parsed = parse_fund_folder_name(folder_name)
+        if not parsed:
+            return None
+        fund_name, identifier = parsed
+        return self._lookup_fund(fund_name, identifier)
+
     def on_created(self, event):
+        new_path = Path(event.src_path)
+
+        # Check if this create matches a buffered delete (synthetic move)
+        pending_key = f"{'d' if event.is_directory else 'f'}:{new_path.name}"
+        with self._pending_deletes_lock:
+            pending = self._pending_deletes.pop(pending_key, None)
+        if pending:
+            old_path, is_dir, timer = pending
+            timer.cancel()
+            if old_path != new_path:
+                log.info(
+                    "Synthetic move detected (delete+create): '%s' -> '%s'",
+                    old_path, new_path,
+                )
+                if is_dir:
+                    self._handle_folder_rename(old_path, new_path)
+                else:
+                    self._handle_file_rename(old_path, new_path)
+                return
+            # Same path — delete then re-create in place; fall through to normal create
+
         if not event.is_directory:
             # Debounce file events — accumulate and flush after a short window
-            file_path = Path(event.src_path)
+            file_path = new_path
             parent_key = str(file_path.parent)
             with self._debounce_lock:
                 self._pending_files.setdefault(parent_key, []).append(file_path)
@@ -1704,7 +1794,6 @@ class NotionFolderHandler(FileSystemEventHandler):
                 timer.start()
             return
 
-        new_path = Path(event.src_path)
         parent = new_path.parent
 
         if parent == self.watch_folder:
@@ -1731,14 +1820,11 @@ class NotionFolderHandler(FileSystemEventHandler):
                     sync_fund, new_path, self.fund_db_id, existing_firm["id"]
                 )
             else:
-                log.warning(
-                    "Fund folder '%s' appeared but firm '%s' not found "
-                    "in Notion. Syncing entire firm.",
+                log.info(
+                    "Fund folder '%s' appeared but firm '%s' not yet in "
+                    "Notion — skipping (firm sync will handle it)",
                     new_path.name,
                     firm_name,
-                )
-                self._submit(
-                    sync_firm, parent, self.firm_db_id, self.fund_db_id
                 )
 
     def _flush_pending_files(self, parent_key: str):
@@ -1751,6 +1837,8 @@ class NotionFolderHandler(FileSystemEventHandler):
 
     def _handle_new_file(self, file_path: Path):
         """Handle a new file added to an existing firm or fund folder."""
+        if _is_junk_file(file_path):
+            return
         parent = file_path.parent
 
         # Handle files in graph/ subfolder — upload to Quantitative Screening
@@ -1758,12 +1846,11 @@ class NotionFolderHandler(FileSystemEventHandler):
             fund_folder = parent.parent
             firm_folder = fund_folder.parent
             if firm_folder.parent == self.watch_folder:
-                fund_name = _resolve_fund_name(fund_folder.name)
-                existing_fund = self._lookup_fund(fund_name)
+                existing_fund = self._lookup_fund_by_folder(fund_folder.name)
                 if existing_fund:
                     log.info(
                         "New graph file in fund '%s': %s",
-                        fund_name,
+                        fund_folder.name,
                         file_path.name,
                     )
                     self._submit(
@@ -1778,12 +1865,11 @@ class NotionFolderHandler(FileSystemEventHandler):
             fund_folder = parent.parent
             firm_folder = fund_folder.parent
             if firm_folder.parent == self.watch_folder:
-                fund_name = _resolve_fund_name(fund_folder.name)
-                existing_fund = self._lookup_fund(fund_name)
+                existing_fund = self._lookup_fund_by_folder(fund_folder.name)
                 if existing_fund:
                     log.info(
                         "New JSON file in fund '%s': %s",
-                        fund_name,
+                        fund_folder.name,
                         file_path.name,
                     )
                     self._submit(upload_json_to_fund_page, existing_fund["id"], file_path)
@@ -1802,12 +1888,11 @@ class NotionFolderHandler(FileSystemEventHandler):
 
         # File in a fund folder
         if grandparent.parent == self.watch_folder:
-            fund_name = _resolve_fund_name(parent.name)
-            existing_fund = self._lookup_fund(fund_name)
+            existing_fund = self._lookup_fund_by_folder(parent.name)
             if existing_fund:
                 log.info(
                     "New file in fund '%s': %s",
-                    fund_name,
+                    parent.name,
                     file_path.name,
                 )
                 self._submit(
@@ -1878,43 +1963,75 @@ class NotionFolderHandler(FileSystemEventHandler):
         if firm_folder.parent != self.watch_folder:
             return
 
-        fund_name = _resolve_fund_name(fund_folder.name)
-        existing_fund = self._lookup_fund(fund_name)
+        existing_fund = self._lookup_fund_by_folder(fund_folder.name)
         if existing_fund:
             log.info(
                 "JSON file modified in fund '%s': %s",
-                fund_name, file_path.name,
+                fund_folder.name, file_path.name,
             )
             self._submit(upload_json_to_fund_page, existing_fund["id"], file_path)
 
     def on_deleted(self, event):
-        """Handle file or folder deletion — remove corresponding content from Notion."""
-        deleted_path = Path(event.src_path)
+        """Buffer deletion events to detect synthetic moves (delete+create).
 
-        if event.is_directory:
+        Instead of processing immediately, we wait _DELETE_GRACE_SECONDS for a
+        matching on_created with the same filename.  If one arrives, on_created
+        cancels the timer and routes through on_moved logic.  If the timer
+        expires, we process the delete normally.
+        """
+        deleted_path = Path(event.src_path)
+        is_dir = event.is_directory
+
+        # Skip files in managed subfolders — no need to buffer these
+        if not is_dir and deleted_path.parent.name in SKIP_SUBFOLDERS:
+            log.debug(
+                "Skipping deletion in managed subfolder '%s': %s",
+                deleted_path.parent.name,
+                deleted_path.name,
+            )
+            return
+
+        pending_key = f"{'d' if is_dir else 'f'}:{deleted_path.name}"
+
+        with self._pending_deletes_lock:
+            # Cancel any existing pending delete for the same key
+            existing = self._pending_deletes.pop(pending_key, None)
+            if existing:
+                existing[2].cancel()
+
+            timer = threading.Timer(
+                self._DELETE_GRACE_SECONDS,
+                self._flush_pending_delete,
+                args=(pending_key,),
+            )
+            timer.daemon = True
+            self._pending_deletes[pending_key] = (deleted_path, is_dir, timer)
+            timer.start()
+
+    def _flush_pending_delete(self, pending_key: str):
+        """Process a buffered delete after the grace window expired with no matching create."""
+        with self._pending_deletes_lock:
+            pending = self._pending_deletes.pop(pending_key, None)
+        if not pending:
+            return
+
+        deleted_path, is_dir, _ = pending
+
+        if is_dir:
             self._handle_folder_deleted(deleted_path)
             return
 
         parent = deleted_path.parent
         filename = deleted_path.name
-
-        # Skip files in managed subfolders (graph/, json/, meetings/, researches/)
-        if parent.name in SKIP_SUBFOLDERS:
-            log.debug(
-                "Skipping deletion in managed subfolder '%s': %s", parent.name, filename
-            )
-            return
-
         grandparent = parent.parent
 
         # File deleted from a fund folder
         if grandparent.parent == self.watch_folder:
-            fund_name = _resolve_fund_name(parent.name)
-            existing_fund = self._lookup_fund(fund_name)
+            existing_fund = self._lookup_fund_by_folder(parent.name)
             if existing_fund:
                 log.info(
                     "File deleted from fund '%s': %s",
-                    fund_name,
+                    parent.name,
                     filename,
                 )
                 self._submit(_remove_file_from_page, existing_fund["id"], filename)
@@ -1940,14 +2057,19 @@ class NotionFolderHandler(FileSystemEventHandler):
 
         # Fund folder deleted (child of a firm folder)
         if parent.parent == self.watch_folder:
-            fund_name = _resolve_fund_name(deleted_path.name)
-            existing_fund = self._lookup_fund(fund_name)
+            parsed = parse_fund_folder_name(deleted_path.name)
+            existing_fund = self._lookup_fund_by_folder(deleted_path.name)
             if existing_fund:
                 log.info("Fund folder deleted: '%s' — archiving Notion page", deleted_path.name)
                 self._submit(_archive_page, existing_fund["id"])
-                self._page_cache.invalidate(
-                    self.fund_db_id, fund_name, FUND_TITLE_PROP
-                )
+                if parsed:
+                    fund_name, identifier = parsed
+                    self._page_cache.invalidate(
+                        self.fund_db_id, fund_name, FUND_TITLE_PROP
+                    )
+                    self._page_cache.invalidate_by_identifier(
+                        self.fund_db_id, identifier
+                    )
             return
 
         # Firm folder deleted (direct child of watch folder)
@@ -1998,51 +2120,62 @@ class NotionFolderHandler(FileSystemEventHandler):
             old_parsed = parse_fund_folder_name(old_path.name)
             new_parsed = parse_fund_folder_name(new_path.name)
 
-            # Determine old fund name to look up in Notion
-            old_fund_name = old_parsed[0] if old_parsed else old_path.name
+            # Look up existing page by old identifier (if old folder had one)
+            existing_fund = self._lookup_fund_by_folder(old_path.name)
 
-            # Determine new fund name and identifier
-            if new_parsed:
-                new_fund_name, new_identifier = new_parsed
-            else:
-                # No identifier in new name — use full folder name, clear identifier
-                new_fund_name = new_path.name
-                new_identifier = ""
+            if old_parsed and existing_fund:
+                old_fund_name, old_identifier = old_parsed
 
-            existing_fund = self._lookup_fund(old_fund_name)
-            if existing_fund:
-                log.info(
-                    "Fund folder renamed: '%s' -> '%s'",
-                    old_path.name,
-                    new_path.name,
-                )
-
-                def _rename_fund(page_id, name, identifier):
-                    _rename_page_title(page_id, name, FUND_TITLE_PROP)
-                    _update_page_properties(
-                        page_id,
-                        {
-                            "Identifier": {
-                                "rich_text": [
-                                    {"type": "text", "text": {"content": identifier}}
-                                ]
-                                if identifier
-                                else []
-                            },
-                        },
+                if new_parsed:
+                    # Scenario 1: had identifier, renamed with new/same identifier
+                    new_fund_name, new_identifier = new_parsed
+                    log.info(
+                        "Fund folder renamed: '%s' -> '%s'",
+                        old_path.name,
+                        new_path.name,
                     )
 
-                self._submit(
-                    _rename_fund, existing_fund["id"], new_fund_name, new_identifier
-                )
-                self._page_cache.invalidate(
-                    self.fund_db_id, old_fund_name, FUND_TITLE_PROP
-                )
-            else:
-                # No existing Notion page (e.g. folder had no identifier before
-                # and was never synced). Create the page and upload all files.
+                    def _rename_fund(page_id, name, identifier):
+                        _rename_page_title(page_id, name, FUND_TITLE_PROP)
+                        _update_page_properties(
+                            page_id,
+                            {
+                                "Identifier": {
+                                    "rich_text": [
+                                        {"type": "text", "text": {"content": identifier}}
+                                    ]
+                                },
+                            },
+                        )
+
+                    self._submit(
+                        _rename_fund, existing_fund["id"], new_fund_name, new_identifier
+                    )
+                    self._page_cache.invalidate(
+                        self.fund_db_id, old_fund_name, FUND_TITLE_PROP
+                    )
+                    self._page_cache.invalidate_by_identifier(
+                        self.fund_db_id, old_identifier
+                    )
+                else:
+                    # Scenario 2: had identifier, renamed without identifier — archive
+                    log.info(
+                        "Fund folder lost identifier: '%s' -> '%s' — archiving Notion page",
+                        old_path.name,
+                        new_path.name,
+                    )
+                    self._submit(_archive_page, existing_fund["id"])
+                    self._page_cache.invalidate(
+                        self.fund_db_id, old_fund_name, FUND_TITLE_PROP
+                    )
+                    self._page_cache.invalidate_by_identifier(
+                        self.fund_db_id, old_identifier
+                    )
+
+            elif not old_parsed and new_parsed:
+                # Scenario 3: had no identifier, now has one — create page
                 log.info(
-                    "Fund folder renamed '%s' -> '%s' but no Notion page exists "
+                    "Fund folder gained identifier: '%s' -> '%s' "
                     "— creating page and uploading files",
                     old_path.name,
                     new_path.name,
@@ -2061,6 +2194,13 @@ class NotionFolderHandler(FileSystemEventHandler):
                     self._submit(
                         sync_firm, parent, self.firm_db_id, self.fund_db_id
                     )
+            else:
+                # Scenario 4: no identifier before or after — ignore
+                log.debug(
+                    "Fund folder renamed without identifier: '%s' -> '%s' — ignoring",
+                    old_path.name,
+                    new_path.name,
+                )
 
     def _handle_file_rename(self, old_path: Path, new_path: Path):
         """Handle a file being renamed or moved — rename block or move between pages."""
@@ -2081,12 +2221,11 @@ class NotionFolderHandler(FileSystemEventHandler):
 
         # File renamed within a fund folder
         if parent.parent.parent == self.watch_folder:
-            fund_name = _resolve_fund_name(parent.name)
-            existing_fund = self._lookup_fund(fund_name)
+            existing_fund = self._lookup_fund_by_folder(parent.name)
             if existing_fund:
                 log.info(
                     "File renamed in fund '%s': '%s' -> '%s'",
-                    fund_name,
+                    parent.name,
                     old_path.name,
                     new_path.name,
                 )
@@ -2125,8 +2264,7 @@ class NotionFolderHandler(FileSystemEventHandler):
 
         # File in a fund folder (watch/firm/fund/file)
         if parent.parent.parent == self.watch_folder:
-            fund_name = _resolve_fund_name(parent.name)
-            existing = self._lookup_fund(fund_name)
+            existing = self._lookup_fund_by_folder(parent.name)
             if existing:
                 return existing["id"], "fund"
             return None, ""
@@ -2577,10 +2715,12 @@ def _resolve_local_fund_folder(
     firm_page_id: str,
     firm_db_id: str,
     fund_name: str,
+    identifier: str = "",
 ) -> Path | None:
     """
     Find the local folder path for a fund page.
 
+    Prefers matching by identifier (stable key) over fund name.
     Only returns a path if a matching folder already exists on disk.
     Returns None if no corresponding local folder is found (no download
     should happen for fund pages without a local folder).
@@ -2603,7 +2743,15 @@ def _resolve_local_fund_folder(
     if not firm_folder.exists():
         return None
 
-    # Try to find existing fund folder (with or without identifier)
+    # Try to find existing fund folder — prefer identifier match
+    for sub in firm_folder.iterdir():
+        if not sub.is_dir():
+            continue
+        parsed = parse_fund_folder_name(sub.name)
+        if parsed and identifier and parsed[1] == identifier:
+            return sub
+
+    # Fallback: match by fund name
     for sub in firm_folder.iterdir():
         if not sub.is_dir():
             continue
@@ -2693,7 +2841,7 @@ class NotionPoller:
 
     def _resolve_page_folder(self, page: dict) -> Path | None:
         """Resolve a single page to its local folder (or None)."""
-        fund_name, _, firm_page_id = _get_fund_page_info(page)
+        fund_name, identifier, firm_page_id = _get_fund_page_info(page)
         if not fund_name:
             return None
         local_folder = _resolve_local_fund_folder(
@@ -2701,6 +2849,7 @@ class NotionPoller:
             firm_page_id,
             self.firm_db_id,
             fund_name,
+            identifier,
         )
         if local_folder and local_folder.exists():
             return local_folder

@@ -1261,7 +1261,7 @@ def load_all_data(
     return_csv="RETURN DATA.csv",
     manual_csv="MANUAL OVERWRITE.csv",
     json_folders=None,
-    firms_folder="Test",
+    firms_folder=None,
 ):
     """Load all fund data in sequence: benchmarks, CSV returns, JSON folders, manual overwrite.
 
@@ -1289,7 +1289,7 @@ def load_all_data(
         Dictionary of {fund_name: Fund} with all data merged.
     """
     from fofproject.fund import load_benchmarks, input_monthly_returns
-    from fofproject.paths import DEFAULT_INPUT_DIR
+    from fofproject.paths import DEFAULT_INPUT_DIR, DEFAULT_OUTPUT_DIR
 
     if base_path is None:
         base_path = str(DEFAULT_INPUT_DIR)
@@ -1319,7 +1319,7 @@ def load_all_data(
         log.warn(f"Return CSV not found: {return_path}.", phase=LOAD)
 
     # 3. Load all JSON from firms_folder/<Firm>/<Fund>/json/
-    firms_path = os.path.join(base_path, firms_folder)
+    firms_path = str(DEFAULT_OUTPUT_DIR) if firms_folder is None else os.path.join(base_path, firms_folder)
     if json_folders is None:
         # Auto-discover: firms_path/<firm>/<fund>/json/
         json_folders = []

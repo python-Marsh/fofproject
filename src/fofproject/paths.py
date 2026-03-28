@@ -13,9 +13,9 @@ from pathlib import Path
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # ── NAS mount points (Synology Docker) ───────────────────
-_NAS_EMAIL_STORAGE = Path("/data/emails")
+_NAS_EMAIL_STORAGE = Path("/data/RDGFF Emails")
 _NAS_OUTPUT = Path("/data/output")
-_NAS_FUND_FIRM = Path("/data/fund_firm_identifier")
+_NAS_FUND_FIRM = Path("/data/Hedge Funds")
 _NAS_INPUT = Path("/data/Input")
 
 
@@ -68,5 +68,5 @@ SAVE_DIR.mkdir(parents=True, exist_ok=True)
 DEFAULT_INPUT_DIR = _resolve(
     "INPUT_DIR",
     _NAS_INPUT,
-    _PROJECT_ROOT,
+    _PROJECT_ROOT / "input",
 )

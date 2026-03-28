@@ -40,7 +40,7 @@ def automate_device_login(user_code: str, email: str, password: str):
     from selenium.webdriver.support import expected_conditions as EC
     from selenium.webdriver.chrome.options import Options
 
-    print("Selenium: Starting browser...", flush=True)
+    log.detail("Selenium: Starting browser...", phase=EMAIL)
 
     options = Options()
     options.add_argument("--headless")
@@ -53,35 +53,35 @@ def automate_device_login(user_code: str, email: str, password: str):
 
     try:
         # Navigate to the device login page
-        print("Selenium: Navigating to device login page...", flush=True)
+        log.detail("Selenium: Navigating to device login page...", phase=EMAIL)
         driver.get("https://microsoft.com/devicelogin")
 
         # Wait for and enter the device code
-        print("Selenium: Entering device code...", flush=True)
+        log.detail("Selenium: Entering device code...", phase=EMAIL)
         code_input = wait.until(EC.presence_of_element_located((By.ID, "otc")))
         code_input.clear()
         code_input.send_keys(user_code)
 
         # Click Next button
-        print("Selenium: Clicking Next after code entry...", flush=True)
+        log.detail("Selenium: Clicking Next after code entry...", phase=EMAIL)
         next_btn = wait.until(EC.element_to_be_clickable((By.ID, "idSIButton9")))
         next_btn.click()
 
         # Wait for email input field and enter email
-        print("Selenium: Waiting for email field...", flush=True)
+        log.detail("Selenium: Waiting for email field...", phase=EMAIL)
         email_input = wait.until(EC.presence_of_element_located((By.NAME, "loginfmt")))
-        print(f"Selenium: Entering email: {email}", flush=True)
+        log.detail(f"Selenium: Entering email: {email}", phase=EMAIL)
         email_input.clear()
         email_input.send_keys(email)
 
         # Click Next
-        print("Selenium: Clicking Next after email...", flush=True)
+        log.detail("Selenium: Clicking Next after email...", phase=EMAIL)
         time.sleep(1)
         next_btn = wait.until(EC.element_to_be_clickable((By.ID, "idSIButton9")))
         next_btn.click()
 
         # Wait for password field and enter password - robust approach
-        print("Selenium: Waiting for password field...", flush=True)
+        log.detail("Selenium: Waiting for password field...", phase=EMAIL)
         password_input = wait.until(EC.element_to_be_clickable((By.NAME, "passwd")))
         time.sleep(1.5)
 
@@ -94,7 +94,7 @@ def automate_device_login(user_code: str, email: str, password: str):
         time.sleep(0.2)
 
         # Enter password using JavaScript to avoid input issues
-        print("Selenium: Entering password...", flush=True)
+        log.detail("Selenium: Entering password...", phase=EMAIL)
         driver.execute_script("arguments[0].value = arguments[1];", password_input, password)
 
         # Trigger input event so the page recognizes the change
@@ -105,39 +105,39 @@ def automate_device_login(user_code: str, email: str, password: str):
         time.sleep(0.5)
 
         # Click Sign in
-        print("Selenium: Clicking Sign In...", flush=True)
+        log.detail("Selenium: Clicking Sign In...", phase=EMAIL)
         time.sleep(1)
         sign_in_btn = wait.until(EC.element_to_be_clickable((By.ID, "idSIButton9")))
         sign_in_btn.click()
 
         # Handle "Stay signed in?" prompt if it appears
-        print("Selenium: Checking for 'Stay signed in' prompt...", flush=True)
+        log.detail("Selenium: Checking for 'Stay signed in' prompt...", phase=EMAIL)
         try:
             time.sleep(2)
             stay_signed_in_btn = WebDriverWait(driver, 10).until(
                 EC.element_to_be_clickable((By.ID, "idSIButton9"))
             )
-            print("Selenium: Clicking 'Yes' on Stay signed in...", flush=True)
+            log.detail("Selenium: Clicking 'Yes' on Stay signed in...", phase=EMAIL)
             stay_signed_in_btn.click()
         except:
-            print("Selenium: No 'Stay signed in' prompt found.", flush=True)
+            log.detail("Selenium: No 'Stay signed in' prompt found.", phase=EMAIL)
 
         # Handle "Are you trying to sign in to..." confirmation if it appears
-        print("Selenium: Checking for confirmation prompt...", flush=True)
+        log.detail("Selenium: Checking for confirmation prompt...", phase=EMAIL)
         try:
             time.sleep(3)
             # Look for the continue button on the "Are you trying to sign in" page
             continue_btn = WebDriverWait(driver, 15).until(
                 EC.element_to_be_clickable((By.ID, "idSIButton9"))
             )
-            print("Selenium: Clicking Continue...", flush=True)
+            log.detail("Selenium: Clicking Continue...", phase=EMAIL)
             continue_btn.click()
             time.sleep(2)
         except:
-            print("Selenium: No confirmation prompt found.", flush=True)
+            log.detail("Selenium: No confirmation prompt found.", phase=EMAIL)
 
         # Wait for the success page - keep checking until we see success or timeout
-        print("Selenium: Waiting for success confirmation...", flush=True)
+        log.detail("Selenium: Waiting for success confirmation...", phase=EMAIL)
         max_wait = 30
         start = time.time()
         while time.time() - start < max_wait:
@@ -145,14 +145,14 @@ def automate_device_login(user_code: str, email: str, password: str):
 
             # Check for success indicators
             if "you have signed in" in page_source or "you're all set" in page_source:
-                print("Selenium: Successfully authenticated!", flush=True)
+                log.info("Selenium: Successfully authenticated!", phase=EMAIL)
                 break
 
             # If we're still on the device auth page with a button, click it
             try:
                 btn = driver.find_element(By.ID, "idSIButton9")
                 if btn.is_displayed() and btn.is_enabled():
-                    print("Selenium: Found additional button, clicking...", flush=True)
+                    log.detail("Selenium: Found additional button, clicking...", phase=EMAIL)
                     btn.click()
                     time.sleep(2)
             except:
@@ -160,21 +160,21 @@ def automate_device_login(user_code: str, email: str, password: str):
 
             time.sleep(1)
         else:
-            print(f"Selenium: Final URL: {driver.current_url}", flush=True)
-            print("Selenium: Authentication flow completed (timeout waiting for success page).", flush=True)
+            log.warn(f"Selenium: Final URL: {driver.current_url}", phase=EMAIL)
+            log.warn("Selenium: Authentication flow completed (timeout waiting for success page).", phase=EMAIL)
 
     except Exception as e:
-        print(f"Selenium automation error: {e}", flush=True)
+        log.error(f"Selenium automation error: {e}", phase=EMAIL)
         try:
-            print(f"Selenium: Current URL at error: {driver.current_url}", flush=True)
-            print(f"Selenium: Page title: {driver.title}", flush=True)
+            log.error(f"Selenium: Current URL at error: {driver.current_url}", phase=EMAIL)
+            log.error(f"Selenium: Page title: {driver.title}", phase=EMAIL)
         except:
             pass
         raise
     finally:
         time.sleep(2)
         driver.quit()
-        print("Selenium: Browser closed.", flush=True)
+        log.detail("Selenium: Browser closed.", phase=EMAIL)
 
 
 def get_msal_app():
@@ -190,7 +190,7 @@ def get_access_token_interactive(app=None):
     """
     Delegated auth using device flow with Selenium automation.
     """
-    print("Starting authentication...", flush=True)
+    log.info("Starting authentication...", phase=EMAIL)
 
     if app is None:
         app = get_msal_app()
@@ -198,21 +198,21 @@ def get_access_token_interactive(app=None):
     # Try cached token first
     accounts = app.get_accounts()
     if accounts:
-        print("Found cached accounts, attempting silent token acquisition...", flush=True)
+        log.detail("Found cached accounts, attempting silent token acquisition...", phase=EMAIL)
         result = app.acquire_token_silent(SCOPES, account=accounts[0])
         if result and "access_token" in result:
-            print("Using cached token.", flush=True)
+            log.info("Using cached token.", phase=EMAIL)
             return result["access_token"]
 
     # Interactive device flow with Selenium automation
-    print("Initiating device flow...", flush=True)
+    log.info("Initiating device flow...", phase=EMAIL)
     flow = app.initiate_device_flow(scopes=SCOPES)
     if "user_code" not in flow:
         raise RuntimeError(f"Failed to create device flow. Error: {flow}")
 
     user_code = flow["user_code"]
-    print(f"Device code: {user_code}", flush=True)
-    print("Starting Selenium to automate login...", flush=True)
+    log.info(f"Device code: {user_code}", phase=EMAIL)
+    log.detail("Starting Selenium to automate login...", phase=EMAIL)
 
     # Run Selenium in a separate thread so we can wait for the token
     selenium_thread = threading.Thread(
@@ -222,14 +222,14 @@ def get_access_token_interactive(app=None):
     selenium_thread.start()
 
     # Wait for the device flow to complete
-    print("Waiting for device flow to complete...", flush=True)
+    log.detail("Waiting for device flow to complete...", phase=EMAIL)
     result = app.acquire_token_by_device_flow(flow)
     selenium_thread.join()
 
     if "access_token" not in result:
         raise RuntimeError(f"Token error: {result}")
 
-    print("Token acquired successfully!", flush=True)
+    log.info("Token acquired successfully!", phase=EMAIL)
     return result["access_token"]
 
 
@@ -474,6 +474,11 @@ def get_downloaded_ids(base_dir: Path) -> set:
         return set()
 
 
+def _sender(msg: dict) -> str:
+    """Extract sender address from a Graph API message dict."""
+    return msg.get("from", {}).get("emailAddress", {}).get("address", "unknown")
+
+
 # =============================================================================
 # MAIN DOWNLOAD FUNCTIONS
 # =============================================================================
@@ -506,7 +511,7 @@ def download_all_emails(token: str, base_dir: Path = None, skip_existing: bool =
 
     url = f"{GRAPH}/me/mailFolders/Inbox/messages"
 
-    print(f"Starting download of all emails to: {base_dir}", flush=True)
+    log.info(f"Starting download of all emails to: {base_dir}", phase=EMAIL)
 
     while url:
         r = requests.get(url, headers=headers, params=params, timeout=60)
@@ -518,7 +523,7 @@ def download_all_emails(token: str, base_dir: Path = None, skip_existing: bool =
             msg_id = msg.get("id")
 
             if skip_existing and msg_id in downloaded_ids:
-                print(f"  Skipping (already exists): {msg.get('subject', '')[:50]}", flush=True)
+                log.detail(f"Skipping (already exists): {msg.get('subject', '')[:50]}", phase=EMAIL)
                 continue
 
             try:
@@ -531,17 +536,17 @@ def download_all_emails(token: str, base_dir: Path = None, skip_existing: bool =
 
                 downloaded_count += 1
                 att_count = len(metadata.get("attachments", []))
-                print(f"  Downloaded ({downloaded_count}): {msg.get('subject', '')[:50]} "
-                      f"[{att_count} attachments]", flush=True)
+                log.info(f"Downloaded ({downloaded_count}): {msg.get('subject', '')[:50]} "
+                         f"| from: {_sender(msg)} [{att_count} attachments]", phase=EMAIL)
 
             except Exception as e:
-                print(f"  ERROR downloading {msg.get('subject', '')[:30]}: {e}", flush=True)
+                log.error(f"ERROR downloading {msg.get('subject', '')[:30]}: {e}", phase=EMAIL)
 
         # Get next page URL
         url = data.get("@odata.nextLink")
         params = {}  # Clear params for next link (they're included in the URL)
 
-    print(f"Download complete. Total emails downloaded: {downloaded_count}", flush=True)
+    log.info(f"Download complete. Total emails downloaded: {downloaded_count}", phase=EMAIL)
     return downloaded_count
 
 
@@ -567,7 +572,7 @@ def download_top_emails(token: str, count: int = 100, base_dir: Path = None,
 
     headers = {"Authorization": f"Bearer {token}"}
 
-    print(f"Starting download of top {count} emails to: {base_dir}", flush=True)
+    log.info(f"Starting download of top {count} emails to: {base_dir}", phase=EMAIL)
 
     # Fetch in batches
     remaining = count
@@ -598,7 +603,7 @@ def download_top_emails(token: str, count: int = 100, base_dir: Path = None,
             msg_id = msg.get("id")
 
             if skip_existing and msg_id in downloaded_ids:
-                print(f"  Skipping (already exists): {msg.get('subject', '')[:50]}", flush=True)
+                log.detail(f"Skipping (already exists): {msg.get('subject', '')[:50]}", phase=EMAIL)
                 remaining -= 1
                 continue
 
@@ -613,16 +618,16 @@ def download_top_emails(token: str, count: int = 100, base_dir: Path = None,
                 downloaded_count += 1
                 remaining -= 1
                 att_count = len(metadata.get("attachments", []))
-                print(f"  Downloaded ({downloaded_count}/{count}): {msg.get('subject', '')[:50]} "
-                      f"[{att_count} attachments]", flush=True)
+                log.info(f"Downloaded ({downloaded_count}/{count}): {msg.get('subject', '')[:50]} "
+                         f"| from: {_sender(msg)} [{att_count} attachments]", phase=EMAIL)
 
             except Exception as e:
-                print(f"  ERROR downloading {msg.get('subject', '')[:30]}: {e}", flush=True)
+                log.error(f"ERROR downloading {msg.get('subject', '')[:30]}: {e}", phase=EMAIL)
                 remaining -= 1
 
         skip += batch_size
 
-    print(f"Download complete. Total emails downloaded: {downloaded_count}", flush=True)
+    log.info(f"Download complete. Total emails downloaded: {downloaded_count}", phase=EMAIL)
     return downloaded_count
 
 
@@ -726,7 +731,7 @@ def monitor_emails(token_func, base_dir: Path = None, poll_interval: int = 60,
                             downloaded_ids.add(msg["id"])
                             total_downloaded += 1
                             att_count = len(metadata.get("attachments", []))
-                            log.detail(f"  New email: {msg.get('subject', '')[:50]} [{att_count} att]", phase=EMAIL)
+                            log.info(f"New email: {msg.get('subject', '')[:50]} | from: {_sender(msg)} [{att_count} att]", phase=EMAIL)
 
                         except Exception as e:
                             log.error(f"  {e}", phase=EMAIL)
