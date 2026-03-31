@@ -688,7 +688,7 @@ def extract_text_from_pdf(file_path):
 
 
 def _build_system_prompt():
-    """Build the GPT system prompt with benchmark list injected dynamically from BENCHMARK.csv."""
+    """Build the GPT system prompt with benchmark list injected dynamically."""
     from fofproject.fund import get_available_benchmarks
 
     try:
@@ -1223,6 +1223,155 @@ def save_changes_in_fund(funds: Dict[str, Fund], folder_path="input"):
     return funds
 
 
+def _read_overwrite_patches(csv_path: str) -> dict[str, list[dict]]:
+    """
+    Read a manual overwrite CSV and return raw date->value entries per fund.
+
+    Returns {fund_name: [{"date": datetime, "value": float}, ...]} with only
+    non-null entries.  Does NOT create Fund objects (avoids continuity checks).
+    """
+    import pandas as pd
+
+    df = pd.read_csv(csv_path)
+    df = df.loc[:, ~df.columns.str.startswith("Unnamed")]
+    patches = {}
+    for col in df.columns:
+        if col == "date":
+            continue
+        entries = []
+        for d, v in zip(df["date"], df[col]):
+            if pd.notna(v):
+                dt = datetime.strptime(str(d), "%d/%m/%Y")
+                entries.append({"date": datetime(dt.year, dt.month, 1), "value": v})
+        if entries:
+            patches[col] = entries
+    return patches
+
+
+def _apply_patches(patches: dict[str, list[dict]], base_funds: FundDict) -> FundDict:
+    """
+    Date-level patch: overlay sparse overwrite entries onto base_funds.
+
+    For each fund in patches:
+    - If it exists in base_funds (by name), merge at the date level: patch
+      values overwrite matching dates, new dates extend the timeseries.
+      Gaps are filled with 0.0 to maintain continuity.  The identifier is
+      recomputed from the merged performance.
+    - If it doesn't exist by name, create a new fund from the patch entries
+      and compute its identifier.  If that identifier matches an existing
+      fund, merge the two under the overwrite fund's name.
+
+    This preserves existing data (e.g. JSON 2022-2023) while patching in
+    overwrite values (e.g. 2023-2024), producing a combined 2022-2024 series.
+    """
+    from dateutil.relativedelta import relativedelta
+    from fofproject.fund import Fund
+
+    merged = FundDict()
+    merged.update(base_funds)
+
+    def _merge_into(base_fund, patch_entries, target_name):
+        """Merge patch_entries into base_fund, return new Fund under target_name."""
+        date_map = {}
+        for entry in base_fund.monthly_returns:
+            date_map[entry["month"]] = entry["value"]
+        for entry in patch_entries:
+            date_map[entry["date"]] = entry["value"]
+
+        if not date_map:
+            return None
+
+        sorted_months = sorted(date_map.keys())
+        first_month = sorted_months[0]
+        last_month = sorted_months[-1]
+
+        continuous = []
+        current = first_month
+        while current <= last_month:
+            value = date_map.get(current, 0.0)
+            continuous.append({
+                "date": current.strftime("%d/%m/%Y"),
+                "value": value,
+            })
+            current += relativedelta(months=1)
+
+        # Preserve metadata from base, but recompute identifier from merged data
+        meta = {}
+        for attr in ("one_liner", "geo_focus", "strategy", "asset_class",
+                      "ir_name", "email", "phone", "base",
+                      "fund_inception", "aum_size", "management_fee",
+                      "performance_fee", "suggested_benchmark_name"):
+            val = getattr(base_fund, attr, None)
+            if val is not None:
+                meta[attr] = val
+        meta["identifier"] = compute_identifier(continuous)
+        bm = getattr(base_fund, "default_benchmark", None)
+
+        new_fund = Fund(name=target_name, monthly_returns=continuous, **meta)
+        if bm is not None:
+            new_fund.default_benchmark = bm
+        return new_fund
+
+    # Build identifier -> name index for existing funds
+    ident_index = {}
+    for name in merged:
+        ident = merged[name].identifier
+        if ident:
+            ident_index[ident] = name
+
+    for fund_name, patch_entries in patches.items():
+        if fund_name in merged:
+            # Name match — merge performance, recompute identifier
+            result = _merge_into(merged[fund_name], patch_entries, fund_name)
+            if result is not None:
+                merged[fund_name] = result
+            continue
+
+        # No name match — create new fund, compute identifier
+        raw = [{"date": e["date"].strftime("%d/%m/%Y"), "value": e["value"]}
+               for e in sorted(patch_entries, key=lambda x: x["date"])]
+        new_ident = compute_identifier(raw)
+
+        # Check if identifier matches an existing fund
+        if new_ident and new_ident in ident_index:
+            existing_name = ident_index[new_ident]
+            existing_fund = merged[existing_name]
+            log.detail(
+                f"Overwrite fund '{fund_name}' identifier matches existing "
+                f"fund '{existing_name}' — merging under '{fund_name}'.",
+                phase=LOAD,
+            )
+            result = _merge_into(existing_fund, patch_entries, fund_name)
+            if result is not None:
+                # Remove old name, add under new name
+                del merged[existing_name]
+                # Update ident_index
+                ident_index.pop(new_ident, None)
+                merged[fund_name] = result
+                if result.identifier:
+                    ident_index[result.identifier] = fund_name
+            continue
+
+        # Truly new fund
+        try:
+            new_fund = Fund(
+                name=fund_name,
+                monthly_returns=raw,
+                identifier=new_ident,
+            )
+            merged[fund_name] = new_fund
+            if new_ident:
+                ident_index[new_ident] = fund_name
+        except ValueError:
+            log.warn(
+                f"Skipping overwrite for new fund '{fund_name}': "
+                f"entries are not continuous.",
+                phase=LOAD,
+            )
+
+    return merged
+
+
 def merge_funds(dict1, dict2) -> FundDict:
     """
     Merge two fund containers (FundDict or plain dict).
@@ -1257,7 +1406,7 @@ def merge_funds(dict1, dict2) -> FundDict:
 
 def load_all_data(
     base_path=None,
-    benchmark_csv="BENCHMARK.csv",
+    benchmark_csv="HF index comparison.xlsx",
     return_csv="RETURN DATA.csv",
     manual_csv="MANUAL OVERWRITE.csv",
     json_folders=None,
@@ -1273,7 +1422,7 @@ def load_all_data(
         If None, uses the resolved default: NAS mount (/data/Input) if
         available, otherwise falls back to the local ``input/`` folder.
     benchmark_csv : str
-        Filename of the benchmark CSV inside base_path.
+        Filename of the benchmark file inside base_path.
     return_csv : str
         Filename of the portfolio returns CSV inside base_path.
     manual_csv : str
@@ -1358,15 +1507,25 @@ def load_all_data(
                 phase=LOAD,
             )
 
-    # 4. Manual overwrite CSV (overwrites performance of matching funds)
-    if os.path.exists(manual_path):
-        manual_funds = input_monthly_returns(manual_path)
-        funds = merge_funds(manual_funds, funds)
-        log.detail(
-            f"Applied manual overwrite from {manual_path} ({len(manual_funds)} fund(s)).",
-            phase=LOAD,
-        )
-    else:
+    # 4. Manual overwrite CSV (date-level patch, not full replacement)
+    #    Check both the base_path location and the dedicated writable path
+    from fofproject.paths import MANUAL_OVERWRITE_PATH
+    manual_paths = [manual_path]
+    writable_path = str(MANUAL_OVERWRITE_PATH)
+    if writable_path != manual_path and os.path.exists(writable_path):
+        manual_paths.append(writable_path)
+
+    applied_any = False
+    for mp in manual_paths:
+        if os.path.exists(mp):
+            patches = _read_overwrite_patches(mp)
+            funds = _apply_patches(patches, funds)
+            log.detail(
+                f"Applied manual overwrite from {mp} ({len(patches)} fund(s)).",
+                phase=LOAD,
+            )
+            applied_any = True
+    if not applied_any:
         log.detail(f"Manual overwrite file not found: {manual_path}.", phase=LOAD)
 
     # 5. Restore JSON metadata (always takes priority for non-performance fields)

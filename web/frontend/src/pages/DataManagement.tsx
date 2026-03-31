@@ -1,8 +1,8 @@
 import { useState } from 'react'
-import { Card, Button, Tag, Table, Typography, Space, message } from 'antd'
-import { ReloadOutlined, CheckCircleOutlined } from '@ant-design/icons'
+import { Card, Button, Tag, Table, Typography, Space, Descriptions, message } from 'antd'
+import { ReloadOutlined, CheckCircleOutlined, FolderOpenOutlined } from '@ant-design/icons'
 import { useQuery } from '@tanstack/react-query'
-import { getStatus, reloadData } from '../api/client'
+import { getStatus, reloadData, listFunds } from '../api/client'
 
 const { Title, Text } = Typography
 
@@ -17,7 +17,7 @@ export default function DataManagement() {
     setReloading(true)
     try {
       await reloadData()
-      await refetch()
+      await Promise.all([refetch(), refetchFunds()])
       message.success('Data reloaded successfully')
     } catch (e: unknown) {
       message.error(`Reload failed: ${e instanceof Error ? e.message : 'Unknown error'}`)
@@ -26,12 +26,22 @@ export default function DataManagement() {
     }
   }
 
+  const { data: fundsData, refetch: refetchFunds } = useQuery({
+    queryKey: ['funds'],
+    queryFn: () => listFunds(),
+  })
+
   const columns = [
     { title: '#', render: (_: unknown, __: unknown, i: number) => i + 1, width: 50 },
-    { title: 'Fund Name', dataIndex: 'name', key: 'name' },
+    { title: 'Fund Name', dataIndex: 'Name', key: 'Name' },
+    { title: 'Identifier', dataIndex: 'Identifier', key: 'Identifier' },
+    { title: 'Source', dataIndex: 'Source', key: 'Source',
+      filters: [...new Set((fundsData?.funds || []).map((f) => f.Source as string))].filter(Boolean).map((s) => ({ text: s, value: s })),
+      onFilter: (value: unknown, record: Record<string, unknown>) => record.Source === value,
+    },
   ]
 
-  const tableData = (data?.fund_names || []).map((n, i) => ({ key: i, name: n }))
+  const tableData = (fundsData?.funds || []).map((f, i) => ({ key: i, ...f }))
 
   return (
     <div>
@@ -69,7 +79,19 @@ export default function DataManagement() {
           </Space>
         </Card>
 
-        <Card title={`Loaded Funds (${tableData.length})`}>
+        {data?.data_paths && Object.keys(data.data_paths).length > 0 && (
+          <Card title={<><FolderOpenOutlined /> Data Sources</>}>
+            <Descriptions column={1} size="small">
+              {Object.entries(data.data_paths).map(([label, path]) => (
+                <Descriptions.Item key={label} label={label}>
+                  <Text code>{path}</Text>
+                </Descriptions.Item>
+              ))}
+            </Descriptions>
+          </Card>
+        )}
+
+        <Card title={`Loaded Funds (${tableData.length})`} style={{ marginTop: 0 }}>
           <Table
             columns={columns}
             dataSource={tableData}

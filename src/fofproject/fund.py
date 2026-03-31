@@ -61,8 +61,8 @@ FONT_FNAME = {
         "regular": "src/fofproject/font/Roboto/static/Roboto-Regular.ttf",
     },
     "cn": {
-        "bold": "src/fofproject/font/Roboto/static/Roboto-Bold.ttf",
-        "regular": "src/fofproject/font/Roboto/static/Roboto-Regular.ttf",
+        "bold": "src/fofproject/font/NotoSansSC/NotoSansSC-Regular.ttf",
+        "regular": "src/fofproject/font/NotoSansSC/NotoSansSC-Regular.ttf",
     },
 }
 
@@ -92,26 +92,53 @@ def find_largest_font_size(target_height, font2height):
     return None
 
 
-def get_available_benchmarks(file_path="BENCHMARK.csv"):
-    """Read BENCHMARK.csv header and return list of available index names."""
-    df = pd.read_csv(file_path, nrows=0)
+def get_available_benchmarks(file_path="HF index comparison.xlsx"):
+    """Read benchmark header and return list of available index names."""
+    df = pd.read_excel(file_path, nrows=0)
     return [col for col in df.columns if col != "date"]
 
 
-def load_benchmarks(file_path="BENCHMARK.csv"):
-    """Load benchmark/index funds from a CSV file with zero fees.
+
+# Bloomberg ticker → display name mapping for HF index comparison.xlsx
+_TICKER_TO_DISPLAY = {
+    "WITH469  Index": "WITH WORLD",
+    "MXCN Index": "MSCI CHINA",
+    "MXWO Index": "MSCI WORLD",
+    "TPX Index": "TOPIX",
+    "SPX Index": "S&P 500",
+    "SOX Index": "SOX",
+    "KOSPI Index": "KOSPI",
+    "TWSE Index": "TAIEX",
+    "MXEF Index": "MSCI EM",
+    "RTY Index": "RUSSELL 2000",
+    "SXXP Index": "STOXX 600",
+    "SX5E Index": "STOXX 50",
+    "UKX Index": "FTSE UK",
+    "S5HLTH Index": "US HEALTHCARE",
+    "S5FINL Index": "US FINANCIAL",
+    "S5ENRS Index": "US ENERGY",
+    "BCOM Index": "COMMODITY",
+    "HSHCI Index": "HK HEALTHCARE",
+}
+
+
+def load_benchmarks(file_path="HF index comparison.xlsx"):
+    """Load benchmark/index funds from a file with zero fees.
 
     Parameters
     ----------
     file_path : str
-        Path to the benchmark CSV file.
+        Path to the benchmark file.
 
     Returns
     -------
     dict
         Dictionary mapping benchmark names to Fund objects.
     """
-    df = pd.read_csv(file_path)
+    df = pd.read_excel(file_path)
+    if pd.api.types.is_datetime64_any_dtype(df["date"]):
+        df["date"] = df["date"].dt.strftime("%d/%m/%Y")
+    df.rename(columns=_TICKER_TO_DISPLAY, inplace=True)
     funds = FundDict()
     for col in df.columns:
         if col == "date":
@@ -181,6 +208,10 @@ class FundDict(MutableMapping):
 
     def _insert(self, fund: "Fund"):
         ident = fund.identifier or fund.name
+        # If the identifier already exists for a *different* fund name,
+        # disambiguate by appending the fund name to avoid silent overwrites.
+        if ident in self._store and self._store[ident].name != fund.name:
+            ident = f"{ident}_{fund.name}"
         self._store[ident] = fund
         self._name_index.setdefault(fund.name, [])
         if ident not in self._name_index[fund.name]:
@@ -322,7 +353,7 @@ def input_monthly_returns(
     management_fee : float, default 0.01
         Management fee as decimal (0.01 = 1%). Stored on Fund for reference.
     benchmark_csv : str, optional
-        Path to a BENCHMARK.csv file. If provided, benchmark indices are loaded
+        Path to a benchmark file. If provided, benchmark indices are loaded
         (with zero fees) and merged into the returned dict.
     benchmark_map : dict, optional
         Mapping of fund names to benchmark names (e.g., {"HAO": "MSCI CHINA"}).
@@ -336,7 +367,7 @@ def input_monthly_returns(
     Example
     -------
     >>> funds = input_monthly_returns("RETURN DATA.csv",
-    ...     benchmark_csv="BENCHMARK.csv",
+    ...     benchmark_csv="HF index comparison.xlsx",
     ...     benchmark_map={"HAO": "MSCI CHINA", "LIM": "TOPIX"})
     >>> funds["HAO"].beta_to()  # uses MSCI CHINA automatically
     """
@@ -1763,10 +1794,10 @@ class Fund:
         fund_returns = self.monthly_returns
         bench_returns = benchmark_fund.monthly_returns
         fund_returns = pd.Series(
-            {entry["datetime"]: entry["value"] for entry in fund_returns}
+            {entry["month"]: entry["value"] for entry in fund_returns}
         )
         bench_returns = pd.Series(
-            {entry["datetime"]: entry["value"] for entry in bench_returns}
+            {entry["month"]: entry["value"] for entry in bench_returns}
         )
         # Combine into a DataFrame
         combined = pd.concat([fund_returns, bench_returns], axis=1, join="inner")
@@ -2296,6 +2327,7 @@ class Fund:
             Matplotlib figure object.
         """
         benchmark_fund = benchmark_fund or self.default_benchmark
+        bm_name = benchmark_fund.name if benchmark_fund else "Benchmark"
         header_fill = "#cbb69d"
         cell_fill = "#f0f0f0"
         text_color = "black"
@@ -2310,8 +2342,8 @@ class Fund:
                 "sortino": "Sortino Ratio",
                 "cum": "Cumulative Return",
                 "mdd": "Max Drawdown",
-                "beta": f"Beta to {benchmark_fund.name}",
-                "corr": f"Correlation (vs. {benchmark_fund.name})",
+                "beta": f"Beta to {bm_name}",
+                "corr": f"Correlation (vs. {bm_name})",
                 "win": "Percentage of Positive Return Months",
                 "best": "Best Month",
                 "worst": "Worst Month",
@@ -2319,7 +2351,7 @@ class Fund:
                 "skew": "Skewness",
                 "kurt": "Kurtosis",
                 "turnover": "Avg. Monthly Turnover",
-                "capture": f"Capture Ratio (vs. {benchmark_fund.name})",
+                "capture": f"Capture Ratio (vs. {bm_name})",
             },
             "cn": {
                 "metric": "指标",
@@ -2330,8 +2362,8 @@ class Fund:
                 "sortino": "索提诺比率",
                 "cum": "累计增长率",
                 "mdd": "最大回撤",
-                "beta": f"贝塔({benchmark_fund.name})",
-                "corr": f"相关性（{benchmark_fund.name}）",
+                "beta": f"贝塔({bm_name})",
+                "corr": f"相关性（{bm_name}）",
                 "win": "月度胜率",
                 "best": "最佳月份",
                 "worst": "最差月份",
@@ -2339,7 +2371,7 @@ class Fund:
                 "skew": "偏度",
                 "kurt": "峰度",
                 "turnover": "平均月换手率",
-                "capture": f"捕获比率（{benchmark_fund.name}）",
+                "capture": f"捕获比率（{bm_name}）",
             },
         }
         L = labels.get(language, labels["en"])
@@ -2352,15 +2384,25 @@ class Fund:
             "win": f"{self.positive_months(self.inception_date, end_month) * 100:.2f}%",
             "sharpe": f"{self.sharpe_ratio(self.inception_date, end_month):.2f}",
             "sortino": f"{self.sortino_ratio(self.inception_date, end_month):.2f}",
-            "beta": f"{self.beta_to(benchmark_fund, self.inception_date, end_month):.2f}",
-            "corr": f"{self.correlation_to(benchmark_fund, self.inception_date, end_month):.2f}",
+            "beta": (
+                f"{self.beta_to(benchmark_fund, self.inception_date, end_month):.2f}"
+                if benchmark_fund else "N/A"
+            ),
+            "corr": (
+                f"{self.correlation_to(benchmark_fund, self.inception_date, end_month):.2f}"
+                if benchmark_fund else "N/A"
+            ),
             "best": "[placeholder]",
             "worst": "[placeholder]",
             "aum": "[placeholder]",
             "skew": "[placeholder]",
             "kurt": "[placeholder]",
             "turnover": "[placeholder]",
-            "capture": f"{self.capture_ratio(benchmark_fund, self.inception_date, end_month):.2f}",
+            "capture": (
+                f"{v:.2f}"
+                if benchmark_fund and (v := self.capture_ratio(benchmark_fund, self.inception_date, end_month)) is not None
+                else "N/A"
+            ),
         }
 
         default_order = [
@@ -2636,6 +2678,7 @@ class Fund:
             Displays all charts interactively via .show() calls (when show=True).
         """
         benchmark_fund = benchmark_fund or self.default_benchmark
+        has_benchmark = benchmark_fund is not None
 
         if show:
             print(self.one_liner)
@@ -2647,11 +2690,16 @@ class Fund:
         plot1 = self.export_monthly_table(
             language, benchmark_fund=benchmark_fund, save=save
         )
+        # Select metrics based on benchmark availability
+        if has_benchmark:
+            metrics = ["cagr", "vol", "sharpe", "sortino", "mdd", "beta", "corr", "win"]
+        else:
+            metrics = ["cagr", "vol", "sharpe", "sortino", "mdd", "win"]
         plot2 = self.export_key_metrics_table(
             benchmark_fund=benchmark_fund,
             end_month=endmonth_str,
             language=language,
-            metrics=["cagr", "vol", "sharpe", "sortino", "mdd", "beta", "corr", "win"],
+            metrics=metrics,
             horizontal=False,
             save=save,
         )
@@ -2659,19 +2707,22 @@ class Fund:
         plot4 = self.plot_rolling_vol_vs_benchmark(
             benchmark_fund=benchmark_fund, save=save
         )
-        plot5 = self.compare_worst_performance(
-            benchmark_fund,
-            n_worst=10,
-            title="Fund Performance on Benchmark's Worst Days",
-            save=save,
-        )
+        plot5 = None
+        if has_benchmark:
+            plot5 = self.compare_worst_performance(
+                benchmark_fund,
+                n_worst=10,
+                title="Fund Performance on Benchmark's Worst Days",
+                save=save,
+            )
 
         if show:
             plot1.show()
             plot2.show()
             plot3.show()
             plot4.show()
-            plot5.show()
+            if plot5 is not None:
+                plot5.show()
 
 
 def compare_funds(fund_dict, benchmark_fund=None):

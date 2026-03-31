@@ -19,6 +19,7 @@ from fofproject.classify import (
 )
 from fofproject.load import process_single_pdf, init_funds
 from fofproject.fund import load_benchmarks
+from fofproject.paths import DEFAULT_INPUT_DIR
 import fofproject.fund as fund_module
 
 
@@ -527,9 +528,10 @@ def generate_fund_graphs(output_dir: Path = None, benchmark_fund=None, language=
     bm_dict_preloaded = None
     if benchmark_fund is None:
         try:
-            bm_dict_preloaded = load_benchmarks()
-        except Exception:
-            pass  # BENCHMARK.csv not available, skip
+            benchmark_path = DEFAULT_INPUT_DIR / "HF index comparison.xlsx"
+            bm_dict_preloaded = load_benchmarks(str(benchmark_path))
+        except Exception as e:
+            log.warn(f"Could not load benchmarks: {e}", phase=GRAPHS)
 
     for firm_folder in sorted(output_dir.iterdir()):
         if not firm_folder.is_dir() or firm_folder.name.startswith("."):

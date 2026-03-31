@@ -62,9 +62,10 @@ export const mvoOptimize = (body: MvoReq) =>
   post<MvoResponse>('/mvo/optimize', body)
 
 // ── Overwrite ──
-export const getOverwrite = () => request<OverwriteData>('/overwrite')
-export const saveOverwrite = (data: OverwriteData) =>
-  put<{ success: boolean; message: string }>('/overwrite', data)
+export const getFundOverwrite = (fundName: string) =>
+  request<FundOverwriteData>(`/overwrite/${encodeURIComponent(fundName)}`)
+export const saveFundOverwrite = (fundName: string, data: FundOverwriteData) =>
+  put<{ success: boolean; message: string }>(`/overwrite/${encodeURIComponent(fundName)}`, data)
 
 // ── Types ──
 export interface SystemStatus {
@@ -73,6 +74,7 @@ export interface SystemStatus {
   fund_names: string[]
   index_names: string[]
   rdgff_names: string[]
+  data_paths: Record<string, string>
 }
 
 export interface FundRow {
@@ -160,9 +162,8 @@ export interface MvoResponse {
   stats: Record<string, number | string>
 }
 
-export interface OverwriteData {
-  headers: string[]
-  rows: (string | number | null)[][]
+export interface FundOverwriteData {
+  entries: { date: string; value: number | null }[]
 }
 
 // Request types

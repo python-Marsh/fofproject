@@ -201,7 +201,7 @@ export default function CumulativeReturns() {
 
       {mutation.error && (
         <Card>
-          <Typography.Text type="danger">
+          <Typography.Text type="danger" style={{ whiteSpace: 'pre-line' }}>
             {mutation.error instanceof Error ? mutation.error.message : 'Error generating chart'}
           </Typography.Text>
         </Card>

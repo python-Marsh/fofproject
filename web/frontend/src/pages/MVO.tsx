@@ -152,7 +152,15 @@ export default function MVO() {
         </Space>
       </Card>
 
-      {result && (
+      {mutation.error && (
+        <Card style={{ marginTop: 16 }}>
+          <Typography.Text type="danger" style={{ whiteSpace: 'pre-line' }}>
+            {mutation.error instanceof Error ? mutation.error.message : 'Optimization error'}
+          </Typography.Text>
+        </Card>
+      )}
+
+      {result && !mutation.error && (
         <Space direction="vertical" size="large" style={{ width: '100%' }}>
           <Card title="Optimal Weights">
             <PlotlyChart
@@ -180,14 +188,6 @@ export default function MVO() {
             </Descriptions>
           </Card>
         </Space>
-      )}
-
-      {mutation.error && (
-        <Card>
-          <Typography.Text type="danger">
-            {mutation.error instanceof Error ? mutation.error.message : 'Optimization error'}
-          </Typography.Text>
-        </Card>
       )}
     </div>
   )

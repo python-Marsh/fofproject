@@ -20,6 +20,7 @@ from pptx import Presentation
 
 from fofproject.batch import plot_cumulative_returns
 from fofproject.fund import Fund, save_dir
+from fofproject.paths import TEMPLATE_DIR
 from fofproject.utils import parse_month
 
 # Chinese month names for date formatting
@@ -239,7 +240,9 @@ class TemplateEngine:
             for month in range(1, 13):
                 # Check if this month is in the fund's data range
                 month_dt = datetime(year, month, 1)
-                if month_dt < fund.inception_date or month_dt > end_month:
+                if month_dt > end_month:
+                    fund_row.append("")
+                elif month_dt < fund.inception_date:
                     fund_row.append(fmt.get("empty_value", "-"))
                 else:
                     val = fund.get_monthly_return(year, month)
@@ -274,7 +277,7 @@ class TemplateEngine:
             for month in range(1, 13):
                 month_dt = datetime(year, month, 1)
                 if month_dt > end_month:
-                    bench_row.append(fmt.get("empty_value", "-"))
+                    bench_row.append("")
                 else:
                     val = benchmark_fund.get_monthly_return(year, month)
                     if val is not None:
@@ -365,8 +368,9 @@ class TemplateEngine:
                 resolved_args["end_month"] = em.strftime("%Y-%m")
             resolved_args["save"] = False
             fig = plot_cumulative_returns(funds=subset, **resolved_args)
-            # Plotly figure — convert to PNG bytes
-            return fig.to_image(format="png", width=1200, height=533, scale=2)
+            # Plotly figure — convert to PNG bytes using the figure's own
+            # layout dimensions (set by aspect_lock in plot_cumulative_returns).
+            return fig.to_image(format="png")
 
         elif method == "export_key_metrics_table":
             fund_name = data_source.get("fund")
@@ -444,10 +448,16 @@ class TemplateEngine:
         new_text = self.compute_value(element["data_source"])
 
         if isinstance(new_text, str):
+            # Preserve leading whitespace from the combined original runs
+            combined = "".join(
+                para.runs[i].text
+                for i in range(run_start, min(run_end + 1, len(para.runs)))
+            )
+            leading_ws = combined[: len(combined) - len(combined.lstrip())]
             # Set the first target run to the new text, clear the rest
             for i in range(run_start, min(run_end + 1, len(para.runs))):
                 if i == run_start:
-                    para.runs[i].text = " " + new_text
+                    para.runs[i].text = (leading_ws or " ") + new_text
                 else:
                     para.runs[i].text = ""
 
@@ -478,6 +488,31 @@ class TemplateEngine:
         table = doc.tables[loc["table_index"]]
         data_start_row = loc.get("data_start_row", 1)
 
+        # Detect if the grid's top year is newer than the table's existing
+        # top year.  When it is, insert row pairs so that old template data
+        # shifts down and is preserved beneath the freshly computed rows.
+        existing_top_year = None
+        if len(table.rows) > data_start_row:
+            first_cell_text = table.rows[data_start_row].cells[0].text.strip()
+            if first_cell_text.isdigit():
+                existing_top_year = int(first_cell_text)
+
+        grid_top_year = None
+        if grid and grid[0][0].isdigit():
+            grid_top_year = int(grid[0][0])
+
+        if existing_top_year and grid_top_year and grid_top_year > existing_top_year:
+            # Each new year adds a fund row + benchmark row
+            new_years = grid_top_year - existing_top_year
+            self._insert_table_rows(table, data_start_row, new_years * 2)
+        else:
+            # Insert rows if the grid needs more space than available
+            available_data_rows = len(table.rows) - data_start_row
+            needed_rows = len(grid)
+            if needed_rows > available_data_rows:
+                rows_to_add = needed_rows - available_data_rows
+                self._insert_table_rows(table, data_start_row, rows_to_add)
+
         for row_idx, row_data in enumerate(grid):
             table_row_idx = data_start_row + row_idx
             if table_row_idx >= len(table.rows):
@@ -492,6 +527,26 @@ class TemplateEngine:
                         run.text = ""
                 else:
                     cell.text = cell_value
+
+    @staticmethod
+    def _insert_table_rows(table, position: int, count: int):
+        """Insert *count* new rows into a DOCX table at *position*.
+
+        Copies the XML structure and formatting from the row at *position*
+        (the first data row) so new rows inherit cell widths and styles.
+        Existing rows from *position* onward are pushed down.
+        """
+        import copy
+
+        ref_row_elem = table.rows[position]._tr
+        parent = ref_row_elem.getparent()
+
+        for _ in range(count):
+            new_tr = copy.deepcopy(ref_row_elem)
+            # Clear text content in cloned cells
+            for tc in new_tr.findall(".//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t"):
+                tc.text = ""
+            parent.insert(list(parent).index(ref_row_elem), new_tr)
 
     def apply_docx_image(self, doc: Document, element: dict):
         """Replace an inline image in a DOCX document."""
@@ -525,6 +580,12 @@ class TemplateEngine:
 
         run.add_picture(tmp_path, width=Emu(width) if width else None, height=Emu(height) if height else None)
         Path(tmp_path).unlink(missing_ok=True)
+
+        # Remove specified body elements (e.g. spacer paragraphs) in reverse
+        # order so indices remain valid during removal.
+        to_remove = element["location"].get("remove_body_elements", [])
+        for idx in sorted(to_remove, reverse=True):
+            body.remove(body[idx])
 
     # ------------------------------------------------------------------ #
     #  PPTX operations
@@ -718,9 +779,9 @@ class TemplateEngine:
 
 def generate_factsheet(
     funds: Dict[str, Fund],
-    template_path: str,
-    spec_path: str,
-    report_month: str,
+    template_path: str = None,
+    spec_path: str = None,
+    report_month: str = "2025-12",
     output_path: str = None,
 ) -> Path:
     """Generate a populated DOCX factsheet from template + spec.
@@ -729,10 +790,10 @@ def generate_factsheet(
     ----------
     funds : dict
         Dictionary of Fund objects keyed by name.
-    template_path : str
-        Path to the DOCX template file.
-    spec_path : str
-        Path to the JSON spec file.
+    template_path : str, optional
+        Path to the DOCX template file. Defaults to TEMPLATE_DIR / spec's template_file.
+    spec_path : str, optional
+        Path to the JSON spec file. Defaults to TEMPLATE_DIR / "docx_spec_en.json".
     report_month : str
         Report month in 'YYYY-MM' format.
     output_path : str, optional
@@ -743,8 +804,14 @@ def generate_factsheet(
     Path
         Path to the generated document.
     """
+    if spec_path is None:
+        spec_path = str(TEMPLATE_DIR / "docx_spec_en.json")
+
     with open(spec_path, "r") as f:
         spec = json.load(f)
+
+    if template_path is None:
+        template_path = str(TEMPLATE_DIR / spec["template_file"])
 
     doc = Document(template_path)
     engine = TemplateEngine(funds, report_month, spec)
@@ -779,9 +846,9 @@ def generate_factsheet(
 
 def generate_presentation(
     funds: Dict[str, Fund],
-    template_path: str,
-    spec_path: str,
-    report_month: str,
+    template_path: str = None,
+    spec_path: str = None,
+    report_month: str = "2025-12",
     output_path: str = None,
 ) -> Path:
     """Generate a populated PPTX presentation from template + spec.
@@ -790,10 +857,10 @@ def generate_presentation(
     ----------
     funds : dict
         Dictionary of Fund objects keyed by name.
-    template_path : str
-        Path to the PPTX template file.
-    spec_path : str
-        Path to the JSON spec file.
+    template_path : str, optional
+        Path to the PPTX template file. Defaults to TEMPLATE_DIR / spec's template_file.
+    spec_path : str, optional
+        Path to the JSON spec file. Defaults to TEMPLATE_DIR / "pptx_spec.json".
     report_month : str
         Report month in 'YYYY-MM' format.
     output_path : str, optional
@@ -804,8 +871,14 @@ def generate_presentation(
     Path
         Path to the generated presentation.
     """
+    if spec_path is None:
+        spec_path = str(TEMPLATE_DIR / "pptx_spec.json")
+
     with open(spec_path, "r") as f:
         spec = json.load(f)
+
+    if template_path is None:
+        template_path = str(TEMPLATE_DIR / spec["template_file"])
 
     prs = Presentation(template_path)
     engine = TemplateEngine(funds, report_month, spec)

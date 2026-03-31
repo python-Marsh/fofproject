@@ -13,7 +13,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from fofproject.log import log, set_verbose, CLASSIFY, RECONCILE, SYNC, MONITOR, NOTION, EMAIL, GRAPHS
+from fofproject.log import log, set_verbose, RECONCILE, SYNC, MONITOR, NOTION, EMAIL, GRAPHS
 from fofproject.paths import DEFAULT_EMAIL_INPUT_DIR, DEFAULT_OUTPUT_DIR, EMAIL_STORAGE_DIR
 from fofproject.notion import watch_folder
 from fofproject.connection import monitor_emails, download_all_emails, create_token_provider
@@ -166,16 +166,6 @@ def monitoring(
 
             if classify_result["new_folders_found"] > 0:
                 had_activity = True
-                _section(CLASSIFY, f"Classified {classify_result['new_folders_found']} new email(s)")
-                for item in classify_result["classifications"]:
-                    firm = item.get("firm")
-                    if firm:
-                        log.detail(f"  + {item['subject'][:45]}  ->  {firm}", phase=CLASSIFY)
-                    else:
-                        log.detail(
-                            f"  - {item['subject'][:45]}  ({item.get('reason', 'skipped')})",
-                            phase=CLASSIFY,
-                        )
 
             # ── 2. Process performance updates ───────────────
             perf_results = process_performance_updates(output_dir, mappings=mappings)

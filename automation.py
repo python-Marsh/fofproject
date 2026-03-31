@@ -14,7 +14,7 @@ def presentation_data_update(month: str):
         r"RETURN DATA.csv",
         performance_fee=0.2,
         management_fee=0.01,
-        benchmark_csv="BENCHMARK.csv",
+        benchmark_csv="HF index comparison.xlsx",
         benchmark_map={
             "HAO": "MSCI CHINA",
             "TAIREN": "MSCI CHINA",

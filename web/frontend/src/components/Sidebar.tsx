@@ -5,7 +5,6 @@ import {
   LineChartOutlined,
   HeatMapOutlined,
   PieChartOutlined,
-  EditOutlined,
   DatabaseOutlined,
 } from '@ant-design/icons'
 
@@ -16,7 +15,6 @@ const items = [
   { key: '/cumulative', icon: <LineChartOutlined />, label: 'Cumulative Returns' },
   { key: '/correlation', icon: <HeatMapOutlined />, label: 'Correlation' },
   { key: '/mvo', icon: <PieChartOutlined />, label: 'MVO' },
-  { key: '/overwrite', icon: <EditOutlined />, label: 'Manual Overwrite' },
   { key: '/data', icon: <DatabaseOutlined />, label: 'Data Management' },
 ]
 

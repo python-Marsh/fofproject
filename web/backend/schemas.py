@@ -12,6 +12,7 @@ class SystemStatus(BaseModel):
     fund_names: list[str]
     index_names: list[str] = []
     rdgff_names: list[str] = []
+    data_paths: dict[str, str] = {}
 
 
 class MonthlyReturn(BaseModel):
@@ -67,10 +68,6 @@ class MvoResponse(BaseModel):
     weights: dict[str, float]
     stats: dict
 
-
-class OverwriteData(BaseModel):
-    headers: list[str]
-    rows: list[list]
 
 
 # ── Request Models ───────────────────────────────────────

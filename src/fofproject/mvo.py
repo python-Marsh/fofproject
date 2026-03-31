@@ -31,7 +31,15 @@ def minimum_variance_analysis(funds: dict, mode="Minimum Variance", target_retur
     None
         Prints the portfolio weights and performance metrics for different optimization strategies.
     """
-    # Step 1: Prepare the returns DataFrame
+    # Step 1: Validate inputs
+    if len(funds) < 2:
+        raise ValueError("At least 2 funds are required for optimization.")
+
+    valid_modes = {"Minimum Variance", "Maximum Sharpe", "Target Return"}
+    if mode not in valid_modes:
+        raise ValueError(f"Invalid mode '{mode}'. Must be one of: {', '.join(valid_modes)}")
+
+    # Step 2: Prepare the returns DataFrame
     series = {}
     start_dates = []
     end_dates = []
@@ -45,6 +53,9 @@ def minimum_variance_analysis(funds: dict, mode="Minimum Variance", target_retur
             }
         ).sort_index()
 
+        if s.empty:
+            raise ValueError(f"Fund '{name}' has no valid return data.")
+
         series[name] = s
         start_dates.append(s.index.min())
         end_dates.append(s.index.max())
@@ -55,40 +66,63 @@ def minimum_variance_analysis(funds: dict, mode="Minimum Variance", target_retur
     # Find common overlapping range
     common_start = max(start_dates)  # latest start date
     common_end = min(end_dates)      # earliest end date
-    n_months = (common_end.year - common_start.year) * 12 + (common_end.month - common_start.month) + 1
-    # Filter to common range
-    filtered = returns_df.loc[common_start:common_end]
 
-    # Looks like:
-    # month         FundA   FundB   FundC
-    # 2020-01-01    0.01    0.015   0.012
-    # 2020-02-01   -0.02   -0.010   0.005
-    # ...
-    ann_rtn = {}
-    for col in filtered.columns:
-        key = col
-        value=funds[col].annualized_return(common_start, common_end)
-        ann_rtn[key] = value
-    
-    mu = pd.Series(ann_rtn)
+    if common_start > common_end:
+        raise ValueError(
+            "Selected funds have no overlapping date range. "
+            "Check that the funds share at least some common months."
+        )
+
+    # Filter to common range and drop rows with any NaN (gaps within range)
+    filtered = returns_df.loc[common_start:common_end].dropna(how="any")
+    n_months = len(filtered)
+
+    if n_months < 3:
+        raise ValueError(
+            f"Only {n_months} overlapping month(s) with complete data across all selected funds. "
+            "At least 3 are required for a meaningful covariance estimate."
+        )
+
+    # Annualized arithmetic mean returns (consistent with sample covariance * 12)
+    mu = filtered.mean() * 12
+
+    # Guard against NaN/Inf in expected returns
+    if mu.isna().any() or np.isinf(mu).any():
+        bad = mu[mu.isna() | np.isinf(mu)].index.tolist()
+        raise ValueError(
+            f"Could not compute annualized return for: {', '.join(bad)}. "
+            "This may happen if a fund lost 100%+ in the period."
+        )
 
     # Annualized covariance matrix: sample covariance of monthly returns × 12
     S = filtered.cov() * 12
-    
+
+    # Guard against NaN in covariance matrix
+    if S.isna().any().any():
+        raise ValueError(
+            "Covariance matrix contains NaN values. "
+            "The selected funds may have insufficient overlapping data."
+        )
+
     # Step 3: Optimize portfolios
-    # Minimum Variance
     ef = EfficientFrontier(mu, S)
     if mode == "Minimum Variance":
         weights = ef.min_volatility()
         annual_rtn, annual_vol, annual_sharpe = ef.portfolio_performance(verbose=True)
 
-    # Reset EF for max Sharpe
     elif mode == "Maximum Sharpe":
         weights = ef.max_sharpe()
         annual_rtn, annual_vol, annual_sharpe = ef.portfolio_performance(verbose=True)
 
-    # Target return
     elif mode == "Target Return":
+        # Validate target is within feasible range
+        min_ret = float(mu.min())
+        max_ret = float(mu.max())
+        if target_return < min_ret or target_return > max_ret:
+            raise ValueError(
+                f"Target return {target_return:.2%} is outside the feasible range "
+                f"[{min_ret:.2%}, {max_ret:.2%}] of the selected funds."
+            )
         weights = ef.efficient_return(target_return=target_return)
         annual_rtn, annual_vol, annual_sharpe = ef.portfolio_performance(verbose=True)
 

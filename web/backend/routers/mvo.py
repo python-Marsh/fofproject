@@ -33,6 +33,8 @@ async def optimize(req: MvoRequest):
 
     try:
         result = await asyncio.to_thread(_generate)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         err_type = type(e).__name__
         msg = str(e)

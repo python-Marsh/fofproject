@@ -9,7 +9,6 @@ const FundDetail = lazy(() => import('./pages/FundDetail'))
 const CumulativeReturns = lazy(() => import('./pages/CumulativeReturns'))
 const Correlation = lazy(() => import('./pages/Correlation'))
 const MVO = lazy(() => import('./pages/MVO'))
-const ManualOverwrite = lazy(() => import('./pages/ManualOverwrite'))
 
 const Loading = () => (
   <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 100 }}>
@@ -27,7 +26,6 @@ export default function App() {
           <Route path="/cumulative" element={<CumulativeReturns />} />
           <Route path="/correlation" element={<Correlation />} />
           <Route path="/mvo" element={<MVO />} />
-          <Route path="/overwrite" element={<ManualOverwrite />} />
           <Route path="/data" element={<DataManagement />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

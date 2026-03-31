@@ -70,3 +70,13 @@ DEFAULT_INPUT_DIR = _resolve(
     _NAS_INPUT,
     _PROJECT_ROOT / "input",
 )
+
+# Manual overwrite CSV — lives alongside other input data
+MANUAL_OVERWRITE_PATH = DEFAULT_INPUT_DIR / "MANUAL OVERWRITE.csv"
+
+# Document templates directory (DOCX/PPTX templates and JSON specs)
+TEMPLATE_DIR = _resolve(
+    "TEMPLATE_DIR",
+    _NAS_INPUT / "templates",
+    _PROJECT_ROOT / "tests" / "fixtures" / "documents" / "template_input",
+)

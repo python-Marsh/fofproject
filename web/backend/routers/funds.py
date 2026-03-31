@@ -5,7 +5,7 @@ import math
 from fastapi import APIRouter, HTTPException, Query
 
 from fofproject.fund import compare_funds
-from web.backend.state import get_funds
+from web.backend.state import get_funds, get_fund_sources
 from web.backend.schemas import FundDetail, MonthlyReturn, MetricsResponse
 
 router = APIRouter(prefix="/api/funds", tags=["funds"])
@@ -25,7 +25,13 @@ def list_funds(benchmark: str | None = Query(None)):
     """Return comparison table from compare_funds() as list of row dicts."""
     funds = get_funds()
     bm = funds.get(benchmark) if benchmark else None
-    df = compare_funds(funds, benchmark_fund=bm)
+    try:
+        df = compare_funds(funds, benchmark_fund=bm)
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to generate fund comparison table: {e}",
+        )
     # Convert datetime columns to strings for JSON
     for col in ["Inception Date", "Latest Date"]:
         if col in df.columns:
@@ -33,10 +39,12 @@ def list_funds(benchmark: str | None = Query(None)):
                 lambda x: x.strftime("%Y-%m") if hasattr(x, "strftime") else x
             )
     records = df.to_dict(orient="records")
-    # Clean NaN values
+    # Clean NaN values and add source
+    sources = get_fund_sources()
     for row in records:
         for k, v in row.items():
             row[k] = _clean_value(v)
+        row["Source"] = sources.get(row.get("Name", ""), "Unknown")
     return {"funds": records}
 
 
@@ -96,18 +104,24 @@ def get_metrics(
 
     bm = funds.get(benchmark) if benchmark else fund.default_benchmark
 
-    result = MetricsResponse(
-        cumulative_return=_clean_value(fund.cumulative_return(start_month, end_month)),
-        annualized_return=_clean_value(fund.annualized_return(start_month, end_month)),
-        volatility=_clean_value(fund.volatility(start_month, end_month)),
-        sharpe_ratio=_clean_value(fund.sharpe_ratio(start_month, end_month)),
-        sortino_ratio=_clean_value(fund.sortino_ratio(start_month, end_month)),
-        max_drawdown=_clean_value(fund.max_drawdown(start_month, end_month)),
-        positive_months=_clean_value(fund.positive_months(start_month, end_month)),
-    )
+    try:
+        result = MetricsResponse(
+            cumulative_return=_clean_value(fund.cumulative_return(start_month, end_month)),
+            annualized_return=_clean_value(fund.annualized_return(start_month, end_month)),
+            volatility=_clean_value(fund.volatility(start_month, end_month)),
+            sharpe_ratio=_clean_value(fund.sharpe_ratio(start_month, end_month)),
+            sortino_ratio=_clean_value(fund.sortino_ratio(start_month, end_month)),
+            max_drawdown=_clean_value(fund.max_drawdown(start_month, end_month)),
+            positive_months=_clean_value(fund.positive_months(start_month, end_month)),
+        )
 
-    if bm:
-        result.beta = _clean_value(fund.beta_to(bm, start_month, end_month))
-        result.correlation = _clean_value(fund.correlation_to(bm, start_month, end_month))
+        if bm:
+            result.beta = _clean_value(fund.beta_to(bm, start_month, end_month))
+            result.correlation = _clean_value(fund.correlation_to(bm, start_month, end_month))
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to compute metrics for '{name}': {e}",
+        )
 
     return result

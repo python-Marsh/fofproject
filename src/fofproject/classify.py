@@ -55,10 +55,16 @@ _GENERIC_FIRM_WORDS = frozenset(
         "capital",
         "management",
         "advisors",
+        "adviser",
         "advisory",
         "partners",
         "investments",
         "investment",
+        "pte",
+        "co",
+        "commodities",
+        "corporation",
+        "limited",
         "asset",
         "assets",
         "fund",
@@ -75,6 +81,7 @@ _GENERIC_FIRM_WORDS = frozenset(
         "strategy",
         "research",
         "solutions",
+        "cap",
     }
 )
 
@@ -1279,7 +1286,9 @@ def _web_search_firm_for_fund(
             confidence=ws_result.confidence,
         )
     except Exception as e:
-        log.warn(f"Web search for firm failed (fund='{fund_name}'): {e}", phase=CLASSIFY)
+        log.warn(
+            f"Web search for firm failed (fund='{fund_name}'): {e}", phase=CLASSIFY
+        )
         return empty
 
 
@@ -2440,7 +2449,7 @@ def organize_artifacts_to_folders(
             dest_filename = _embed_artifact_id_in_filename(safe_filename, artifact_id)
             dest_dir.mkdir(parents=True, exist_ok=True)
             dest_path = dest_dir / dest_filename
-            shutil.copy2(str(source_file), str(dest_path))
+            shutil.copyfile(str(source_file), str(dest_path))
             result["destinations"].append(str(dest_path))
         else:
             dest_dir.mkdir(parents=True, exist_ok=True)
@@ -2557,7 +2566,9 @@ def _classify_single_email(
     )
 
     if classification.get("_error"):
-        log.error(f"  GPT error for {subject[:40]}..., will retry next run", phase=CLASSIFY)
+        log.error(
+            f"  GPT error for {subject[:40]}..., will retry next run", phase=CLASSIFY
+        )
         return None
 
     if lookup_lock:
@@ -2757,9 +2768,7 @@ def classify_and_organize_emails(
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
-            pool.submit(
-                _classify_task, i, ef, md, eid, fa, subj
-            ): eid
+            pool.submit(_classify_task, i, ef, md, eid, fa, subj): eid
             for i, (ef, md, eid, fa, subj) in enumerate(email_data)
         }
         for future in as_completed(futures):
@@ -2813,7 +2822,10 @@ def classify_and_organize_emails(
                 if not canonical_name:
                     report["hedge_fund_related"] -= 1
                     report["non_hedge_fund"] += 1
-                log.detail("  Hedge fund related but no artifacts could be organized", phase=CLASSIFY)
+                log.detail(
+                    "  Hedge fund related but no artifacts could be organized",
+                    phase=CLASSIFY,
+                )
         else:
             report["non_hedge_fund"] += 1
             log.detail("  Not hedge fund related", phase=CLASSIFY)
@@ -2840,7 +2852,9 @@ def classify_and_organize_emails(
         log.detail(f"  - {firm}: {info['email_count']} email(s)", phase=CLASSIFY)
 
     log.info(f"Report saved to: {report_path}", phase=CLASSIFY)
-    log.info(f"Firm mappings saved to: {output_dir / FIRM_MAPPINGS_FILE}", phase=CLASSIFY)
+    log.info(
+        f"Firm mappings saved to: {output_dir / FIRM_MAPPINGS_FILE}", phase=CLASSIFY
+    )
 
     return report
 
@@ -2865,6 +2879,104 @@ def get_processed_folders(output_dir: Path) -> set:
             pass
 
     return processed
+
+
+def _append_classification_to_report(entry: dict, output_dir: Path):
+    """Append a single classification entry to the report file on disk."""
+    report_path = output_dir / CLASSIFICATION_REPORT_FILE
+    if report_path.exists():
+        with open(report_path, "r", encoding="utf-8") as f:
+            report = json.load(f)
+    else:
+        report = {"classifications": [], "firms_found": {}}
+
+    report["classifications"].append(entry)
+
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2, ensure_ascii=False)
+
+
+def reset_classification(
+    output_dir: Path = None,
+    *,
+    firm_names: list[str] | None = None,
+    fund_names: list[str] | None = None,
+    email_ids: list[str] | None = None,
+) -> dict:
+    """Remove specific entries from the classification report so they get reprocessed.
+
+    Matching is case-insensitive. For firm_names, entries are matched against
+    the ``canonical_firm_name`` field. For fund_names, entries are matched if
+    any included artifact's ``assigned_fund_name`` matches. For email_ids,
+    entries are matched by exact ``email_id``.
+
+    After calling this, run ``classify_new_emails()`` to reclassify the
+    removed emails.
+
+    Returns:
+        dict with ``removed_count`` and ``remaining_count``.
+    """
+    output_dir = output_dir or DEFAULT_OUTPUT_DIR
+    report_path = output_dir / CLASSIFICATION_REPORT_FILE
+
+    if not report_path.exists():
+        return {"removed_count": 0, "remaining_count": 0}
+
+    with open(report_path, "r", encoding="utf-8") as f:
+        report = json.load(f)
+
+    classifications = report.get("classifications", [])
+
+    firm_set = {n.upper() for n in (firm_names or [])}
+    fund_set = {n.upper() for n in (fund_names or [])}
+    id_set = set(email_ids or [])
+
+    def _should_remove(entry: dict) -> bool:
+        if id_set and entry.get("email_id", "") in id_set:
+            return True
+        if firm_set:
+            canonical = (entry.get("canonical_firm_name") or "").upper()
+            if canonical in firm_set:
+                return True
+        if fund_set:
+            artifacts = entry.get("artifact_assignments", {})
+            for item in artifacts.get("included_attachments", []) + artifacts.get(
+                "included_links", []
+            ):
+                if (item.get("assigned_fund_name") or "").upper() in fund_set:
+                    return True
+        return False
+
+    kept = [e for e in classifications if not _should_remove(e)]
+    removed_count = len(classifications) - len(kept)
+
+    report["classifications"] = kept
+
+    # Rebuild firms_found summary from remaining entries
+    firms_found = {}
+    for entry in kept:
+        canonical = entry.get("canonical_firm_name")
+        if not canonical:
+            continue
+        if canonical not in firms_found:
+            firms_found[canonical] = {"email_count": 0, "emails": []}
+        firms_found[canonical]["email_count"] += 1
+        firms_found[canonical]["emails"].append(
+            {
+                "folder": entry.get("email_folder", ""),
+                "subject": entry.get("subject", ""),
+            }
+        )
+    report["firms_found"] = firms_found
+
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2, ensure_ascii=False)
+
+    log.info(
+        f"Reset {removed_count} classification(s), {len(kept)} remaining",
+        phase=CLASSIFY,
+    )
+    return {"removed_count": removed_count, "remaining_count": len(kept)}
 
 
 def classify_new_emails(
@@ -2950,31 +3062,26 @@ def classify_new_emails(
             firm_mappings,
             existing_firms,
         )
-        entry.pop("_canonical_name", None)
+        canonical_name = entry.pop("_canonical_name", None)
 
         email_cls = classification.get("email_classification", {})
-        if not email_cls.get("is_hedge_fund_related"):
-            log.detail(f"  Skipped: {subject[:40]}... (not hedge fund related)", phase=CLASSIFY)
+        if email_cls.get("is_hedge_fund_related") and canonical_name:
+            log.info(
+                f"[{i + 1}/{len(new_folders)}] {subject[:45]}  ->  {canonical_name}",
+                phase=CLASSIFY,
+            )
+        else:
+            log.info(
+                f"[{i + 1}/{len(new_folders)}] {subject[:45]}  (skipped)",
+                phase=CLASSIFY,
+            )
 
         results.append(entry)
 
-    # Save updated data (skip if caller owns the mappings object)
-    if _owns_mappings:
+        # Save mappings and report after each classification so progress
+        # survives interruption.
         save_firm_mappings(firm_mappings, output_dir)
-
-    # Update the report with new classifications
-    report_path = output_dir / CLASSIFICATION_REPORT_FILE
-    if report_path.exists():
-        with open(report_path, "r", encoding="utf-8") as f:
-            report = json.load(f)
-    else:
-        report = {"classifications": [], "firms_found": {}}
-
-    for result in results:
-        report["classifications"].append(result)
-
-    with open(report_path, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2, ensure_ascii=False)
+        _append_classification_to_report(entry, output_dir)
 
     return {"new_folders_found": len(new_folders), "classifications": results}
 
@@ -4169,8 +4276,6 @@ def _remove_artifact_from_registry(
         return firm_data.get("artifacts", {}).pop(artifact_id, None) or {}
 
 
-
-
 # =========================
 # ARTIFACT MOVE MONITORING
 # =========================
@@ -4885,5 +4990,3 @@ def delete_fund_alias_from_firm(
     else:
         print(f"Alias '{alias}' not found for fund '{fund_name}'.")
         return False
-
-

@@ -297,6 +297,7 @@ export default function Dashboard() {
       defaultSortOrder: c.defaultSortOrder,
       sorter: c.sorter as ColumnsType<FundRow>[number]['sorter'],
       render: c.render as ColumnsType<FundRow>[number]['render'],
+      onHeaderCell: () => ({ style: { whiteSpace: 'nowrap' as const } }),
     }))
 
   const toggleColumn = (key: string) => {

@@ -39,7 +39,7 @@ fund_name_map = {
     "PERSEVERANCE": {"en": "Perseverance Fund", "cn": "高毅基金"},
     "NEO IVY": {"en": "Neo Ivy Fund", "cn": "Neo Ivy 基金"},
     "JH BIOTECH": {"en": "JH Biotech Fund", "cn": "Janus Henderson 基金"},
-    # Benchmarks (BENCHMARK.csv)
+    # Benchmarks (HF index comparison.xlsx)
     "MSCI CHINA": {"en": "MSCI China Index", "cn": "MSCI 中国指数"},
     "MSCI WORLD": {"en": "MSCI World Index", "cn": "MSCI 世界指数"},
     "MSCI EM": {"en": "MSCI Emerging Markets Index", "cn": "MSCI 新兴市场指数"},
