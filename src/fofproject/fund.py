@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json as _json
 import math
 from collections import OrderedDict
 from collections.abc import MutableMapping
@@ -14,7 +15,7 @@ from matplotlib.font_manager import FontProperties
 from fofproject.utils import hex_to_rgba, parse_month, compute_identifier
 from dateutil.relativedelta import relativedelta
 
-from fofproject.paths import SAVE_DIR as save_dir
+from fofproject.paths import DEFAULT_INPUT_DIR, SAVE_DIR as save_dir
 
 # Use a font that is available in this container environment.
 MEASURE_FONT_FAMILY = "DejaVu Sans"
@@ -99,27 +100,26 @@ def get_available_benchmarks(file_path="HF index comparison.xlsx"):
 
 
 
-# Bloomberg ticker → display name mapping for HF index comparison.xlsx
-_TICKER_TO_DISPLAY = {
-    "WITH469  Index": "WITH WORLD",
-    "MXCN Index": "MSCI CHINA",
-    "MXWO Index": "MSCI WORLD",
-    "TPX Index": "TOPIX",
-    "SPX Index": "S&P 500",
-    "SOX Index": "SOX",
-    "KOSPI Index": "KOSPI",
-    "TWSE Index": "TAIEX",
-    "MXEF Index": "MSCI EM",
-    "RTY Index": "RUSSELL 2000",
-    "SXXP Index": "STOXX 600",
-    "SX5E Index": "STOXX 50",
-    "UKX Index": "FTSE UK",
-    "S5HLTH Index": "US HEALTHCARE",
-    "S5FINL Index": "US FINANCIAL",
-    "S5ENRS Index": "US ENERGY",
-    "BCOM Index": "COMMODITY",
-    "HSHCI Index": "HK HEALTHCARE",
-}
+INDEX_NAME_MAPPING_PATH = DEFAULT_INPUT_DIR / "index_name_mapping.json"
+
+
+def _load_index_name_mapping() -> dict:
+    """Load the index name mapping JSON. Returns full dict with
+    'ticker_to_name' and 'name_to_legend' keys."""
+    if INDEX_NAME_MAPPING_PATH.exists():
+        with open(INDEX_NAME_MAPPING_PATH, "r", encoding="utf-8") as f:
+            return _json.load(f)
+    return {"ticker_to_name": {}, "name_to_legend": {}}
+
+
+def _get_ticker_to_display() -> dict[str, str]:
+    """Return ticker → display name mapping, loaded fresh from JSON."""
+    return _load_index_name_mapping().get("ticker_to_name", {})
+
+
+# Backward-compat alias (read-only snapshot at import time is NOT used
+# internally any more – callers should use _get_ticker_to_display()).
+_TICKER_TO_DISPLAY = _get_ticker_to_display()
 
 
 def load_benchmarks(file_path="HF index comparison.xlsx"):
@@ -138,7 +138,7 @@ def load_benchmarks(file_path="HF index comparison.xlsx"):
     df = pd.read_excel(file_path)
     if pd.api.types.is_datetime64_any_dtype(df["date"]):
         df["date"] = df["date"].dt.strftime("%d/%m/%Y")
-    df.rename(columns=_TICKER_TO_DISPLAY, inplace=True)
+    df.rename(columns=_get_ticker_to_display(), inplace=True)
     funds = FundDict()
     for col in df.columns:
         if col == "date":
@@ -206,16 +206,113 @@ class FundDict(MutableMapping):
 
     # ---- internal helpers ------------------------------------------------
 
+    # Metadata fields eligible for merge (non-computed, non-identity).
+    _MERGE_META = (
+        "one_liner", "geo_focus", "strategy", "asset_class",
+        "ir_name", "email", "phone", "base", "fund_inception",
+        "aum_size", "return_pa", "volatility_pa", "min_ticket",
+        "net_exposure", "net_return", "management_fee", "performance_fee",
+        "suggested_benchmark_name",
+    )
+
     def _insert(self, fund: "Fund"):
         ident = fund.identifier or fund.name
-        # If the identifier already exists for a *different* fund name,
-        # disambiguate by appending the fund name to avoid silent overwrites.
-        if ident in self._store and self._store[ident].name != fund.name:
-            ident = f"{ident}_{fund.name}"
+        if ident in self._store:
+            existing = self._store[ident]
+            # Same identifier ⇒ same fund.  Merge instead of disambiguating.
+            self._merge_into(existing, fund)
+            return
         self._store[ident] = fund
         self._name_index.setdefault(fund.name, [])
         if ident not in self._name_index[fund.name]:
             self._name_index[fund.name].append(ident)
+
+    def _merge_into(self, existing: "Fund", incoming: "Fund"):
+        """Merge *incoming* into *existing* in-place (same identifier).
+
+        Rules:
+        - Name: shorter name wins.
+        - Metadata: union — fill blanks; on conflict the fund with more
+          non-None metadata fields wins for that field.
+        - Monthly returns: union by month; on conflict the fund with more
+          months of data provides the value.
+        """
+        ident = existing.identifier or existing.name
+
+        # ── Name: shorter wins ──────────────────────────────────────
+        old_name = existing.name
+        new_name = incoming.name if len(incoming.name) < len(old_name) else old_name
+        if new_name != old_name:
+            # Update _name_index: remove old name entry, add under new name
+            ids = self._name_index.get(old_name, [])
+            if ident in ids:
+                ids.remove(ident)
+            if not ids:
+                self._name_index.pop(old_name, None)
+            existing.name = new_name
+            self._name_index.setdefault(new_name, [])
+            if ident not in self._name_index[new_name]:
+                self._name_index[new_name].append(ident)
+
+        # ── Metadata: union, conflict → fund with more filled fields ─
+        def _filled(fund):
+            return sum(1 for f in self._MERGE_META if getattr(fund, f, None) is not None)
+
+        existing_filled = _filled(existing)
+        incoming_filled = _filled(incoming)
+        # The "richer" fund wins on conflicts
+        richer = incoming if incoming_filled > existing_filled else existing
+        for field in self._MERGE_META:
+            ex_val = getattr(existing, field, None)
+            in_val = getattr(incoming, field, None)
+            if ex_val is None and in_val is not None:
+                setattr(existing, field, in_val)
+            elif ex_val is not None and in_val is not None and ex_val != in_val:
+                setattr(existing, field, getattr(richer, field, None))
+
+        # ── Monthly returns: union by month, conflict → more-data fund ─
+        existing_by_month = {e["month"]: e for e in existing.monthly_returns}
+        incoming_by_month = {e["month"]: e for e in incoming.monthly_returns}
+        more_data = incoming if len(incoming.monthly_returns) > len(existing.monthly_returns) else existing
+        more_by_month = {e["month"]: e for e in more_data.monthly_returns}
+
+        all_months = set(existing_by_month) | set(incoming_by_month)
+        merged = []
+        for m in all_months:
+            if m in existing_by_month and m not in incoming_by_month:
+                merged.append(existing_by_month[m])
+            elif m not in existing_by_month and m in incoming_by_month:
+                merged.append(incoming_by_month[m])
+            else:
+                # Both have this month — use the fund with more total data
+                merged.append(more_by_month[m])
+        merged.sort(key=lambda x: x["month"])
+        existing.monthly_returns = merged
+
+        # ── Recompute derived fields ────────────────────────────────
+        existing.inception_date = existing.compute_inception_date()
+        existing.latest_date = existing.compute_latest_date()
+        existing.num_months = len(existing.monthly_returns)
+        existing.identifier = ident
+        if existing.monthly_returns:
+            existing.total_cum_rtn = existing.cumulative_return(existing.inception_date, existing.latest_date)
+            existing.total_ann_rtn = existing.annualized_return(existing.inception_date, existing.latest_date)
+            existing.total_vol = existing.volatility(existing.inception_date, existing.latest_date)
+            existing.total_sharpe = existing.sharpe_ratio(existing.inception_date, existing.latest_date)
+            existing.total_max_dd = existing.max_drawdown(existing.inception_date, existing.latest_date)
+            existing.total_sortino = existing.sortino_ratio(existing.inception_date, existing.latest_date)
+            existing.total_pos_months = existing.positive_months(existing.inception_date, existing.latest_date)
+        # Recompute contact_info
+        existing.contact_info = (
+            f"{existing.ir_name} - Based in {existing.base}, try reachout via email '{existing.email}' or phone '{existing.phone}'"
+            if existing.ir_name
+            else "No contact info"
+        )
+        existing.net_exposure_info = (
+            f"Net Exposure = {min(existing.net_exposure) * 100}% to {max(existing.net_exposure) * 100}%"
+            if existing.net_exposure
+            else "No net exposure info"
+        )
 
     def _resolve_key(self, key: str) -> str:
         """Return the identifier for *key* (which may be a name or identifier)."""
@@ -376,6 +473,11 @@ def input_monthly_returns(
     # Drop unnamed columns caused by trailing commas in the CSV
     df = df.loc[:, ~df.columns.str.startswith("Unnamed")]
     funds = FundDict()
+    # Strip pandas auto-suffix (.1, .2, …) from duplicate column names.
+    # The identifier (computed from performance data) differentiates them.
+    import re
+    _PANDAS_SUFFIX = re.compile(r"\.\d+$")
+
     for col in df.columns:
         if col == "date":
             continue  # skip the date column
@@ -384,15 +486,18 @@ def input_monthly_returns(
             {"date": d, "value": v} for d, v in zip(df["date"], df[col]) if pd.notna(v)
         ]
 
+        # Use the base name (without .1/.2 suffix) as the fund name
+        fund_name = _PANDAS_SUFFIX.sub("", col)
+
         # Create a Fund instance
         fund = Fund(
-            name=col,
+            name=fund_name,
             monthly_returns=returns,
             identifier=compute_identifier(returns),
             performance_fee=performance_fee,
             management_fee=management_fee,
         )
-        funds[col] = fund
+        funds[fund_name] = fund
 
     # Auto-load benchmarks from separate CSV
     if benchmark_csv:
@@ -1749,7 +1854,7 @@ class Fund:
             borderwidth=1,
         )
         if save:
-            file_name = f"{self.name} monthly return distribution plot {sm.strftime('%Y-%m-%d')} to {em.strftime('%Y-%m-%d')}.png"
+            file_name = f"{self.name} monthly return distribution plot.png"
             save_path = f"{save_dir}/{file_name}"
             fig.write_image(save_path, scale=2)
         return fig
@@ -2275,7 +2380,7 @@ class Fund:
         plt.tight_layout()
         if save:
             file_name = (
-                f"{self.name} monthly return table {end_month_dt.strftime('%Y-%m-%d')}"
+                f"{self.name} monthly return table"
                 + (f" {benchmark_fund.name}" if benchmark_fund else "")
                 + ".png"
             )
@@ -2507,7 +2612,7 @@ class Fund:
         plt.axis("off")
         plt.tight_layout()
         if save:
-            save_path = f"{save_dir}/{self.name} key metrics table {end_month.strftime('%Y-%m-%d')}.png"
+            save_path = f"{save_dir}/{self.name} key metrics table.png"
             plt.savefig(save_path, bbox_inches="tight", pad_inches=0, dpi=200)
         return fig
 
@@ -2640,8 +2745,7 @@ class Fund:
 
         if save:
             save_path = (
-                f"{save_dir}/{self.name} correlation table "
-                f"{end_month.strftime('%Y-%m-%d')}.png"
+                f"{save_dir}/{self.name} correlation table.png"
             )
             plt.savefig(save_path, bbox_inches="tight", pad_inches=0, dpi=200)
 
@@ -2716,13 +2820,15 @@ class Fund:
                 save=save,
             )
 
+        plots = [plot1, plot2, plot3, plot4, plot5]
+        generated_count = sum(1 for p in plots if p is not None)
+
         if show:
-            plot1.show()
-            plot2.show()
-            plot3.show()
-            plot4.show()
-            if plot5 is not None:
-                plot5.show()
+            for p in plots:
+                if p is not None:
+                    p.show()
+
+        return generated_count
 
 
 def compare_funds(fund_dict, benchmark_fund=None):

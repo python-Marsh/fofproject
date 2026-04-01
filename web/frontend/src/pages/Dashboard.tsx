@@ -5,6 +5,7 @@ import { SettingOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { useQuery } from '@tanstack/react-query'
 import { listFunds, type FundRow } from '../api/client'
+import { useResponsive } from '../hooks/useResponsive'
 
 const { Title } = Typography
 const { Search } = Input
@@ -44,7 +45,7 @@ const ALL_COLUMNS: ColDef[] = [
     title: 'Identifier',
     dataIndex: 'Identifier',
     width: 140,
-    defaultVisible: false,
+    defaultVisible: true,
     ellipsis: true,
   },
   {
@@ -52,7 +53,7 @@ const ALL_COLUMNS: ColDef[] = [
     title: 'Description',
     dataIndex: 'One Liner',
     width: 240,
-    defaultVisible: true,
+    defaultVisible: false,
     ellipsis: true,
   },
   {
@@ -265,6 +266,7 @@ const DEFAULT_VISIBLE = new Set(ALL_COLUMNS.filter((c) => c.defaultVisible).map(
 
 export default function Dashboard() {
   const navigate = useNavigate()
+  const { isMobile } = useResponsive()
   const [search, setSearch] = useState('')
   const [visibleKeys, setVisibleKeys] = useState<Set<string>>(DEFAULT_VISIBLE)
   const { data, isLoading } = useQuery({
@@ -329,14 +331,14 @@ export default function Dashboard() {
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+      <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', justifyContent: 'space-between', alignItems: isMobile ? 'stretch' : 'center', gap: isMobile ? 8 : 0, marginBottom: 16 }}>
         <Title level={3} style={{ margin: 0, color: '#2c2c2c' }}>Fund Dashboard</Title>
-        <Space>
+        <Space style={{ width: isMobile ? '100%' : undefined }}>
           <Search
             placeholder="Search funds..."
             allowClear
             onChange={(e) => setSearch(e.target.value)}
-            style={{ width: 300 }}
+            style={{ width: isMobile ? '100%' : 300 }}
           />
           <Dropdown menu={columnMenu} trigger={['click']} placement="bottomRight">
             <Button icon={<SettingOutlined />}>Columns</Button>
@@ -347,14 +349,14 @@ export default function Dashboard() {
         <Table
           columns={columns}
           dataSource={filtered}
-          rowKey="Name"
+          rowKey="Identifier"
           loading={isLoading}
           size="small"
           scroll={{ x: 1200, y: 'calc(100vh - 300px)' }}
           sticky
           pagination={{ pageSize: 50, showSizeChanger: true }}
           onRow={(record) => ({
-            onClick: () => navigate(`/fund/${encodeURIComponent(record.Name)}`),
+            onClick: () => navigate(`/fund/${encodeURIComponent(record.Identifier as string)}`),
             style: { cursor: 'pointer' },
           })}
         />

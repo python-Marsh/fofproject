@@ -16,6 +16,31 @@ import math
 import os
 import json
 import fitz
+import re
+
+# Noise words GPT is asked to drop but sometimes keeps in fund names.
+_FUND_NAME_NOISE = re.compile(
+    r"\b(?:Finance|Capital|Fund|Funds|LP|Partners|Ltd|Limited|Inc|"
+    r"Corporation|Corp|Co|Holdings|Group|Management|Investment|Investments|"
+    r"Asset|Advisors|Advisory|Solutions|Global|International|"
+    r"Offshore|Onshore|Feeder|Master|Class\s*\S*|Series\s*\S*)\b\.?",
+    re.IGNORECASE,
+)
+# Parenthetical suffixes like (Offshore), (Class A), (USD), etc.
+_FUND_NAME_PARENS = re.compile(r"\s*\([^)]*\)\s*")
+# Trailing punctuation / decorative chars
+_FUND_NAME_TRAILING = re.compile(r"[\s,.\-–—]+$")
+
+
+def _clean_fund_name(name: str) -> str:
+    """Normalize a GPT-returned fund name: uppercase, strip noise words and suffixes."""
+    s = name.strip().upper()
+    s = _FUND_NAME_PARENS.sub(" ", s)
+    s = _FUND_NAME_NOISE.sub("", s)
+    s = _FUND_NAME_TRAILING.sub("", s)
+    # Collapse whitespace
+    s = re.sub(r"\s+", " ", s).strip()
+    return s if s else name.strip().upper()
 
 
 SYSTEM_PROMPT = """
@@ -706,7 +731,7 @@ def _gpt_extract_from_file(client, file_path: str):
         uploaded_file = client.files.create(file=f, purpose="assistants")
 
     response = client.responses.create(
-        model="gpt-5.2",
+        model="gpt-5.4",
         temperature=0,
         input=[
             {
@@ -732,6 +757,8 @@ def _gpt_extract_from_file(client, file_path: str):
     )
     output_text = response.output_text.strip()
     data = json.loads(output_text)
+    if data.get("fund_name"):
+        data["fund_name"] = _clean_fund_name(data["fund_name"])
     data["performance"] = process_performance(data)
     return data
 
@@ -740,7 +767,7 @@ def _gpt_extract_from_text(client, text: str):
     """Run GPT extraction on pre-extracted text."""
     system_prompt = _build_system_prompt()
     response = client.responses.create(
-        model="gpt-4.1",
+        model="gpt-5.4-nano",
         temperature=0,
         input=[
             {
@@ -755,6 +782,8 @@ def _gpt_extract_from_text(client, text: str):
     )
     output_text = response.output_text.strip()
     data = json.loads(output_text)
+    if data.get("fund_name"):
+        data["fund_name"] = _clean_fund_name(data["fund_name"])
     data["performance"] = process_performance(data)
     return data
 
@@ -801,26 +830,8 @@ def gpt_process_text(text: str):
     Returns the parsed JSON or raw text if parsing fails.
     """
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    system_prompt = _build_system_prompt()
-    response = client.responses.create(
-        model="gpt-4.1",
-        temperature=0,
-        input=[
-            {
-                "role": "system",
-                "content": system_prompt,
-            },
-            {
-                "role": "user",
-                "content": f"Extract the required data from this file:\n{text}",
-            },
-        ],
-    )
-    output_text = response.output_text.strip()
-    data = json.loads(output_text)
-    data["performance"] = process_performance(data)
+    data = _gpt_extract_from_text(client, text)
     if isinstance(data.get("performance"), list) and data["performance"]:
-        # Check if performance is a non-empty list and sort it
         data["performance"].sort(key=lambda x: datetime.strptime(x["date"], "%d/%m/%Y"))
     data["identifier"] = compute_identifier(data.get("performance", []))
     return data
@@ -1312,59 +1323,31 @@ def _apply_patches(patches: dict[str, list[dict]], base_funds: FundDict) -> Fund
             new_fund.default_benchmark = bm
         return new_fund
 
-    # Build identifier -> name index for existing funds
-    ident_index = {}
-    for name in merged:
-        ident = merged[name].identifier
-        if ident:
-            ident_index[ident] = name
-
-    for fund_name, patch_entries in patches.items():
-        if fund_name in merged:
-            # Name match — merge performance, recompute identifier
-            result = _merge_into(merged[fund_name], patch_entries, fund_name)
-            if result is not None:
-                merged[fund_name] = result
-            continue
-
-        # No name match — create new fund, compute identifier
+    for col_key, patch_entries in patches.items():
+        # Column name IS the identifier — match directly against the store
         raw = [{"date": e["date"].strftime("%d/%m/%Y"), "value": e["value"]}
                for e in sorted(patch_entries, key=lambda x: x["date"])]
-        new_ident = compute_identifier(raw)
 
-        # Check if identifier matches an existing fund
-        if new_ident and new_ident in ident_index:
-            existing_name = ident_index[new_ident]
-            existing_fund = merged[existing_name]
-            log.detail(
-                f"Overwrite fund '{fund_name}' identifier matches existing "
-                f"fund '{existing_name}' — merging under '{fund_name}'.",
-                phase=LOAD,
-            )
-            result = _merge_into(existing_fund, patch_entries, fund_name)
+        if col_key in merged._store:
+            existing_fund = merged._store[col_key]
+            result = _merge_into(existing_fund, patch_entries, existing_fund.name)
             if result is not None:
-                # Remove old name, add under new name
-                del merged[existing_name]
-                # Update ident_index
-                ident_index.pop(new_ident, None)
-                merged[fund_name] = result
-                if result.identifier:
-                    ident_index[result.identifier] = fund_name
+                del merged[col_key]
+                merged[result.name] = result
             continue
 
-        # Truly new fund
+        # No identifier match — truly new fund
+        patch_ident = compute_identifier(raw)
         try:
             new_fund = Fund(
-                name=fund_name,
+                name=col_key,
                 monthly_returns=raw,
-                identifier=new_ident,
+                identifier=patch_ident,
             )
-            merged[fund_name] = new_fund
-            if new_ident:
-                ident_index[new_ident] = fund_name
+            merged[col_key] = new_fund
         except ValueError:
             log.warn(
-                f"Skipping overwrite for new fund '{fund_name}': "
+                f"Skipping overwrite for '{col_key}': "
                 f"entries are not continuous.",
                 phase=LOAD,
             )
@@ -1533,6 +1516,24 @@ def load_all_data(
         if name in funds:
             for field, value in meta.items():
                 setattr(funds[name], field, value)
+
+    # 6. Apply identifier_to_name overrides (from rename operations)
+    from fofproject.fund import _load_index_name_mapping
+    id_to_name = _load_index_name_mapping().get("identifier_to_name", {})
+    for ident, display_name in id_to_name.items():
+        if ident in funds._store:
+            fund_obj = funds._store[ident]
+            old_name = fund_obj.name
+            if old_name != display_name:
+                ids = funds._name_index.get(old_name, [])
+                if ident in ids:
+                    ids.remove(ident)
+                if not ids:
+                    funds._name_index.pop(old_name, None)
+                fund_obj.name = display_name
+                funds._name_index.setdefault(display_name, [])
+                if ident not in funds._name_index[display_name]:
+                    funds._name_index[display_name].append(ident)
 
     log.info(f"Total funds loaded: {len(funds)}.", phase=LOAD)
     return funds

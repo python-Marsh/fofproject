@@ -3,10 +3,12 @@ import { Card, Button, Tag, Table, Typography, Space, Descriptions, message } fr
 import { ReloadOutlined, CheckCircleOutlined, FolderOpenOutlined } from '@ant-design/icons'
 import { useQuery } from '@tanstack/react-query'
 import { getStatus, reloadData, listFunds } from '../api/client'
+import { useResponsive } from '../hooks/useResponsive'
 
 const { Title, Text } = Typography
 
 export default function DataManagement() {
+  const { isMobile } = useResponsive()
   const [reloading, setReloading] = useState(false)
   const { data, refetch } = useQuery({
     queryKey: ['status'],
@@ -48,7 +50,7 @@ export default function DataManagement() {
       <Title level={3}>Data Management</Title>
       <Space direction="vertical" size="large" style={{ width: '100%' }}>
         <Card>
-          <Space size="large" align="center">
+          <Space size="large" align="center" direction={isMobile ? 'vertical' : 'horizontal'} style={{ width: '100%' }}>
             <div>
               <Text type="secondary">Status</Text>
               <div>

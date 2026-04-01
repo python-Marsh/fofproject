@@ -29,14 +29,14 @@ export const listFunds = (benchmark?: string) => {
   const q = benchmark ? `?benchmark=${encodeURIComponent(benchmark)}` : ''
   return request<{ funds: FundRow[] }>(`/funds${q}`)
 }
-export const getFund = (name: string) =>
-  request<FundDetailResponse>(`/funds/${encodeURIComponent(name)}`)
-export const getMetrics = (name: string, params: MetricsParams) => {
+export const getFund = (identifier: string) =>
+  request<FundDetailResponse>(`/funds/${encodeURIComponent(identifier)}`)
+export const getMetrics = (identifier: string, params: MetricsParams) => {
   const q = new URLSearchParams()
   if (params.start_month) q.set('start_month', params.start_month)
   if (params.end_month) q.set('end_month', params.end_month)
   if (params.benchmark) q.set('benchmark', params.benchmark)
-  return request<MetricsResponse>(`/funds/${encodeURIComponent(name)}/metrics?${q}`)
+  return request<MetricsResponse>(`/funds/${encodeURIComponent(identifier)}/metrics?${q}`)
 }
 
 // ── Charts ──
@@ -61,24 +61,40 @@ export const tableMonthlyReturns = (body: MonthlyTableReq) =>
 export const mvoOptimize = (body: MvoReq) =>
   post<MvoResponse>('/mvo/optimize', body)
 
+// ── Rename ──
+export const renameFund = (identifier: string, newName: string) =>
+  put<{ success: boolean; message: string; updated_sources: string[] }>(
+    `/funds/${encodeURIComponent(identifier)}/rename`,
+    { new_name: newName },
+  )
+
 // ── Overwrite ──
-export const getFundOverwrite = (fundName: string) =>
-  request<FundOverwriteData>(`/overwrite/${encodeURIComponent(fundName)}`)
-export const saveFundOverwrite = (fundName: string, data: FundOverwriteData) =>
-  put<{ success: boolean; message: string }>(`/overwrite/${encodeURIComponent(fundName)}`, data)
+export const getFundOverwrite = (identifier: string) =>
+  request<FundOverwriteData>(`/overwrite/${encodeURIComponent(identifier)}`)
+export const saveFundOverwrite = (identifier: string, data: FundOverwriteData & { new_name?: string }) =>
+  put<{ success: boolean; message: string }>(`/overwrite/${encodeURIComponent(identifier)}`, data)
 
 // ── Types ──
+export interface FundEntry {
+  name: string
+  identifier: string
+}
+
 export interface SystemStatus {
   fund_count: number
   loaded_at: string | null
   fund_names: string[]
+  fund_entries: FundEntry[]
   index_names: string[]
+  index_identifiers: string[]
   rdgff_names: string[]
+  rdgff_identifiers: string[]
   data_paths: Record<string, string>
 }
 
 export interface FundRow {
   Name: string
+  Identifier: string
   'One Liner': string | null
   'Geo Focus': string | null
   Strategy: string | string[] | null
@@ -103,6 +119,7 @@ export interface FundRow {
 
 export interface FundDetailResponse {
   name: string
+  identifier: string
   one_liner: string | null
   geo_focus: string | null
   strategy: string[] | null

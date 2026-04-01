@@ -6,12 +6,20 @@ from pydantic import BaseModel
 
 # ── Response Models ──────────────────────────────────────
 
+class FundEntry(BaseModel):
+    name: str
+    identifier: str
+
+
 class SystemStatus(BaseModel):
     fund_count: int
     loaded_at: Optional[str] = None
     fund_names: list[str]
+    fund_entries: list[FundEntry] = []
     index_names: list[str] = []
+    index_identifiers: list[str] = []
     rdgff_names: list[str] = []
+    rdgff_identifiers: list[str] = []
     data_paths: dict[str, str] = {}
 
 
@@ -22,6 +30,7 @@ class MonthlyReturn(BaseModel):
 
 class FundDetail(BaseModel):
     name: str
+    identifier: str
     one_liner: Optional[str] = None
     geo_focus: Optional[str] = None
     strategy: Optional[list[str]] = None

@@ -17,7 +17,7 @@ export default function FundSelector({ value, onChange, placeholder, style }: Pr
 
   const options = (data?.funds || []).map((f) => ({
     label: f.Name,
-    value: f.Name,
+    value: f.Identifier,
     searchText: `${f.Name} ${f.Identifier || ''}`.toLowerCase(),
   }))
 

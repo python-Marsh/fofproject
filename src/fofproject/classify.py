@@ -30,6 +30,7 @@ from agents.tool import WebSearchTool
 from urllib.parse import urlparse, urljoin, parse_qsl, urlencode
 from fofproject.log import log, CLASSIFY
 from fofproject.paths import DEFAULT_EMAIL_INPUT_DIR, DEFAULT_OUTPUT_DIR
+from fofproject.utils import GracefulCycle
 
 
 class WebSearchFirmResult(BaseModel):
@@ -82,6 +83,105 @@ _GENERIC_FIRM_WORDS = frozenset(
         "research",
         "solutions",
         "cap",
+    }
+)
+
+_GENERIC_FUND_WORDS = frozenset(
+    {
+        # Legal / structure suffixes
+        "fund",
+        "funds",
+        "ltd",
+        "limited",
+        "lp",
+        "llc",
+        "inc",
+        "plc",
+        "corp",
+        "corporation",
+        "co",
+        "ag",
+        "sa",
+        "the",
+        # Fund structure terms
+        "class",
+        "series",
+        "portfolio",
+        "strategy",
+        "strategies",
+        "program",
+        "programme",
+        "scheme",
+        "sub",
+        "account",
+        "trust",
+        "offshore",
+        "onshore",
+        "master",
+        "feeder",
+        "spc",
+        "sp",
+        # Share class letters / numerals
+        "a",
+        "b",
+        "c",
+        "d",
+        "e",
+        "f",
+        "i",
+        "ii",
+        "iii",
+        "iv",
+        "v",
+        "x",
+        # Currency denominations (common in share class names)
+        "usd",
+        "eur",
+        "gbp",
+        "jpy",
+        "hkd",
+        "cny",
+        "sgd",
+        "aud",
+        "cad",
+        "chf",
+        # Entity type words
+        "capital",
+        "partners",
+        "management",
+        "advisors",
+        "advisory",
+        "investments",
+        "investment",
+        "group",
+        "holdings",
+        # Generic fund descriptor words
+        "equity",
+        "credit",
+        "macro",
+        "global",
+        "absolute",
+        "return",
+        "returns",
+        "growth",
+        "value",
+        "income",
+        "balanced",
+        "enhanced",
+        "select",
+        "special",
+        "situations",
+        "relative",
+        "neutral",
+        "market",
+        "long",
+        "short",
+        "multi",
+        "diversified",
+        "concentrated",
+        "systematic",
+        "dynamic",
+        "new",
     }
 )
 
@@ -337,6 +437,9 @@ def normalize_firm_name(name: str, mappings: dict) -> str:
 
     # Substring match against existing canonicals and aliases.
     # Skip only if ALL words are generic financial terms (e.g., "Capital Management").
+    # Require minimum overlap of 6 characters to avoid short-string false positives
+    # (e.g., "WT" matching inside "NEWTON", "IO" inside "TIMEFOLIO").
+    _MIN_SUBSTRING_OVERLAP = 6
     cleaned_words = cleaned_upper.split()
     all_generic = all(w.lower() in _GENERIC_FIRM_WORDS for w in cleaned_words)
 
@@ -347,10 +450,13 @@ def normalize_firm_name(name: str, mappings: dict) -> str:
             canonical_upper = canonical.upper()
             if cleaned_upper in canonical_upper or canonical_upper in cleaned_upper:
                 overlap = min(len(cleaned_upper), len(canonical_upper))
-                if overlap > best_overlap or (
-                    overlap == best_overlap
-                    and best_match is not None
-                    and len(canonical) > len(best_match)
+                if overlap >= _MIN_SUBSTRING_OVERLAP and (
+                    overlap > best_overlap
+                    or (
+                        overlap == best_overlap
+                        and best_match is not None
+                        and len(canonical) > len(best_match)
+                    )
                 ):
                     best_overlap = overlap
                     best_match = canonical
@@ -358,10 +464,13 @@ def normalize_firm_name(name: str, mappings: dict) -> str:
                 alias_upper = alias.upper()
                 if cleaned_upper in alias_upper or alias_upper in cleaned_upper:
                     overlap = min(len(cleaned_upper), len(alias_upper))
-                    if overlap > best_overlap or (
-                        overlap == best_overlap
-                        and best_match is not None
-                        and len(canonical) > len(best_match)
+                    if overlap >= _MIN_SUBSTRING_OVERLAP and (
+                        overlap > best_overlap
+                        or (
+                            overlap == best_overlap
+                            and best_match is not None
+                            and len(canonical) > len(best_match)
+                        )
                     ):
                         best_overlap = overlap
                         best_match = canonical
@@ -462,28 +571,26 @@ def add_fund_to_firm(
     if "funds" not in firm_entry:
         firm_entry["funds"] = {}
 
-    # Check if fund already exists (by key or by alias match)
-    if fund_display_name in firm_entry["funds"]:
+    # Check if fund already exists (exact key, alias, or fuzzy substring match)
+    matched = normalize_fund_name(fund_display_name, firm_entry)
+    if matched:
         # Add new aliases if provided
         existing_aliases = set(
-            a.lower() for a in firm_entry["funds"][fund_display_name].get("aliases", [])
+            a.lower() for a in firm_entry["funds"][matched].get("aliases", [])
         )
         for alias in aliases:
             if (
                 alias.lower() not in existing_aliases
-                and alias.lower() != fund_display_name.lower()
+                and alias.lower() != matched.lower()
             ):
-                firm_entry["funds"][fund_display_name]["aliases"].append(alias)
-        return fund_display_name
-
-    # Check if it matches an existing fund by case-insensitive key or alias
-    for existing_name, fund_info in firm_entry["funds"].items():
-        name_lower = fund_display_name.lower()
-        if name_lower == existing_name.lower():
-            return existing_name
-        for alias in fund_info.get("aliases", []):
-            if name_lower == alias.lower():
-                return existing_name
+                firm_entry["funds"][matched]["aliases"].append(alias)
+        # Also register the original display name as alias if different
+        if (
+            fund_display_name.lower() != matched.lower()
+            and fund_display_name.lower() not in existing_aliases
+        ):
+            firm_entry["funds"][matched]["aliases"].append(fund_display_name)
+        return matched
 
     # Create new fund entry
     firm_entry["funds"][fund_display_name] = {
@@ -495,23 +602,153 @@ def add_fund_to_firm(
     return fund_display_name
 
 
+def _strip_share_class(name: str) -> str:
+    """Strip share-class, feeder-fund, and other structural suffixes from a fund name.
+
+    Handles patterns observed across the fund folder hierarchy:
+    - Share class suffixes: "- CLASS A SHARES", "- CLASS C7(A) SHARES",
+      "CLASS A" (without SHARES), "Standard Class-A USD Non-Voting"
+    - Feeder designations: "NON-US FEEDER FUND", "NON US FEEDER FUND",
+      "US FEEDER FUND", standalone "FEEDER FUND"
+    - Compound feeder names: "US and Non-US Feeder Funds"
+    - Duplicate fund-name segments (e.g. "Hao X Feeder Fund Hao Y Feeder Fund")
+    - Parenthetical structural terms: "(Offshore)", "(Offshore Feeder)"
+    - "Master Fund" -> "Fund"
+
+    Examples:
+        "3W GLOBAL NON-US FEEDER FUND - CLASS A SHARES"  -> "3W GLOBAL FUND"
+        "3W HEALTHCARE NON-US FEEDER FUND - CLASS S1(A) SHARES" -> "3W HEALTHCARE FUND"
+        "HAO GREAT CHINA FOCUS NON US FEEDER FUND - NON US FEEDER FUND CLASS A"
+            -> "HAO GREAT CHINA FOCUS FUND"
+        "Hao Great China Focus US and Non-US Feeder Funds"
+            -> "Hao Great China Focus Fund"
+        "L1 Capital Global Long Short (Offshore Feeder) Fund"
+            -> "L1 Capital Global Long Short Fund"
+    """
+    s = name.strip()
+    # Remove share class suffix: "- CLASS <id> SHARES" or "– CLASS <id> SHARES"
+    s = re.sub(r"\s*[-–—]\s*CLASS\s+\S+\s+SHARES\b", "", s, flags=re.IGNORECASE)
+    # Remove "CLASS <id> SHARES" without dash (e.g. "FEEDER FUND CLASS A SHARES")
+    s = re.sub(r"\s+CLASS\s+\S+\s+SHARES\b", "", s, flags=re.IGNORECASE)
+    # Remove trailing "CLASS <id>" without SHARES (e.g. "FEEDER FUND CLASS A")
+    s = re.sub(r"\s+CLASS\s+\S+\s*$", "", s, flags=re.IGNORECASE)
+    # Remove "Standard Class-X <currency> Non-Voting" (Janus-style)
+    s = re.sub(
+        r"\s+Standard\s+Class-?\S+\s+\S+\s+Non-Voting\b", "", s, flags=re.IGNORECASE
+    )
+    # Remove compound feeder: "US and Non-US Feeder Funds" -> "Fund"
+    s = re.sub(
+        r"\s+US\s+and\s+Non-?US\s+Feeder\s+Funds?\b", " Fund", s, flags=re.IGNORECASE
+    )
+    # Remove "NON-US FEEDER FUND" / "NON US FEEDER FUND" -> "FUND"
+    s = re.sub(r"\s+NON[-\s]US\s+FEEDER\s+FUNDS?\b", " FUND", s, flags=re.IGNORECASE)
+    # Remove "US FEEDER FUND" -> "FUND"
+    s = re.sub(r"\s+US\s+FEEDER\s+FUNDS?\b", " FUND", s, flags=re.IGNORECASE)
+    # Remove standalone "FEEDER FUND" -> "FUND"
+    s = re.sub(r"\s+FEEDER\s+FUNDS?\b", " FUND", s, flags=re.IGNORECASE)
+    # Remove standalone "FEEDER" (without FUND following)
+    s = re.sub(r"\s+FEEDER\b", "", s, flags=re.IGNORECASE)
+    # Remove "MASTER FUND" -> "FUND"
+    s = re.sub(r"\bMASTER\s+FUND\b", "FUND", s, flags=re.IGNORECASE)
+    # Clean up residual "- FUND" from chained stripping (e.g. "NAME - FUND")
+    s = re.sub(r"\s*[-–—]\s*FUND\b", " FUND", s, flags=re.IGNORECASE)
+    # Remove decorative/structural words: "Limited", "Focus", "Ltd", "LP", etc.
+    s = re.sub(r"\b(?:Limited|Ltd)\b\.?", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bLP\b\.?", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bFocus\b", "", s, flags=re.IGNORECASE)
+    # Remove parenthetical structural terms: (Offshore), (Onshore), (Offshore Feeder)
+    s = re.sub(
+        r"\s*\(\s*(?:Offshore|Onshore)(?:\s+Feeder)?\s*\)", "", s, flags=re.IGNORECASE
+    )
+    # Remove "(Series X)" parenthetical
+    s = re.sub(r"\s*\(\s*Series\s+\S+\s*\)", "", s, flags=re.IGNORECASE)
+    # Collapse whitespace
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
 def normalize_fund_name(name: str, firm_entry: dict):
     """
     Match a fund name against known funds in a firm entry.
     Returns the fund display name (key) if matched, None otherwise.
+
+    Matching strategy (in order):
+    1. Exact case-insensitive match against fund keys and aliases
+    2. Exact match after stripping share-class / feeder-fund suffixes
+    3. Substring match (same logic as normalize_firm_name) — skipped when
+       all words in the cleaned name are generic fund terms.
+
+    Steps 1-3 are each tried with both the original name and the
+    share-class-stripped variant.
     """
     if not name or not firm_entry:
         return None
 
-    name_lower = name.lower().strip()
+    name_upper = name.upper().strip()
+    stripped_upper = _strip_share_class(name).upper().strip()
+    candidates = [name_upper] if stripped_upper == name_upper else [name_upper, stripped_upper]
     funds = firm_entry.get("funds", {})
 
-    for fund_name, fund_info in funds.items():
-        if name_lower == fund_name.lower():
-            return fund_name
-        for alias in fund_info.get("aliases", []):
-            if name_lower == alias.lower():
+    # 1. Exact match (original and stripped)
+    for candidate in candidates:
+        for fund_name, fund_info in funds.items():
+            if candidate == fund_name.upper():
                 return fund_name
+            stripped_fund = _strip_share_class(fund_name).upper()
+            if candidate == stripped_fund:
+                return fund_name
+            for alias in fund_info.get("aliases", []):
+                if candidate == alias.upper():
+                    return fund_name
+                stripped_alias = _strip_share_class(alias).upper()
+                if candidate == stripped_alias:
+                    return fund_name
+
+    # 2. Substring / fuzzy match
+    # Require minimum overlap of 6 characters to avoid short-string false positives.
+    _MIN_SUBSTRING_OVERLAP = 6
+
+    def _best_substring_match(query_upper):
+        cleaned_words = query_upper.split()
+        all_generic = all(w.lower() in _GENERIC_FUND_WORDS for w in cleaned_words)
+        if all_generic:
+            return None
+        best = None
+        best_overlap = 0
+        for fund_name, fund_info in funds.items():
+            for compare in {fund_name.upper(), _strip_share_class(fund_name).upper()}:
+                if query_upper in compare or compare in query_upper:
+                    overlap = min(len(query_upper), len(compare))
+                    if overlap >= _MIN_SUBSTRING_OVERLAP and (
+                        overlap > best_overlap
+                        or (
+                            overlap == best_overlap
+                            and best is not None
+                            and len(fund_name) > len(best)
+                        )
+                    ):
+                        best_overlap = overlap
+                        best = fund_name
+            for alias in fund_info.get("aliases", []):
+                for compare in {alias.upper(), _strip_share_class(alias).upper()}:
+                    if query_upper in compare or compare in query_upper:
+                        overlap = min(len(query_upper), len(compare))
+                        if overlap >= _MIN_SUBSTRING_OVERLAP and (
+                            overlap > best_overlap
+                            or (
+                                overlap == best_overlap
+                                and best is not None
+                                and len(fund_name) > len(best)
+                            )
+                        ):
+                            best_overlap = overlap
+                            best = fund_name
+        return best
+
+    for candidate in candidates:
+        result = _best_substring_match(candidate)
+        if result:
+            return result
 
     return None
 
@@ -1261,7 +1498,7 @@ def _web_search_firm_for_fund(
             ),
             tools=[WebSearchTool()],
             output_type=WebSearchFirmResult,
-            model="gpt-5.2",
+            model="gpt-5.4",
         )
         result = Runner.run_sync(agent, prompt)
         ws_result: WebSearchFirmResult = result.final_output
@@ -1364,7 +1601,7 @@ def _finalize_artifact_classification(
         is_related = bool(record.get("is_hedge_fund_related", False))
 
         firm_name = (record.get("assigned_firm_name", "") or "").strip()
-        fund_name = (record.get("assigned_fund_name", "") or "").strip()
+        fund_name = (record.get("assigned_fund_name", "") or "").strip().upper()
         original_firm_name = firm_name
         original_fund_name = fund_name
         _recovery_needed = _is_assignment_uncertain(confidence, evidence)
@@ -1827,15 +2064,11 @@ Fund name:
 • May be identified from email context or filename.
 
 Firm name:
-• Must be explicitly stated in the email context.
-• Do NOT infer the firm from the fund name.
+• Must be explicitly stated in the email context OR matched via the FIRM_FUND_REGISTRY below.
+• If a fund name matches a known fund in FIRM_FUND_REGISTRY, assign the corresponding firm.
+• If the fund name does not match any registry entry and the firm is not explicitly stated, leave assigned_firm_name empty.
 
-If fund is identifiable but firm is not:
-
-assigned_firm_name = ""
-assigned_fund_name = detected fund
-
-Never guess firm names.
+Never guess firm names — only use explicit evidence or registry matches.
 
 ------------------------------------------------
 LINK CLASSIFICATION RULE
@@ -1904,6 +2137,13 @@ Do not omit any artifact. """
         ),
     }
 
+    # Build condensed firm→fund registry for the prompt
+    firm_fund_registry = {}
+    if firm_mappings:
+        for firm, info in firm_mappings.get("canonical_names", {}).items():
+            funds = list(info.get("funds", {}).keys())
+            firm_fund_registry[firm] = funds if funds else []
+
     user_prompt = f"""Classify these email artifacts.
 
 EMAIL_SUMMARY:
@@ -1915,8 +2155,8 @@ ATTACHMENT_CANDIDATES:
 LINK_CANDIDATES:
 {json.dumps(links, indent=2, ensure_ascii=False)}
 
-EXISTING_FIRMS:
-{json.dumps(existing_firms if existing_firms else [], indent=2, ensure_ascii=False)}
+FIRM_FUND_REGISTRY:
+{json.dumps(firm_fund_registry, indent=2, ensure_ascii=False)}
 
 IMPORTANT: You received {len(attachments)} attachment candidate(s) and {len(links)} link candidate(s). Your "artifacts" array MUST contain exactly {total_candidates} entries — one per candidate. If an artifact is not hedge-fund related, still include it with is_hedge_fund_related: false and a reason_code explaining why.
 """
@@ -2022,7 +2262,7 @@ IMPORTANT: You received {len(attachments)} attachment candidate(s) and {len(link
 
     try:
         response = client.responses.create(
-            model="gpt-5.2",
+            model="gpt-5.4-nano",
             tools=[{"type": "web_search"}],
             input=[
                 {"role": "system", "content": system_prompt},
@@ -2126,15 +2366,17 @@ def _resolve_artifact_dest_dir(
         canonical = apply_folder_reassignment(canonical, firm_mappings)
         safe_firm = sanitize_folder_name(canonical)
         if fund_name:
-            safe_fund = sanitize_folder_name(fund_name)
             # Include identifier in folder name if stored in mappings
             firm_entry = firm_mappings.get("canonical_names", {}).get(canonical, {})
             matched_fund = normalize_fund_name(fund_name, firm_entry)
             if matched_fund:
+                safe_fund = sanitize_folder_name(_strip_share_class(matched_fund))
                 fund_data = firm_entry.get("funds", {}).get(matched_fund, {})
                 fund_identifier = fund_data.get("identifier")
                 if fund_identifier:
                     safe_fund = f"{safe_fund} - {fund_identifier}"
+            else:
+                safe_fund = sanitize_folder_name(_strip_share_class(fund_name))
             return output_dir / safe_firm / safe_fund
         else:
             return output_dir / safe_firm
@@ -2300,8 +2542,9 @@ def _create_link_proxy_file(
         "created_at": datetime.now().isoformat(),
     }
 
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    filepath = dest_dir / filename
+    links_dir = dest_dir / "links"
+    links_dir.mkdir(parents=True, exist_ok=True)
+    filepath = links_dir / filename
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(proxy_data, f, indent=2, ensure_ascii=False)
 
@@ -2777,62 +3020,69 @@ def classify_and_organize_emails(
                 classifications[email_id] = classification
 
     # --- Phase 2: Post-process serially (mutates firm_mappings) ---
-    for email_folder, metadata, email_id, from_address, subject in email_data:
-        report["total_emails"] += 1
+    stopped_early = False
+    with GracefulCycle(logger=log, phase=CLASSIFY) as gc:
+        for email_folder, metadata, email_id, from_address, subject in email_data:
+            if gc.should_stop:
+                stopped_early = True
+                log.info("Graceful stop requested, saving progress...", phase=CLASSIFY)
+                break
 
-        classification = classifications.get(email_id)
-        if classification is None:
-            continue
+            report["total_emails"] += 1
 
-        entry = _process_classified_email(
-            classification,
-            email_id,
-            email_folder,
-            metadata,
-            from_address,
-            subject,
-            output_dir,
-            firm_mappings,
-            existing_firms,
-        )
+            classification = classifications.get(email_id)
+            if classification is None:
+                continue
 
-        email_cls = classification.get("email_classification", {})
-        canonical_name = entry.pop("_canonical_name", None)
+            entry = _process_classified_email(
+                classification,
+                email_id,
+                email_folder,
+                metadata,
+                from_address,
+                subject,
+                output_dir,
+                firm_mappings,
+                existing_firms,
+            )
 
-        if email_cls.get("is_hedge_fund_related"):
-            report["hedge_fund_related"] += 1
+            email_cls = classification.get("email_classification", {})
+            canonical_name = entry.pop("_canonical_name", None)
 
-            if canonical_name:
-                from_third_party = email_cls.get("from_third_party", False)
-                if canonical_name not in report["firms_found"]:
-                    report["firms_found"][canonical_name] = {
-                        "email_count": 0,
-                        "emails": [],
-                        "from_third_party": from_third_party,
-                    }
-                report["firms_found"][canonical_name]["email_count"] += 1
-                report["firms_found"][canonical_name]["emails"].append(
-                    {"folder": email_folder.name, "subject": subject}
-                )
+            if email_cls.get("is_hedge_fund_related"):
+                report["hedge_fund_related"] += 1
 
-            if (
-                entry.get("organized_count", 0) == 0
-                and entry.get("needs_review_count", 0) == 0
-            ):
-                if not canonical_name:
-                    report["hedge_fund_related"] -= 1
-                    report["non_hedge_fund"] += 1
-                log.detail(
-                    "  Hedge fund related but no artifacts could be organized",
-                    phase=CLASSIFY,
-                )
-        else:
-            report["non_hedge_fund"] += 1
-            log.detail("  Not hedge fund related", phase=CLASSIFY)
+                if canonical_name:
+                    from_third_party = email_cls.get("from_third_party", False)
+                    if canonical_name not in report["firms_found"]:
+                        report["firms_found"][canonical_name] = {
+                            "email_count": 0,
+                            "emails": [],
+                            "from_third_party": from_third_party,
+                        }
+                    report["firms_found"][canonical_name]["email_count"] += 1
+                    report["firms_found"][canonical_name]["emails"].append(
+                        {"folder": email_folder.name, "subject": subject}
+                    )
 
-        report["classifications"].append(entry)
+                if (
+                    entry.get("organized_count", 0) == 0
+                    and entry.get("needs_review_count", 0) == 0
+                ):
+                    if not canonical_name:
+                        report["hedge_fund_related"] -= 1
+                        report["non_hedge_fund"] += 1
+                    log.detail(
+                        "  Hedge fund related but no artifacts could be organized",
+                        phase=CLASSIFY,
+                    )
+            else:
+                report["non_hedge_fund"] += 1
+                log.detail("  Not hedge fund related", phase=CLASSIFY)
 
-    # Save updated data
+            report["classifications"].append(entry)
+
+    # Save updated data (always save, even on early stop)
     save_firm_mappings(firm_mappings, output_dir)
 
     # Save report (single source of truth — no separate cache file)
@@ -2841,7 +3091,11 @@ def classify_and_organize_emails(
         json.dump(report, f, indent=2, ensure_ascii=False)
 
     # Summary
-    log.info("CLASSIFICATION SUMMARY", phase=CLASSIFY)
+    if stopped_early:
+        report["stopped_early"] = True
+        log.info("CLASSIFICATION SUMMARY (stopped early — progress saved)", phase=CLASSIFY)
+    else:
+        log.info("CLASSIFICATION SUMMARY", phase=CLASSIFY)
     log.info(f"Total emails processed: {report['total_emails']}", phase=CLASSIFY)
     log.info(f"Hedge fund related: {report['hedge_fund_related']}", phase=CLASSIFY)
     log.info(f"Non-hedge fund: {report['non_hedge_fund']}", phase=CLASSIFY)
@@ -2902,6 +3156,8 @@ def reset_classification(
     firm_names: list[str] | None = None,
     fund_names: list[str] | None = None,
     email_ids: list[str] | None = None,
+    reclassify: bool = False,
+    email_input_dir: Path = None,
 ) -> dict:
     """Remove specific entries from the classification report so they get reprocessed.
 
@@ -2910,11 +3166,14 @@ def reset_classification(
     any included artifact's ``assigned_fund_name`` matches. For email_ids,
     entries are matched by exact ``email_id``.
 
-    After calling this, run ``classify_new_emails()`` to reclassify the
-    removed emails.
+    When ``reclassify=True``, this also deletes the matched firms' output
+    folders and immediately re-runs ``classify_new_emails()`` so the full
+    reset-delete-reclassify workflow is a single call.
 
     Returns:
         dict with ``removed_count`` and ``remaining_count``.
+        When ``reclassify=True``, also includes a ``classification`` key
+        with the result of ``classify_new_emails()``.
     """
     output_dir = output_dir or DEFAULT_OUTPUT_DIR
     report_path = output_dir / CLASSIFICATION_REPORT_FILE
@@ -2976,7 +3235,44 @@ def reset_classification(
         f"Reset {removed_count} classification(s), {len(kept)} remaining",
         phase=CLASSIFY,
     )
-    return {"removed_count": removed_count, "remaining_count": len(kept)}
+
+    # Collect canonical firm names from removed entries so we can clean up
+    # their output folders and registry artifacts.
+    removed_firms = set()
+    for entry in classifications:
+        if _should_remove(entry):
+            canonical = entry.get("canonical_firm_name")
+            if canonical:
+                removed_firms.add(canonical)
+
+    # Also include explicitly provided firm_names (resolved to canonical)
+    firm_mappings = load_firm_mappings(output_dir)
+    canonical_names = firm_mappings.get("canonical_names", {})
+    for name in (firm_names or []):
+        resolved = normalize_firm_name(name, firm_mappings)
+        if resolved in canonical_names:
+            removed_firms.add(resolved)
+
+    # Fully remove firms from registry and delete output folders
+    for canonical in removed_firms:
+        if canonical in canonical_names:
+            del canonical_names[canonical]
+            log.info(f"Removed '{canonical}' from registry", phase=CLASSIFY)
+
+        firm_folder = output_dir / sanitize_folder_name(canonical)
+        if firm_folder.exists() and firm_folder.is_dir():
+            shutil.rmtree(firm_folder)
+            log.info(f"Deleted output folder: {firm_folder}", phase=CLASSIFY)
+
+    if removed_firms:
+        save_firm_mappings(firm_mappings, output_dir)
+
+    result = {"removed_count": removed_count, "remaining_count": len(kept)}
+
+    if reclassify:
+        result["classification"] = classify_new_emails(email_input_dir, output_dir)
+
+    return result
 
 
 def classify_new_emails(
@@ -3021,67 +3317,76 @@ def classify_new_emails(
 
     results = []
 
-    for i, email_folder in enumerate(new_folders):
-        # Load email metadata
-        metadata_path = email_folder / "metadata.json"
-        try:
-            with open(metadata_path, "r", encoding="utf-8") as f:
-                metadata = json.load(f)
-        except Exception as e:
-            log.error(f"Error loading {email_folder.name}: {e}", phase=CLASSIFY)
-            continue
+    with GracefulCycle(logger=log, phase=CLASSIFY) as gc:
+        for i, email_folder in enumerate(new_folders):
+            if gc.should_stop:
+                log.info(
+                    f"Graceful stop requested after {len(results)}/{len(new_folders)} emails, "
+                    "progress saved.",
+                    phase=CLASSIFY,
+                )
+                break
 
-        email_id = metadata.get("id", email_folder.name)
-        subject = metadata.get("subject", "No Subject")
-        from_address = (
-            metadata.get("from", {}).get("emailAddress", {}).get("address", "")
-        )
+            # Load email metadata
+            metadata_path = email_folder / "metadata.json"
+            try:
+                with open(metadata_path, "r", encoding="utf-8") as f:
+                    metadata = json.load(f)
+            except Exception as e:
+                log.error(f"Error loading {email_folder.name}: {e}", phase=CLASSIFY)
+                continue
 
-        classification = _classify_single_email(
-            client,
-            metadata,
-            email_id,
-            from_address,
-            existing_firms,
-            firm_mappings,
-            classification_lookup,
-            use_lookup=False,
-            progress_label=f"[{i + 1}/{len(new_folders)}]",
-        )
-        if classification is None:
-            continue
-
-        entry = _process_classified_email(
-            classification,
-            email_id,
-            email_folder,
-            metadata,
-            from_address,
-            subject,
-            output_dir,
-            firm_mappings,
-            existing_firms,
-        )
-        canonical_name = entry.pop("_canonical_name", None)
-
-        email_cls = classification.get("email_classification", {})
-        if email_cls.get("is_hedge_fund_related") and canonical_name:
-            log.info(
-                f"[{i + 1}/{len(new_folders)}] {subject[:45]}  ->  {canonical_name}",
-                phase=CLASSIFY,
-            )
-        else:
-            log.info(
-                f"[{i + 1}/{len(new_folders)}] {subject[:45]}  (skipped)",
-                phase=CLASSIFY,
+            email_id = metadata.get("id", email_folder.name)
+            subject = metadata.get("subject", "No Subject")
+            from_address = (
+                metadata.get("from", {}).get("emailAddress", {}).get("address", "")
             )
 
-        results.append(entry)
+            classification = _classify_single_email(
+                client,
+                metadata,
+                email_id,
+                from_address,
+                existing_firms,
+                firm_mappings,
+                classification_lookup,
+                use_lookup=False,
+                progress_label=f"[{i + 1}/{len(new_folders)}]",
+            )
+            if classification is None:
+                continue
 
-        # Save mappings and report after each classification so progress
-        # survives interruption.
-        save_firm_mappings(firm_mappings, output_dir)
-        _append_classification_to_report(entry, output_dir)
+            entry = _process_classified_email(
+                classification,
+                email_id,
+                email_folder,
+                metadata,
+                from_address,
+                subject,
+                output_dir,
+                firm_mappings,
+                existing_firms,
+            )
+            canonical_name = entry.pop("_canonical_name", None)
+
+            email_cls = classification.get("email_classification", {})
+            if email_cls.get("is_hedge_fund_related") and canonical_name:
+                log.info(
+                    f"[{i + 1}/{len(new_folders)}] {subject[:45]}  ->  {canonical_name}",
+                    phase=CLASSIFY,
+                )
+            else:
+                log.info(
+                    f"[{i + 1}/{len(new_folders)}] {subject[:45]}  (skipped)",
+                    phase=CLASSIFY,
+                )
+
+            results.append(entry)
+
+            # Save mappings and report after each classification so progress
+            # survives interruption.
+            save_firm_mappings(firm_mappings, output_dir)
+            _append_classification_to_report(entry, output_dir)
 
     return {"new_folders_found": len(new_folders), "classifications": results}
 
@@ -3257,6 +3562,15 @@ def _scan_disk_state(output_dir: Path) -> dict:
                 else:
                     firm_entry["untagged_files"].append(f.name)
 
+        # Also scan firm-level links/ subfolder for .link.json files
+        firm_links_dir = child / "links"
+        if firm_links_dir.is_dir():
+            for f in sorted(firm_links_dir.iterdir()):
+                if f.is_file() and f.name.endswith(".link.json"):
+                    art_id = _parse_artifact_id_from_filename(f.name)
+                    if art_id:
+                        firm_entry["artifacts"][art_id] = f.name
+
         # Scan fund subfolders
         for subfolder in sorted(child.iterdir()):
             if not subfolder.is_dir() or subfolder.name.startswith("."):
@@ -3292,6 +3606,15 @@ def _scan_disk_state(output_dir: Path) -> dict:
                         fund_entry["artifacts"][art_id] = f.name
                     else:
                         fund_entry["untagged_files"].append(f.name)
+
+            # Also scan fund-level links/ subfolder for .link.json files
+            fund_links_dir = subfolder / "links"
+            if fund_links_dir.is_dir():
+                for f in sorted(fund_links_dir.iterdir()):
+                    if f.is_file() and f.name.endswith(".link.json"):
+                        art_id = _parse_artifact_id_from_filename(f.name)
+                        if art_id:
+                            fund_entry["artifacts"][art_id] = f.name
 
             firm_entry["funds"][subfolder.name] = fund_entry
 
@@ -4147,7 +4470,12 @@ def reconcile_misplaced_artifacts(
             )
             continue
 
-        dest_file = target_path / source_file.name
+        # .link.json files go into the links/ subfolder
+        if source_file.name.endswith(".link.json"):
+            dest_dir = target_path / "links"
+        else:
+            dest_dir = target_path
+        dest_file = dest_dir / source_file.name
 
         # Move the file (collision check + move under a single try/except)
         try:
@@ -4157,10 +4485,10 @@ def reconcile_misplaced_artifacts(
                 ext = dest_file.suffix
                 counter = 1
                 while dest_file.exists():
-                    dest_file = target_path / f"{stem}_{counter}{ext}"
+                    dest_file = dest_dir / f"{stem}_{counter}{ext}"
                     counter += 1
 
-            target_path.mkdir(parents=True, exist_ok=True)
+            dest_dir.mkdir(parents=True, exist_ok=True)
             shutil.move(str(source_file), str(dest_file))
         except OSError as e:
             result["errors"].append(
@@ -4193,11 +4521,151 @@ def reconcile_misplaced_artifacts(
             }
         )
 
+    # --- Step 5: Merge orphaned source funds into their relocation targets ---
+    # Build mapping: source fund → target fund (from successful relocations)
+    source_to_target: dict[tuple[str, str], tuple[str, str]] = {}
+    for reloc in relocations:
+        if reloc["from_fund"]:
+            src_key = (reloc["from_firm"], reloc["from_fund"])
+            tgt_key = (reloc["to_firm"], reloc["to_fund"])
+            source_to_target[src_key] = tgt_key
+
+    for (src_firm, src_fund), (tgt_firm, tgt_fund) in source_to_target.items():
+        fund_data = (
+            canonical_names.get(src_firm, {}).get("funds", {}).get(src_fund, {})
+        )
+        if not fund_data or fund_data.get("_deleted_at"):
+            continue
+        fund_id = fund_data.get("identifier")
+        if not fund_id:
+            continue
+
+        remaining_arts = [
+            art
+            for art in fund_data.get("artifacts", {}).values()
+            if not art.get("_deleted_at")
+        ]
+
+        # Skip if any unprocessed performance artifact remains — it may produce
+        # a new identifier when processed, so the folder is not yet orphaned
+        has_unprocessed_perf = any(
+            art.get("contains_monthly_net_performance_update")
+            and not art.get("processed")
+            for art in remaining_arts
+        )
+        if has_unprocessed_perf:
+            continue
+
+        # Check if any remaining artifact still supports this identifier
+        still_supported = any(
+            art.get("identifier") == fund_id for art in remaining_arts
+        )
+        if still_supported:
+            continue
+
+        # Fund is orphaned — merge all contents into the target fund folder.
+        # Cannot rely on fund_folder_paths here because when two funds share
+        # the same identifier the mapping is ambiguous.  Resolve paths by
+        # scanning disk_state with name-first matching instead.
+        src_path = _find_fund_path(src_firm, src_fund, disk_state)
+        tgt_path = _find_fund_path(tgt_firm, tgt_fund, disk_state)
+        if not src_path or not tgt_path or not src_path.exists():
+            continue
+
+        # Merge all files and subfolders from source into target
+        _merge_folder_contents(src_path, tgt_path, result["errors"])
+
+        # Merge remaining registry artifacts into target fund
+        tgt_fund_data = (
+            canonical_names.get(tgt_firm, {}).get("funds", {}).get(tgt_fund, {})
+        )
+        for art_id, art_data in list(fund_data.get("artifacts", {}).items()):
+            if not art_data.get("_deleted_at"):
+                tgt_fund_data.setdefault("artifacts", {})[art_id] = art_data
+
+        # Clear identifier and soft-delete the source fund
+        fund_data["identifier"] = None
+        fund_data["_deleted_at"] = datetime.now().isoformat()
+
+        # Remove the now-empty source folder
+        if src_path.exists():
+            shutil.rmtree(str(src_path), ignore_errors=True)
+
+        from_label = f"{src_firm}/{src_fund}"
+        to_label = f"{tgt_firm}/{tgt_fund}"
+        result["relocated"].append(
+            {
+                "artifact_id": "FOLDER_MERGE",
+                "file_name": f"[all contents of {src_fund}]",
+                "from": from_label,
+                "to": to_label,
+            }
+        )
+
     # Save if any changes were made (skip if caller owns the mappings object)
     if _owns_mappings and result["relocated"]:
         save_firm_mappings(mappings, output_dir)
 
     return result
+
+
+def _find_fund_path(
+    firm_name: str, fund_name: str, disk_state: dict
+) -> Path | None:
+    """Resolve a fund's folder path from disk_state by name match.
+
+    Preferred over ``fund_folder_paths`` when multiple funds share the same
+    identifier (the exact orphaned-folder scenario), which makes the
+    identifier-first lookup in ``fund_folder_paths`` ambiguous.
+    """
+    firm_folder = sanitize_folder_name(firm_name)
+    firm_disk = disk_state["firms"].get(firm_folder, {})
+    for _folder_name, fund_disk in firm_disk.get("funds", {}).items():
+        if fund_disk["name"] == fund_name:
+            return fund_disk["path"]
+    return None
+
+
+def _resolve_collision(dest_file: Path) -> Path:
+    """Return a non-colliding path, appending _1, _2, ... if needed."""
+    if not dest_file.exists():
+        return dest_file
+    stem = dest_file.stem
+    ext = dest_file.suffix
+    counter = 1
+    while dest_file.exists():
+        dest_file = dest_file.parent / f"{stem}_{counter}{ext}"
+        counter += 1
+    return dest_file
+
+
+def _merge_folder_contents(
+    src_path: Path, dst_path: Path, errors: list
+) -> None:
+    """Merge all files and subfolder contents from src into dst.
+
+    Root-level files go directly into dst.  Subdirectories are merged into
+    the same-named subfolder in dst (created if absent).
+    """
+    for item in sorted(src_path.iterdir()):
+        try:
+            if item.is_file():
+                dst_path.mkdir(parents=True, exist_ok=True)
+                dest_file = _resolve_collision(dst_path / item.name)
+                shutil.move(str(item), str(dest_file))
+            elif item.is_dir():
+                target_sub = dst_path / item.name
+                target_sub.mkdir(parents=True, exist_ok=True)
+                for sub_item in sorted(item.iterdir()):
+                    if sub_item.is_file():
+                        dest_file = _resolve_collision(target_sub / sub_item.name)
+                        shutil.move(str(sub_item), str(dest_file))
+                    elif sub_item.is_dir():
+                        dest_sub = target_sub / sub_item.name
+                        if not dest_sub.exists():
+                            shutil.move(str(sub_item), str(dest_sub))
+        except OSError as e:
+            errors.append(f"Failed to merge {item.name} into {dst_path}: {e}")
 
 
 def _move_companion_json(
@@ -4286,7 +4754,7 @@ SYSTEM_FILES = {
     CLASSIFICATION_REPORT_FILE,
 }
 
-SKIP_SUBFOLDERS = {"json", "graph", "meetings", "researches"}
+SKIP_SUBFOLDERS = {"json", "graph", "meetings", "researches", "links"}
 
 # Windows Zone.Identifier alternate data streams (exposed as files on WSL2)
 _ZONE_ID_SUFFIX = ".identifier"
@@ -4990,3 +5458,58 @@ def delete_fund_alias_from_firm(
     else:
         print(f"Alias '{alias}' not found for fund '{fund_name}'.")
         return False
+
+
+# =========================
+# LINK FILE MIGRATION
+# =========================
+
+
+def migrate_links_to_subfolder(output_dir: Path = None) -> dict:
+    """Move all .link.json files from firm/fund folders into links/ subfolders.
+
+    Scans the output directory for any .link.json files sitting directly in
+    firm or fund folders and moves them into a ``links/`` subfolder.
+
+    Returns:
+        {"moved": [{"from": str, "to": str}, ...], "errors": [str, ...]}
+    """
+    output_dir = output_dir or DEFAULT_OUTPUT_DIR
+    result: dict = {"moved": [], "errors": []}
+
+    for firm_dir in sorted(output_dir.iterdir()):
+        if not firm_dir.is_dir() or firm_dir.name.startswith("."):
+            continue
+        if firm_dir.name in SYSTEM_FILES or firm_dir.name == NEEDS_REVIEW_FOLDER:
+            continue
+
+        # Move firm-level .link.json files
+        for f in sorted(firm_dir.iterdir()):
+            if f.is_file() and f.name.endswith(".link.json"):
+                links_dir = firm_dir / "links"
+                links_dir.mkdir(parents=True, exist_ok=True)
+                dest = links_dir / f.name
+                try:
+                    f.rename(dest)
+                    result["moved"].append({"from": str(f), "to": str(dest)})
+                except OSError as e:
+                    result["errors"].append(f"Failed to move {f}: {e}")
+
+        # Move fund-level .link.json files
+        for subfolder in sorted(firm_dir.iterdir()):
+            if not subfolder.is_dir() or subfolder.name.startswith("."):
+                continue
+            if subfolder.name in SKIP_SUBFOLDERS:
+                continue
+            for f in sorted(subfolder.iterdir()):
+                if f.is_file() and f.name.endswith(".link.json"):
+                    links_dir = subfolder / "links"
+                    links_dir.mkdir(parents=True, exist_ok=True)
+                    dest = links_dir / f.name
+                    try:
+                        f.rename(dest)
+                        result["moved"].append({"from": str(f), "to": str(dest)})
+                    except OSError as e:
+                        result["errors"].append(f"Failed to move {f}: {e}")
+
+    return result

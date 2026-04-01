@@ -1,4 +1,5 @@
 import datetime as dt
+import json as _json
 from collections import defaultdict
 from typing import Dict
 from pathlib import Path
@@ -7,7 +8,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from dateutil.relativedelta import relativedelta
 
-from fofproject.fund import Fund
+from fofproject.fund import Fund, INDEX_NAME_MAPPING_PATH
 from fofproject.utils import hex_to_rgba
 
 DEFAULT_COLOR = "#D8C3A5"
@@ -17,51 +18,20 @@ save_dir = current_dir.parent.parent / "output"
 if not save_dir.exists():
     save_dir.mkdir(parents=True, exist_ok=True)
 
-fund_name_map = {
-    # Lead fund
-    "LEAD": {"en": "Fund", "cn": "基金"},
-    # Underlying funds (RETURN DATA.csv)
-    "RDGFF": {"en": "River Delta Global Frontier Fund", "cn": "RDGFF 基金"},
-    "NEW RDGFF": {"en": "River Delta Global Frontier Fund", "cn": "RDGFF 基金"},
-    "TAIREN": {"en": "Tairen Fund", "cn": "Tairen 基金"},
-    "HAO": {"en": "Hao Fund", "cn": "Hao 基金"},
-    "HAO MIX": {"en": "Hao Fund", "cn": "Hao 基金"},
-    "LEXINGTON": {"en": "Lexington Fund", "cn": "Lexington 基金"},
-    "LIM": {"en": "LIM Fund", "cn": "LIM 基金"},
-    "FOREST": {"en": "Forest Fund", "cn": "水木清风 基金"},
-    "WT CHINA": {"en": "WT China Fund", "cn": "WT 中国基金"},
-    "E20": {"en": "E20 Fund", "cn": "E20 基金"},
-    "3W GLOBAL": {"en": "3W Global Fund", "cn": "3W 全球基金"},
-    "3W CHINA": {"en": "3W China Fund", "cn": "3W 中国基金"},
-    "3W HEALTHCARE": {"en": "3W Healthcare Fund", "cn": "3W 医疗基金"},
-    "TIMEFOLIO": {"en": "Timefolio Fund", "cn": "Timefolio 基金"},
-    "MONOLITH": {"en": "Monolith Fund", "cn": "Monolith 基金"},
-    "PERSEVERANCE": {"en": "Perseverance Fund", "cn": "高毅基金"},
-    "NEO IVY": {"en": "Neo Ivy Fund", "cn": "Neo Ivy 基金"},
-    "JH BIOTECH": {"en": "JH Biotech Fund", "cn": "Janus Henderson 基金"},
-    # Benchmarks (HF index comparison.xlsx)
-    "MSCI CHINA": {"en": "MSCI China Index", "cn": "MSCI 中国指数"},
-    "MSCI WORLD": {"en": "MSCI World Index", "cn": "MSCI 世界指数"},
-    "MSCI EM": {"en": "MSCI Emerging Markets Index", "cn": "MSCI 新兴市场指数"},
-    "S&P 500": {"en": "S&P 500 Index", "cn": "标普500指数"},
-    "TOPIX": {"en": "TOPIX Index", "cn": "東証株価指数"},
-    "WITH WORLD": {
-        "en": "With Intelligence Hedge Fund Index",
-        "cn": "With Intelligence 对冲基金指数",
-    },
-    "SOX": {"en": "PHLX Semiconductor Index", "cn": "费城半导体指数"},
-    "KOSPI": {"en": "KOSPI Index", "cn": "韩国综合股价指数"},
-    "TAIEX": {"en": "TAIEX Index", "cn": "台湾加权指数"},
-    "RUSSELL 2000": {"en": "Russell 2000 Index", "cn": "罗素2000指数"},
-    "STOXX 600": {"en": "STOXX Europe 600 Index", "cn": "欧洲STOXX 600指数"},
-    "STOXX 50": {"en": "EURO STOXX 50 Index", "cn": "欧洲STOXX 50指数"},
-    "FTSE UK": {"en": "FTSE UK Index", "cn": "富时英国指数"},
-    "US HEALTHCARE": {"en": "US Healthcare Index", "cn": "美国医疗保健指数"},
-    "HK HEALTHCARE": {"en": "HK Healthcare Index", "cn": "恆生医疗保健指数"},
-    "US FINANCIAL": {"en": "US Financial Index", "cn": "美国金融指数"},
-    "US ENERGY": {"en": "US Energy Index", "cn": "美国能源指数"},
-    "COMMODITY": {"en": "Commodity Index", "cn": "大宗商品指数"},
-}
+
+def _load_name_to_legend() -> dict[str, dict[str, str]]:
+    """Load name → legend mapping from the shared JSON config."""
+    if INDEX_NAME_MAPPING_PATH.exists():
+        with open(INDEX_NAME_MAPPING_PATH, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+        return data.get("name_to_legend", {})
+    return {}
+
+
+# Module-level reference for backward compat; callers that mutate this
+# won't affect the JSON source.  Internal code calls _load_name_to_legend()
+# to get a fresh copy.
+fund_name_map = _load_name_to_legend()
 
 STYLE_DICT = {
     "pptx": {
@@ -418,13 +388,14 @@ def plot_cumulative_returns(
         color_map[fund.name] = fund_color
 
         # If blur is True, only show the lead fund name as "Fund" or "基金"
+        legend_map = _load_name_to_legend()
         if blur:
             if fund.name == lead_name:
-                name = fund_name_map.get("LEAD", {}).get(language, fund.name)
+                name = legend_map.get("LEAD", {}).get(language, fund.name)
             else:
-                name = fund_name_map.get(fund.name, {}).get(language, fund.name)
+                name = legend_map.get(fund.name, {}).get(language, fund.name)
         else:
-            name = fund_name_map.get(fund.name, {}).get(language, fund.name)
+            name = legend_map.get(fund.name, {}).get(language, fund.name)
 
         if custom_ticks:
             ymin = np.min(cumulative_returns)

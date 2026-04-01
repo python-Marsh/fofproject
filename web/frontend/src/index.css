@@ -1,0 +1,15 @@
+html, body, #root {
+  overflow-x: hidden;
+}
+
+@media (max-width: 767px) {
+  .ant-descriptions-item-label {
+    font-size: 12px !important;
+  }
+  .ant-descriptions-item-content {
+    font-size: 12px !important;
+  }
+  .ant-table {
+    font-size: 12px !important;
+  }
+}

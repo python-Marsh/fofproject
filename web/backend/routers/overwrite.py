@@ -36,9 +36,9 @@ def _write_df(df: pd.DataFrame) -> None:
     df.to_csv(path, index=False)
 
 
-@router.get("/{fund_name}")
-def read_fund_overwrite(fund_name: str):
-    """Read overwrite entries for a single fund."""
+@router.get("/{identifier}")
+def read_fund_overwrite(identifier: str):
+    """Read overwrite entries for a single fund by identifier."""
     try:
         df = _read_df()
     except Exception as e:
@@ -46,12 +46,12 @@ def read_fund_overwrite(fund_name: str):
             status_code=400,
             detail=f"Failed to read overwrite CSV: {e}",
         )
-    if fund_name not in df.columns:
+    if identifier not in df.columns:
         return FundOverwriteData(entries=[])
 
     entries = []
     for _, row in df.iterrows():
-        val = row[fund_name]
+        val = row[identifier]
         if pd.isna(val):
             continue
         # Convert DD/MM/YYYY to YYYY-MM for frontend month picker
@@ -79,14 +79,14 @@ def _normalize_date(date_str: str) -> str:
     return date_str
 
 
-@router.put("/{fund_name}")
-def write_fund_overwrite(fund_name: str, data: FundOverwriteData):
-    """Write overwrite entries for a single fund, merging into the CSV."""
+@router.put("/{identifier}")
+def write_fund_overwrite(identifier: str, data: FundOverwriteData):
+    """Write overwrite entries for a single fund by identifier, merging into the CSV."""
     df = _read_df()
 
-    # Add the fund column if it doesn't exist
-    if fund_name not in df.columns:
-        df[fund_name] = None
+    # Add the fund column if it doesn't exist (column name = identifier)
+    if identifier not in df.columns:
+        df[identifier] = None
 
     # Normalize all incoming dates to DD/MM/YYYY (month-end)
     incoming = {_normalize_date(e["date"]): e["value"] for e in data.entries}
@@ -111,9 +111,9 @@ def write_fund_overwrite(fund_name: str, data: FundOverwriteData):
     for idx, row in df.iterrows():
         date_str = str(row["date"]).strip()
         if date_str in incoming:
-            df.at[idx, fund_name] = incoming[date_str]
+            df.at[idx, identifier] = incoming[date_str]
         else:
-            df.at[idx, fund_name] = None
+            df.at[idx, identifier] = None
 
     # Drop fund columns that are entirely empty (no overwrite data left)
     fund_cols = [c for c in df.columns if c != "date"]
@@ -136,10 +136,10 @@ def write_fund_overwrite(fund_name: str, data: FundOverwriteData):
     except Exception as e:
         raise HTTPException(
             status_code=400,
-            detail=f"Failed to save overwrite data for '{fund_name}': {e}",
+            detail=f"Failed to save overwrite data for '{identifier}': {e}",
         )
 
     return {
         "success": True,
-        "message": f"Saved {len(incoming)} overwrite entries for {fund_name}, funds reloaded.",
+        "message": f"Saved {len(incoming)} overwrite entries for {identifier}, funds reloaded.",
     }

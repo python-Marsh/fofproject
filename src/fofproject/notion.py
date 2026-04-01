@@ -1187,9 +1187,9 @@ def sync_fund(
     """
     Sync a single fund folder to the Notion Fund database.
 
-    Accepts fund folders with or without identifiers:
-    - "FUND_NAME - 12345" -> fund_name="FUND_NAME", identifier="12345"
-    - "FUND_NAME"         -> fund_name="FUND_NAME", identifier=""
+    Only syncs fund folders that have an identifier (format: "FUND_NAME - 12345").
+    Folders without identifiers are skipped — they become eligible once renamed
+    with an identifier.
 
     Args:
         fund_path: Path to the fund folder
@@ -1201,10 +1201,7 @@ def sync_fund(
     """
     parsed = parse_fund_folder_name(fund_path.name)
     if not parsed:
-        log.info(
-            "Skipping fund folder '%s' — no identifier assigned",
-            fund_path.name,
-        )
+        log.info("Skipping fund folder '%s' — no identifier", fund_path.name)
         return None
     fund_name, identifier = parsed
     log.info("Syncing fund: %s (identifier: %s)", fund_name, identifier)
@@ -1216,7 +1213,7 @@ def sync_fund(
         log.info("Fund '%s' already exists -> %s, skipping uploads", fund_name, fund_page_id)
         return fund_page_id
 
-    # Create fund page with Identifier and AM Firm relation
+    # Create fund page with AM Firm relation and Identifier
     extra_properties = {
         "AM Firm": {"relation": [{"id": firm_page_id}]},
         "Identifier": {
@@ -1321,6 +1318,18 @@ def sync_firm(firm_path: Path, firm_db_id: str, fund_db_id: str):
     if _is_skippable_folder(firm_path.name):
         return
 
+    # Parse folder contents early to check for eligible funds
+    firm_files, fund_folders = get_firm_contents(firm_path)
+
+    # Skip firm if no fund subfolder has an identifier
+    eligible_funds = [f for f in fund_folders if parse_fund_folder_name(f.name)]
+    if not eligible_funds:
+        log.info(
+            "Skipping firm '%s' — no fund folders with identifiers",
+            firm_path.name,
+        )
+        return
+
     # Resolve to canonical firm name from classify.py mappings
     watch_folder_path = firm_path.parent
     firm_name = _resolve_firm_name_from_mappings(firm_path.name, watch_folder_path)
@@ -1347,9 +1356,6 @@ def sync_firm(firm_path: Path, firm_db_id: str, fund_db_id: str):
             title_property=FIRM_TITLE_PROP,
             use_template=True,
         )
-
-    # Parse folder contents
-    firm_files, fund_folders = get_firm_contents(firm_path)
 
     # Only upload firm-level files if the firm was just created
     if not existing and firm_files:
@@ -1811,6 +1817,12 @@ class NotionFolderHandler(FileSystemEventHandler):
                 )
                 return
             if new_path.name in SKIP_SUBFOLDERS or new_path.name in _NOTION_SKIP_FOLDERS:
+                return
+            if not parse_fund_folder_name(new_path.name):
+                log.info(
+                    "New fund folder '%s' has no identifier — skipping until renamed",
+                    new_path.name,
+                )
                 return
             log.info("New fund folder detected: %s", new_path.name)
             firm_name = parent.name
@@ -3035,15 +3047,17 @@ def watch_folder(folder_path: Path | str | None = None):
     log.info("Discovering Notion databases...")
     firm_db_id, fund_db_id = discover_databases()
 
-    # Initial scan of existing folders
-    log.info("Running initial scan...")
-    initial_scan(watch_path, firm_db_id, fund_db_id)
-
-    # Set up watchdog (local → Notion)
+    # Set up watchdog (local → Notion) BEFORE initial scan so that
+    # filesystem events created during the scan (or by classification
+    # running concurrently in another thread) are not missed.
     handler = NotionFolderHandler(watch_path, firm_db_id, fund_db_id)
     observer = Observer()
     observer.schedule(handler, str(watch_path), recursive=True)
     observer.start()
+
+    # Initial scan of existing folders
+    log.info("Running initial scan...")
+    initial_scan(watch_path, firm_db_id, fund_db_id)
 
     # Set up Notion poller (Notion → local)
     poller = NotionPoller(watch_path, firm_db_id, fund_db_id)

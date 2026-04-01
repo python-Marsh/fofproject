@@ -4,10 +4,12 @@ import { HeatMapOutlined } from '@ant-design/icons'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { chartCorrelation, getStatus } from '../api/client'
 import PlotlyChart from '../components/PlotlyChart'
+import { useResponsive } from '../hooks/useResponsive'
 
 const { Title } = Typography
 
 export default function Correlation() {
+  const { isMobile } = useResponsive()
   const [selectedFunds, setSelectedFunds] = useState<string[]>([])
   const [selectedIndices, setSelectedIndices] = useState<string[]>([])
   const [selectedUnderlying, setSelectedUnderlying] = useState<string[]>([])
@@ -15,9 +17,9 @@ export default function Correlation() {
   const [minOverlap, setMinOverlap] = useState(6)
 
   const { data: status } = useQuery({ queryKey: ['status'], queryFn: getStatus })
-  const allNames = status?.fund_names || []
-  const indexNames = status?.index_names || []
-  const rdgffNames = status?.rdgff_names || []
+  const allEntries = status?.fund_entries || []
+  const indexIds = new Set(status?.index_identifiers || [])
+  const rdgffIds = new Set(status?.rdgff_identifiers || [])
 
   const combined = useMemo(
     () => [...new Set([...selectedFunds, ...selectedIndices, ...selectedUnderlying])],
@@ -26,8 +28,14 @@ export default function Correlation() {
 
   const mutation = useMutation({ mutationFn: chartCorrelation })
 
-  const allIndexSelected = indexNames.length > 0 && indexNames.every((n) => selectedIndices.includes(n))
-  const allUnderlyingSelected = rdgffNames.length > 0 && rdgffNames.every((n) => selectedUnderlying.includes(n))
+  const indexEntries = allEntries.filter((e) => indexIds.has(e.identifier))
+  const rdgffEntries = allEntries.filter((e) => rdgffIds.has(e.identifier))
+  const fundEntries = allEntries.filter((e) => !indexIds.has(e.identifier) && !rdgffIds.has(e.identifier))
+  const indexIdentifiers = indexEntries.map((e) => e.identifier)
+  const rdgffIdentifiers = rdgffEntries.map((e) => e.identifier)
+
+  const allIndexSelected = indexIdentifiers.length > 0 && indexIdentifiers.every((id) => selectedIndices.includes(id))
+  const allUnderlyingSelected = rdgffIdentifiers.length > 0 && rdgffIdentifiers.every((id) => selectedUnderlying.includes(id))
 
   const handleGenerate = () => {
     if (combined.length < 2) return
@@ -41,19 +49,20 @@ export default function Correlation() {
       <Title level={3}>Correlation Heatmap</Title>
       <Card style={{ marginBottom: 16 }}>
         <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-          <div style={{ display: 'flex', gap: 16 }}>
+          <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', gap: 16 }}>
             <div style={{ flex: 1 }}>
-              <div style={{ ...labelStyle, display: 'flex', alignItems: 'center', height: 22 }}>Funds</div>
+              <div style={{ ...labelStyle, display: 'flex', alignItems: 'center', height: 22 }}>Pipeline Funds</div>
               <Select
                 mode="multiple"
                 allowClear
                 showSearch
-                placeholder="Select funds..."
+                placeholder="Search by name or identifier..."
                 value={selectedFunds}
                 onChange={setSelectedFunds}
-                options={allNames
-                  .filter((n) => !indexNames.includes(n) && !rdgffNames.includes(n))
-                  .map((n) => ({ label: n, value: n }))}
+                options={fundEntries.map((e) => ({ label: e.name, value: e.identifier }))}
+                filterOption={(input, option) =>
+                  `${option?.label} ${option?.value}`.toLowerCase().includes(input.toLowerCase())
+                }
                 style={{ width: '100%' }}
                 maxTagCount="responsive"
               />
@@ -63,7 +72,7 @@ export default function Correlation() {
                 <span style={labelStyle as React.CSSProperties}>Indices</span>
                 <Checkbox
                   checked={allIndexSelected}
-                  onChange={() => setSelectedIndices(allIndexSelected ? [] : [...indexNames])}
+                  onChange={() => setSelectedIndices(allIndexSelected ? [] : [...indexIdentifiers])}
                   style={{ fontSize: 12 }}
                 >
                   Select All
@@ -73,10 +82,13 @@ export default function Correlation() {
                 mode="multiple"
                 allowClear
                 showSearch
-                placeholder="Select indices..."
+                placeholder="Search by name or identifier..."
                 value={selectedIndices}
                 onChange={setSelectedIndices}
-                options={indexNames.map((n) => ({ label: n, value: n }))}
+                options={indexEntries.map((e) => ({ label: e.name, value: e.identifier }))}
+                filterOption={(input, option) =>
+                  `${option?.label} ${option?.value}`.toLowerCase().includes(input.toLowerCase())
+                }
                 style={{ width: '100%' }}
                 maxTagCount="responsive"
               />
@@ -86,7 +98,7 @@ export default function Correlation() {
                 <span style={labelStyle as React.CSSProperties}>Underlying Funds</span>
                 <Checkbox
                   checked={allUnderlyingSelected}
-                  onChange={() => setSelectedUnderlying(allUnderlyingSelected ? [] : [...rdgffNames])}
+                  onChange={() => setSelectedUnderlying(allUnderlyingSelected ? [] : [...rdgffIdentifiers])}
                   style={{ fontSize: 12 }}
                 >
                   Select All
@@ -96,10 +108,13 @@ export default function Correlation() {
                 mode="multiple"
                 allowClear
                 showSearch
-                placeholder="Select underlying funds..."
+                placeholder="Search by name or identifier..."
                 value={selectedUnderlying}
                 onChange={setSelectedUnderlying}
-                options={rdgffNames.map((n) => ({ label: n, value: n }))}
+                options={rdgffEntries.map((e) => ({ label: e.name, value: e.identifier }))}
+                filterOption={(input, option) =>
+                  `${option?.label} ${option?.value}`.toLowerCase().includes(input.toLowerCase())
+                }
                 style={{ width: '100%' }}
                 maxTagCount="responsive"
               />
@@ -144,7 +159,7 @@ export default function Correlation() {
           <PlotlyChart
             data={mutation.data.plotly_json.data}
             layout={mutation.data.plotly_json.layout}
-            style={{ height: 600 }}
+            style={{ height: isMobile ? 350 : 600 }}
           />
         </Card>
       )}

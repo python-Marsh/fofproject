@@ -1,11 +1,72 @@
 from datetime import datetime
 from typing import Union
+import signal
+import threading
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import plotly.io as pio
 import pandas as pd
+
+class GracefulCycle:
+    """Context manager that catches SIGINT/SIGTERM for graceful mid-cycle shutdown.
+
+    Usage::
+
+        with GracefulCycle() as gc:
+            for item in items:
+                if gc.should_stop:
+                    break
+                process(item)
+                save_progress()
+
+    On the first interrupt, ``should_stop`` is set so the current iteration
+    can finish and state can be saved.  A second interrupt raises
+    ``KeyboardInterrupt`` immediately so the process isn't stuck.
+    """
+
+    def __init__(self, logger=None, phase: str = ""):
+        self.should_stop = False
+        self._logger = logger
+        self._phase = phase
+        self._original_sigint = None
+        self._original_sigterm = None
+        self._interrupted_count = 0
+        self._lock = threading.Lock()
+
+    def _handler(self, signum, frame):
+        with self._lock:
+            self._interrupted_count += 1
+            if self._interrupted_count >= 2:
+                # Second interrupt — raise immediately
+                raise KeyboardInterrupt
+            self.should_stop = True
+            sig_name = signal.Signals(signum).name
+            if self._logger:
+                self._logger.info(
+                    f"Received {sig_name}, finishing current item then stopping. "
+                    "Press Ctrl+C again to force quit.",
+                    phase=self._phase,
+                )
+            else:
+                print(
+                    f"\n[{sig_name}] Finishing current item then stopping. "
+                    "Press Ctrl+C again to force quit."
+                )
+
+    def __enter__(self):
+        self._original_sigint = signal.getsignal(signal.SIGINT)
+        self._original_sigterm = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGINT, self._handler)
+        signal.signal(signal.SIGTERM, self._handler)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        signal.signal(signal.SIGINT, self._original_sigint)
+        signal.signal(signal.SIGTERM, self._original_sigterm)
+        return False
+
 
 def in_notebook():
     try:

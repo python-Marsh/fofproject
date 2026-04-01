@@ -17,10 +17,24 @@ from fofproject.classify import (
     _parse_folder_identifier,
     CONFLICT_IDENTIFIER_PREFIX,
 )
-from fofproject.load import process_single_pdf, init_funds
+from fofproject.load import process_single_pdf, init_funds, _has_valid_performance
 from fofproject.fund import load_benchmarks
 from fofproject.paths import DEFAULT_INPUT_DIR
 import fofproject.fund as fund_module
+from fofproject.utils import GracefulCycle
+
+
+MAX_EXTRACTION_ATTEMPTS = 3
+
+
+def _get_artifact_record(mappings: dict, firm_name: str, fund_name: str | None, artifact_id: str) -> dict | None:
+    """Return the artifact dict from mappings, or None if not found."""
+    canonical = mappings.get("canonical_names", {}).get(firm_name, {})
+    if fund_name:
+        artifacts = canonical.get("funds", {}).get(fund_name, {}).get("artifacts", {})
+    else:
+        artifacts = canonical.get("artifacts", {})
+    return artifacts.get(artifact_id)
 
 
 def _find_unprocessed_performance_artifacts(mappings: dict, output_dir: Path) -> list:
@@ -47,6 +61,8 @@ def _find_unprocessed_performance_artifacts(mappings: dict, output_dir: Path) ->
             if art_info.get(
                 "contains_monthly_net_performance_update"
             ) and not art_info.get("processed"):
+                if art_info.get("attempt_count", 0) >= MAX_EXTRACTION_ATTEMPTS:
+                    continue
                 file_name = art_info.get("file_name", "")
                 if not file_name.lower().endswith(".pdf"):
                     continue
@@ -70,6 +86,8 @@ def _find_unprocessed_performance_artifacts(mappings: dict, output_dir: Path) ->
                 if art_info.get(
                     "contains_monthly_net_performance_update"
                 ) and not art_info.get("processed"):
+                    if art_info.get("attempt_count", 0) >= MAX_EXTRACTION_ATTEMPTS:
+                        continue
                     file_name = art_info.get("file_name", "")
                     if not file_name.lower().endswith(".pdf"):
                         continue
@@ -432,47 +450,83 @@ def process_performance_updates(
     log.info(f"Found {len(unprocessed)} unprocessed performance artifact(s).", phase=PERF)
 
     results = []
-    for item in unprocessed:
-        file_path = str(item["file_path"])
-        firm = item["firm"]
-        fund = item["fund"] or "(firm-level)"
-        art_id = item["artifact_id"]
+    stopped_early = False
+    with GracefulCycle(logger=log, phase=PERF) as gc:
+        for item in unprocessed:
+            if gc.should_stop:
+                stopped_early = True
+                log.info(
+                    f"Graceful stop requested after {len(results)}/{len(unprocessed)} artifacts, "
+                    "saving progress...",
+                    phase=PERF,
+                )
+                break
 
-        log.detail(f"Processing: {item['file_name']} [{firm} / {fund}]", phase=PERF)
-        try:
-            result = process_single_pdf(file_path, save=save)
-            results.append(result)
-            old_dir, new_dir = _mark_artifact_processed(
-                mappings,
-                firm,
-                item["fund"],
-                art_id,
-                identifier=result.get("identifier", ""),
-                artifact_path=item["file_path"],
-            )
-            # If the fund folder was renamed, update paths for remaining items
-            if old_dir is not None and new_dir is not None:
-                for other in unprocessed:
-                    if other["file_path"].parent == old_dir:
-                        other["file_path"] = new_dir / other["file_path"].name
-            log.detail(f"  {result.get('fund_name', 'UNKNOWN')} processed successfully.", phase=PERF)
-        except Exception as e:
-            log.error(f"  Failed: {item['file_name']}: {e}", phase=PERF)
+            file_path = str(item["file_path"])
+            firm = item["firm"]
+            fund = item["fund"] or "(firm-level)"
+            art_id = item["artifact_id"]
+
+            log.detail(f"Processing: {item['file_name']} [{firm} / {fund}]", phase=PERF)
+            art_record = _get_artifact_record(mappings, firm, item["fund"], art_id)
+            try:
+                result = process_single_pdf(file_path, save=save)
+
+                # Quality gate: reject empty performance results
+                if not _has_valid_performance(result):
+                    if art_record is not None:
+                        art_record["attempt_count"] = art_record.get("attempt_count", 0) + 1
+                        art_record["last_attempt_error"] = "empty_performance"
+                    attempts = art_record.get("attempt_count", 0) if art_record else "?"
+                    log.warn(
+                        f"  {item['file_name']}: empty performance, "
+                        f"attempt {attempts}/{MAX_EXTRACTION_ATTEMPTS}",
+                        phase=PERF,
+                    )
+                    continue
+
+                results.append(result)
+                old_dir, new_dir = _mark_artifact_processed(
+                    mappings,
+                    firm,
+                    item["fund"],
+                    art_id,
+                    identifier=result.get("identifier", ""),
+                    artifact_path=item["file_path"],
+                )
+                # If the fund folder was renamed, update paths for remaining items
+                if old_dir is not None and new_dir is not None:
+                    for other in unprocessed:
+                        if other["file_path"].parent == old_dir:
+                            other["file_path"] = new_dir / other["file_path"].name
+                log.detail(f"  {result.get('fund_name', 'UNKNOWN')} processed successfully.", phase=PERF)
+            except Exception as e:
+                if art_record is not None:
+                    art_record["attempt_count"] = art_record.get("attempt_count", 0) + 1
+                    art_record["last_attempt_error"] = f"extraction_error: {e}"
+                log.error(f"  Failed: {item['file_name']}: {e}", phase=PERF)
 
     # Save updated mappings with processed flags (skip if caller owns the mappings object)
     if _owns_mappings:
         save_firm_mappings(mappings, output_dir)
-    log.info(f"Processed {len(results)}/{len(unprocessed)} performance artifact(s).", phase=PERF)
+    suffix = " (stopped early — progress saved)" if stopped_early else ""
+    log.info(f"Processed {len(results)}/{len(unprocessed)} performance artifact(s).{suffix}", phase=PERF)
 
     return results
 
 
 def find_funds_missing_graphs(output_dir: Path = None) -> set:
-    """Return identifiers of funds that have JSON data but no exported graphs.
+    """Return identifiers of funds that have JSON data but incomplete graphs.
 
-    This catches resolved 404-conflict folders (renamed from
-    ``404 multiple identifier_X`` to ``X - ID``) and any other funds
-    whose graphs haven't been generated yet.
+    A fund is considered missing graphs if:
+    - The ``graph/`` directory doesn't exist or is empty, OR
+    - The number of graph files (PNG) is less than the expected count
+      recorded in ``graph/.expected_count`` (written by
+      ``generate_fund_graphs``).
+
+    This adapts automatically when new graph types are added to
+    ``summary_of_a_fund`` — the expected count is persisted at generation
+    time and checked here.
     """
     output_dir = output_dir or DEFAULT_OUTPUT_DIR
     if not output_dir.exists():
@@ -494,8 +548,23 @@ def find_funds_missing_graphs(output_dir: Path = None) -> set:
             if not json_file.is_file():
                 continue
             graph_dir = subfolder / "graph"
-            if not graph_dir.is_dir() or not any(graph_dir.iterdir()):
+            if not graph_dir.is_dir():
                 missing.add(identifier)
+                continue
+            # Count actual graph files (PNGs)
+            actual_count = sum(1 for f in graph_dir.iterdir() if f.suffix.lower() == ".png")
+            if actual_count == 0:
+                missing.add(identifier)
+                continue
+            # Check against expected count if available
+            expected_file = graph_dir / ".expected_count"
+            if expected_file.is_file():
+                try:
+                    expected_count = int(expected_file.read_text().strip())
+                    if actual_count < expected_count:
+                        missing.add(identifier)
+                except (ValueError, OSError):
+                    pass
     return missing
 
 
@@ -578,12 +647,16 @@ def generate_fund_graphs(output_dir: Path = None, benchmark_fund=None, language=
 
             for fund_name, fund in funds.items():
                 try:
-                    fund.summary_of_a_fund(
+                    expected_count = fund.summary_of_a_fund(
                         benchmark_fund=benchmark_fund,
                         language=language,
                         save=True,
                         show=False,
                     )
+                    # Persist expected graph count so missing-graph detection
+                    # can verify completeness, not just existence.
+                    expected_file = graph_dir / ".expected_count"
+                    expected_file.write_text(str(expected_count or 0))
                     results.append(
                         {
                             "firm_folder": firm_folder.name,

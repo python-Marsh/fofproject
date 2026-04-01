@@ -15,6 +15,7 @@ import msal
 
 from fofproject.log import log, EMAIL
 from fofproject.paths import EMAIL_STORAGE_DIR
+from fofproject.utils import GracefulCycle
 
 # =========================
 # CONFIG (fill in from .env)
@@ -631,7 +632,7 @@ def download_top_emails(token: str, count: int = 100, base_dir: Path = None,
     return downloaded_count
 
 
-def monitor_emails(token_func, base_dir: Path = None, poll_interval: int = 60,
+def monitor_emails(token_func, base_dir: Path = None, poll_interval: int = 600,
                    max_runtime: int = None) -> None:
     """
     Continuously monitor for new emails and download them.
@@ -643,7 +644,7 @@ def monitor_emails(token_func, base_dir: Path = None, poll_interval: int = 60,
     Args:
         token_func: Callable that returns a valid access token (handles refresh)
         base_dir: Directory to save emails (default: EMAIL_STORAGE_DIR)
-        poll_interval: Seconds between checks (default: 60)
+        poll_interval: Seconds between checks (default: 600)
         max_runtime: Maximum seconds to run (None = run forever)
     """
     base_dir = base_dir or EMAIL_STORAGE_DIR
@@ -661,8 +662,8 @@ def monitor_emails(token_func, base_dir: Path = None, poll_interval: int = 60,
     log.info(f"Saving to: {base_dir}", phase=EMAIL)
     log.info("Press Ctrl+C to stop.", phase=EMAIL)
 
-    try:
-        while True:
+    with GracefulCycle(logger=log, phase=EMAIL) as gc:
+        while not gc.should_stop:
             # Check runtime limit
             if max_runtime and (time.time() - start_time) > max_runtime:
                 log.info(f"Max runtime reached ({max_runtime}s). Stopping.", phase=EMAIL)
@@ -744,11 +745,11 @@ def monitor_emails(token_func, base_dir: Path = None, poll_interval: int = 60,
             except requests.exceptions.RequestException as e:
                 log.error(f"API error: {e}", phase=EMAIL)
 
-            # Wait before next check
-            time.sleep(poll_interval)
-
-    except KeyboardInterrupt:
-        log.info("Monitor stopped by user.", phase=EMAIL)
+            # Wait before next check (use short sleeps so we can check should_stop)
+            for _ in range(poll_interval):
+                if gc.should_stop:
+                    break
+                time.sleep(1)
 
     log.info(f"Total emails downloaded during session: {total_downloaded}", phase=EMAIL)
 
@@ -781,7 +782,7 @@ def main():
     elif mode == "3":
         # Monitor continuously with automatic token refresh
         token_provider = create_token_provider()
-        monitor_emails(token_provider, poll_interval=60)
+        monitor_emails(token_provider, poll_interval=600)
     else:
         print("Invalid mode. Please enter 1, 2, or 3.")
 
@@ -799,7 +800,7 @@ def run_download_all():
     return download_all_emails(token)
 
 
-def run_monitor(poll_interval: int = 60, max_runtime: int = None):
+def run_monitor(poll_interval: int = 600, max_runtime: int = None):
     """Start email monitor with automatic token refresh."""
     token_provider = create_token_provider()
     return monitor_emails(token_provider, poll_interval=poll_interval, max_runtime=max_runtime)

@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { Card, Tabs, Typography, Descriptions, Select, Spin, Space, Tag, Segmented, Table, InputNumber, DatePicker, Button, Popconfirm, message } from 'antd'
+import { Card, Tabs, Typography, Descriptions, Select, Spin, Space, Tag, Segmented, Table, InputNumber, DatePicker, Button, Popconfirm, Input, message } from 'antd'
 import dayjs from 'dayjs'
-import { PlusOutlined, DeleteOutlined, SaveOutlined } from '@ant-design/icons'
+import { PlusOutlined, DeleteOutlined, SaveOutlined, EditOutlined, CheckOutlined, CloseOutlined } from '@ant-design/icons'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   getFund,
@@ -14,9 +14,11 @@ import {
   chartWorstPerformance,
   getFundOverwrite,
   saveFundOverwrite,
+  renameFund,
 } from '../api/client'
 import PlotlyChart from '../components/PlotlyChart'
 import PngImage from '../components/PngImage'
+import { useResponsive } from '../hooks/useResponsive'
 
 const { Title } = Typography
 
@@ -24,25 +26,28 @@ const pct = (v: number | null | undefined) =>
   v != null ? `${(v * 100).toFixed(2)}%` : '—'
 
 export default function FundDetail() {
-  const { name } = useParams<{ name: string }>()
-  const decodedName = decodeURIComponent(name || '')
+  const { identifier } = useParams<{ identifier: string }>()
+  const decodedIdentifier = decodeURIComponent(identifier || '')
+  const { isMobile } = useResponsive()
   const [benchmark, setBenchmark] = useState<string | undefined>()
   const [language, setLanguage] = useState<string>('en')
+  const [isRenaming, setIsRenaming] = useState(false)
+  const [renameValue, setRenameValue] = useState('')
 
   const { data: status } = useQuery({ queryKey: ['status'], queryFn: getStatus })
   const { data: fund, isLoading } = useQuery({
-    queryKey: ['fund', decodedName],
-    queryFn: () => getFund(decodedName),
-    enabled: !!decodedName,
+    queryKey: ['fund', decodedIdentifier],
+    queryFn: () => getFund(decodedIdentifier),
+    enabled: !!decodedIdentifier,
   })
 
   const endMonth = fund?.latest_date || undefined
 
   const { data: keyMetrics, error: keyMetricsError } = useQuery({
-    queryKey: ['keyMetrics', decodedName, endMonth, benchmark, language],
+    queryKey: ['keyMetrics', decodedIdentifier, endMonth, benchmark, language],
     queryFn: () =>
       tableKeyMetrics({
-        fund_name: decodedName,
+        fund_name: decodedIdentifier,
         end_month: endMonth!,
         benchmark,
         language,
@@ -52,10 +57,10 @@ export default function FundDetail() {
   })
 
   const { data: monthlyTable, error: monthlyTableError } = useQuery({
-    queryKey: ['monthlyTable', decodedName, endMonth, benchmark, language],
+    queryKey: ['monthlyTable', decodedIdentifier, endMonth, benchmark, language],
     queryFn: () =>
       tableMonthlyReturns({
-        fund_name: decodedName,
+        fund_name: decodedIdentifier,
         end_month: endMonth,
         benchmark,
         language,
@@ -65,36 +70,37 @@ export default function FundDetail() {
   })
 
   const { data: distribution, error: distError } = useQuery({
-    queryKey: ['distribution', decodedName],
-    queryFn: () => chartDistribution({ fund_name: decodedName }),
-    enabled: !!decodedName,
+    queryKey: ['distribution', decodedIdentifier],
+    queryFn: () => chartDistribution({ fund_name: decodedIdentifier }),
+    enabled: !!decodedIdentifier,
     retry: false,
   })
 
   const { data: rollingVol, error: rollingVolError } = useQuery({
-    queryKey: ['rollingVol', decodedName, benchmark],
-    queryFn: () => chartRollingVol({ fund_name: decodedName, benchmark }),
-    enabled: !!decodedName,
+    queryKey: ['rollingVol', decodedIdentifier, benchmark],
+    queryFn: () => chartRollingVol({ fund_name: decodedIdentifier, benchmark }),
+    enabled: !!decodedIdentifier,
     retry: false,
   })
 
   const { data: worstPerf, error: worstPerfError } = useQuery({
-    queryKey: ['worstPerf', decodedName, benchmark],
+    queryKey: ['worstPerf', decodedIdentifier, benchmark],
     queryFn: () =>
       chartWorstPerformance({
-        fund_name: decodedName,
+        fund_name: decodedIdentifier,
         benchmark: benchmark || 'MSCI WORLD',
       }),
-    enabled: !!decodedName,
+    enabled: !!decodedIdentifier,
     retry: false,
   })
 
   // ── Overwrite state ──
   const queryClient = useQueryClient()
+  const fundIdentifier = fund?.identifier || ''
   const { data: overwriteData } = useQuery({
-    queryKey: ['fundOverwrite', decodedName],
-    queryFn: () => getFundOverwrite(decodedName),
-    enabled: !!decodedName,
+    queryKey: ['fundOverwrite', fundIdentifier],
+    queryFn: () => getFundOverwrite(fundIdentifier),
+    enabled: !!fundIdentifier,
   })
 
   const [owEntries, setOwEntries] = useState<{ date: string; value: number | null }[]>([])
@@ -102,22 +108,22 @@ export default function FundDetail() {
   const [owInitialized, setOwInitialized] = useState<string | null>(null)
 
   // Sync overwrite data when it loads or fund changes
-  if (overwriteData && owInitialized !== decodedName) {
+  if (overwriteData && owInitialized !== fundIdentifier) {
     setOwEntries(overwriteData.entries.map((e) => ({ ...e })))
     setOwDirty(false)
-    setOwInitialized(decodedName)
+    setOwInitialized(fundIdentifier)
   }
 
   const owSaveMutation = useMutation({
     mutationFn: (entries: { date: string; value: number | null }[]) =>
-      saveFundOverwrite(decodedName, { entries }),
+      saveFundOverwrite(fundIdentifier, { entries }),
     onSuccess: (res) => {
       message.success(res.message)
       setOwDirty(false)
-      queryClient.invalidateQueries({ queryKey: ['fundOverwrite', decodedName] })
+      queryClient.invalidateQueries({ queryKey: ['fundOverwrite', fundIdentifier] })
       queryClient.invalidateQueries({ queryKey: ['status'] })
       queryClient.invalidateQueries({ queryKey: ['funds'] })
-      queryClient.invalidateQueries({ queryKey: ['fund', decodedName] })
+      queryClient.invalidateQueries({ queryKey: ['fund', decodedIdentifier] })
       queryClient.invalidateQueries({ queryKey: ['keyMetrics'] })
       queryClient.invalidateQueries({ queryKey: ['monthlyTable'] })
     },
@@ -140,20 +146,80 @@ export default function FundDetail() {
     setOwDirty(true)
   }
 
+  const renameMutation = useMutation({
+    mutationFn: (newName: string) => renameFund(decodedIdentifier, newName),
+    onSuccess: (res) => {
+      message.success(res.message)
+      setIsRenaming(false)
+      queryClient.invalidateQueries({ queryKey: ['fund', decodedIdentifier] })
+      queryClient.invalidateQueries({ queryKey: ['funds'] })
+      queryClient.invalidateQueries({ queryKey: ['status'] })
+      queryClient.invalidateQueries({ queryKey: ['keyMetrics'] })
+      queryClient.invalidateQueries({ queryKey: ['monthlyTable'] })
+    },
+    onError: (err: Error) => message.error(err.message),
+  })
+
+  const startRename = () => {
+    setRenameValue(fund?.name || '')
+    setIsRenaming(true)
+  }
+
+  const confirmRename = () => {
+    const trimmed = renameValue.trim()
+    if (!trimmed || trimmed === fund?.name) {
+      setIsRenaming(false)
+      return
+    }
+    renameMutation.mutate(trimmed)
+  }
+
   if (isLoading) return <Spin size="large" style={{ display: 'block', margin: '100px auto' }} />
 
   if (!fund) return <Title level={4}>Fund not found</Title>
 
-  const benchmarkOptions = (status?.fund_names || []).map((n) => ({
-    label: n,
-    value: n,
+  const benchmarkOptions = (status?.fund_entries || []).map((e) => ({
+    label: e.name,
+    value: e.identifier,
   }))
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
+      <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', justifyContent: 'space-between', alignItems: isMobile ? 'stretch' : 'flex-start', gap: isMobile ? 12 : 0, marginBottom: 16 }}>
         <div>
-          <Title level={3} style={{ margin: 0 }}>{fund.name}</Title>
+          {isRenaming ? (
+            <Space>
+              <Input
+                value={renameValue}
+                onChange={(e) => setRenameValue(e.target.value)}
+                onPressEnter={confirmRename}
+                style={{ fontSize: 20, fontWeight: 600, width: isMobile ? '100%' : 300 }}
+                autoFocus
+              />
+              <Button
+                icon={<CheckOutlined />}
+                type="primary"
+                size="small"
+                loading={renameMutation.isPending}
+                onClick={confirmRename}
+              />
+              <Button
+                icon={<CloseOutlined />}
+                size="small"
+                onClick={() => setIsRenaming(false)}
+              />
+            </Space>
+          ) : (
+            <Space align="baseline">
+              <Title level={3} style={{ margin: 0 }}>{fund.name}</Title>
+              <Button
+                icon={<EditOutlined />}
+                type="text"
+                size="small"
+                onClick={startRename}
+              />
+            </Space>
+          )}
           {fund.one_liner && (
             <Typography.Text type="secondary" style={{ fontSize: 14 }}>
               {fund.one_liner}
@@ -164,7 +230,7 @@ export default function FundDetail() {
             {fund.geo_focus && <Tag color="#c1ae94">{fund.geo_focus}</Tag>}
           </div>
         </div>
-        <Space>
+        <Space wrap>
           <Segmented
             options={[
               { label: 'EN', value: 'en' },
@@ -180,13 +246,13 @@ export default function FundDetail() {
             value={benchmark}
             onChange={setBenchmark}
             options={benchmarkOptions}
-            style={{ width: 200 }}
+            style={{ width: isMobile ? '100%' : 200, minWidth: 160 }}
           />
         </Space>
       </div>
 
       <Card size="small" style={{ marginBottom: 16 }}>
-        <Descriptions size="small" column={6}>
+        <Descriptions size="small" column={isMobile ? 2 : 6}>
           <Descriptions.Item label="Inception">{fund.inception_date || '—'}</Descriptions.Item>
           <Descriptions.Item label="Latest">{fund.latest_date || '—'}</Descriptions.Item>
           <Descriptions.Item label="Months">{fund.num_months}</Descriptions.Item>
@@ -240,7 +306,7 @@ export default function FundDetail() {
                 <PlotlyChart
                   data={distribution.plotly_json.data}
                   layout={distribution.plotly_json.layout}
-                  style={{ height: 500 }}
+                  style={{ height: isMobile ? 300 : 500 }}
                 />
               ) : (
                 <Spin />
@@ -257,7 +323,7 @@ export default function FundDetail() {
                 <PlotlyChart
                   data={rollingVol.plotly_json.data}
                   layout={rollingVol.plotly_json.layout}
-                  style={{ height: 500 }}
+                  style={{ height: isMobile ? 300 : 500 }}
                 />
               ) : (
                 <Spin />
@@ -274,7 +340,7 @@ export default function FundDetail() {
                 <PlotlyChart
                   data={worstPerf.plotly_json.data}
                   layout={worstPerf.plotly_json.layout}
-                  style={{ height: 500 }}
+                  style={{ height: isMobile ? 300 : 500 }}
                 />
               ) : (
                 <Spin />

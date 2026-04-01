@@ -1,12 +1,15 @@
+import { useState } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
-import { Menu } from 'antd'
+import { Menu, Button, Drawer } from 'antd'
 import {
   DashboardOutlined,
   LineChartOutlined,
   HeatMapOutlined,
   PieChartOutlined,
   DatabaseOutlined,
+  MenuOutlined,
 } from '@ant-design/icons'
+import { useResponsive } from '../hooks/useResponsive'
 
 const items = [
   { key: '/', icon: <DashboardOutlined />, label: 'Dashboard' },
@@ -19,6 +22,13 @@ const items = [
 export default function TopBar() {
   const navigate = useNavigate()
   const location = useLocation()
+  const { isMobile } = useResponsive()
+  const [drawerOpen, setDrawerOpen] = useState(false)
+
+  const handleNav = (key: string) => {
+    navigate(key)
+    setDrawerOpen(false)
+  }
 
   return (
     <div
@@ -30,22 +40,30 @@ export default function TopBar() {
         zIndex: 100,
       }}
     >
-<div
+      <div
         style={{
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          padding: '20px 40px 8px',
-          gap: 12,
+          padding: isMobile ? '12px 16px 6px' : '20px 40px 8px',
+          gap: isMobile ? 8 : 12,
           position: 'relative',
         }}
       >
+        {isMobile && (
+          <Button
+            type="text"
+            icon={<MenuOutlined />}
+            onClick={() => setDrawerOpen(true)}
+            style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)' }}
+          />
+        )}
         <h1
           style={{
-            fontSize: 42,
+            fontSize: isMobile ? 20 : 42,
             fontWeight: 700,
             color: '#2c2c2c',
-            letterSpacing: 6,
+            letterSpacing: isMobile ? 2 : 6,
             textTransform: 'uppercase',
             margin: 0,
           }}
@@ -55,23 +73,42 @@ export default function TopBar() {
         <img
           src="/profile-dark.png"
           alt="River Delta"
-          style={{ height: 72, objectFit: 'contain' }}
+          style={{ height: isMobile ? 36 : 72, objectFit: 'contain' }}
         />
       </div>
-      <div style={{ height: 2, background: '#c1ae94', margin: '0 40px' }} />
-      <Menu
-        mode="horizontal"
-        selectedKeys={[location.pathname]}
-        items={items}
-        onClick={({ key }) => navigate(key)}
-        style={{
-          background: 'transparent',
-          borderBottom: 'none',
-          padding: '0 32px',
-          fontWeight: 500,
-          justifyContent: 'center',
-        }}
-      />
+      <div style={{ height: 2, background: '#c1ae94', margin: isMobile ? '0 16px' : '0 40px' }} />
+
+      {isMobile ? (
+        <Drawer
+          placement="left"
+          open={drawerOpen}
+          onClose={() => setDrawerOpen(false)}
+          width={260}
+          styles={{ body: { padding: 0 } }}
+        >
+          <Menu
+            mode="inline"
+            selectedKeys={[location.pathname]}
+            items={items}
+            onClick={({ key }) => handleNav(key)}
+            style={{ borderRight: 'none' }}
+          />
+        </Drawer>
+      ) : (
+        <Menu
+          mode="horizontal"
+          selectedKeys={[location.pathname]}
+          items={items}
+          onClick={({ key }) => navigate(key)}
+          style={{
+            background: 'transparent',
+            borderBottom: 'none',
+            padding: '0 32px',
+            fontWeight: 500,
+            justifyContent: 'center',
+          }}
+        />
+      )}
     </div>
   )
 }

@@ -22,7 +22,7 @@ export default function App() {
       <Suspense fallback={<Loading />}>
         <Routes>
           <Route path="/" element={<Dashboard />} />
-          <Route path="/fund/:name" element={<FundDetail />} />
+          <Route path="/fund/:identifier" element={<FundDetail />} />
           <Route path="/cumulative" element={<CumulativeReturns />} />
           <Route path="/correlation" element={<Correlation />} />
           <Route path="/mvo" element={<MVO />} />
