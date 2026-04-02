@@ -41,3 +41,14 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
+
+  # ── Cloudflare Tunnel: public access ────────────────────
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    command: tunnel run
+    env_file: src/fofproject/.env
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - frontend
+    restart: unless-stopped

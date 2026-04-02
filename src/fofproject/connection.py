@@ -40,6 +40,7 @@ def automate_device_login(user_code: str, email: str, password: str):
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
     from selenium.webdriver.chrome.options import Options
+    from selenium.common.exceptions import StaleElementReferenceException
 
     log.detail("Selenium: Starting browser...", phase=EMAIL)
 
@@ -83,8 +84,17 @@ def automate_device_login(user_code: str, email: str, password: str):
 
         # Wait for password field and enter password - robust approach
         log.detail("Selenium: Waiting for password field...", phase=EMAIL)
-        password_input = wait.until(EC.element_to_be_clickable((By.NAME, "passwd")))
-        time.sleep(1.5)
+        time.sleep(2)
+        for _retry in range(3):
+            try:
+                password_input = wait.until(EC.element_to_be_clickable((By.NAME, "passwd")))
+                password_input.is_displayed()  # verify element is not stale
+                break
+            except StaleElementReferenceException:
+                time.sleep(1)
+        else:
+            password_input = wait.until(EC.element_to_be_clickable((By.NAME, "passwd")))
+        time.sleep(0.5)
 
         # Click to ensure focus
         password_input.click()
