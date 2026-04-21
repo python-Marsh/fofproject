@@ -1,0 +1,34 @@
+.git/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.DS_Store
+*.env
+
+# Data files (mounted as volumes, not baked into image)
+output/
+input/
+data/
+RETURN DATA.csv
+MANUAL INPUTS.csv
+BENCHMARK.csv
+
+# Tests and fixtures
+tests/
+.pytest_cache/
+.ruff_cache/
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+
+# IDE settings
+.claude/
+.vscode/
+
+# Frontend build dependencies (rebuilt in frontend Dockerfile)
+web/frontend/node_modules/
+web/frontend/dist/

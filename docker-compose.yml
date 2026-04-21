@@ -6,10 +6,10 @@ services:
     build: .
     command: uvicorn web.backend.main:app --host 0.0.0.0 --port 8000
     volumes:
-      - ${DATA_ROOT:-/volume1/fof}/Input:/data/Input
-      - ${DATA_ROOT:-/volume1/fof}/output:/data/output
-      - ${DATA_ROOT:-/volume1/fof}/fund_firm_identifier:/data/fund_firm_identifier
-      - ${DATA_ROOT:-/volume1/fof}/emails:/data/emails
+      - ${DATA_ROOT:-/mnt/data}/Input:/data/Input
+      - ${DATA_ROOT:-/mnt/data}/output:/data/output
+      - ${DATA_ROOT:-/mnt/data}/Hedge Funds:/data/Hedge Funds
+      - ${DATA_ROOT:-/mnt/data}/RDGFF Emails:/data/RDGFF Emails
     ports:
       - "8000:8000"
     env_file: src/fofproject/.env
@@ -22,10 +22,10 @@ services:
     build: .
     command: python monitor.py
     volumes:
-      - ${DATA_ROOT:-/volume1/fof}/Input:/data/Input
-      - ${DATA_ROOT:-/volume1/fof}/output:/data/output
-      - ${DATA_ROOT:-/volume1/fof}/fund_firm_identifier:/data/fund_firm_identifier
-      - ${DATA_ROOT:-/volume1/fof}/emails:/data/emails
+      - ${DATA_ROOT:-/mnt/data}/Input:/data/Input
+      - ${DATA_ROOT:-/mnt/data}/output:/data/output
+      - ${DATA_ROOT:-/mnt/data}/Hedge Funds:/data/Hedge Funds
+      - ${DATA_ROOT:-/mnt/data}/RDGFF Emails:/data/RDGFF Emails
     env_file: src/fofproject/.env
     environment:
       - MPLBACKEND=Agg
@@ -47,8 +47,6 @@ services:
     image: cloudflare/cloudflared:latest
     command: tunnel run
     env_file: src/fofproject/.env
-    environment:
-      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
     depends_on:
       - frontend
     restart: unless-stopped

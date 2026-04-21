@@ -137,7 +137,8 @@
       "Bash(python -c \"from fofproject.classify import reconcile_misplaced_artifacts, _merge_folder_contents, _resolve_collision; print\\(''All imports OK''\\)\")",
       "Bash(python -m pytest /tmp/test_orphan_merge.py -v --tb=long)",
       "Bash(find /workspaces/fofproject -type f -name *.html -o -name *.js -o -name *.jsx -o -name *.tsx -o -name *.css)",
-      "Bash(head -30 /workspaces/fofproject/web/backend/routers/*.py)"
+      "Bash(head -30 /workspaces/fofproject/web/backend/routers/*.py)",
+      "Bash(git rm *)"
     ],
     "additionalDirectories": [
       "/tmp",

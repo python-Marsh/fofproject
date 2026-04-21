@@ -31,6 +31,7 @@ dist/
 build/
 
 # Web frontend
+web/frontend/htpasswd
 web/frontend/node_modules/
 web/frontend/dist/
 web/frontend/tsconfig.tsbuildinfo
