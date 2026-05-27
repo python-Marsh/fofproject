@@ -45,8 +45,11 @@ services:
   # ── Cloudflare Tunnel: public access ────────────────────
   tunnel:
     image: cloudflare/cloudflared:latest
-    command: tunnel run
+    command: tunnel --no-autoupdate --protocol http2 run
     env_file: src/fofproject/.env
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     depends_on:
       - frontend
     restart: unless-stopped

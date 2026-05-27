@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { Card, Tabs, Typography, Descriptions, Select, Spin, Space, Tag, Segmented, Table, InputNumber, DatePicker, Button, Popconfirm, Input, message } from 'antd'
+import { Card, Tabs, Typography, Descriptions, Select, Spin, Space, Tag, Segmented, Table, DatePicker, Button, Popconfirm, Input, message } from 'antd'
 import dayjs from 'dayjs'
 import { PlusOutlined, DeleteOutlined, SaveOutlined, EditOutlined, CheckOutlined, CloseOutlined } from '@ant-design/icons'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -103,7 +103,7 @@ export default function FundDetail() {
     enabled: !!fundIdentifier,
   })
 
-  const [owEntries, setOwEntries] = useState<{ date: string; value: number | null }[]>([])
+  const [owEntries, setOwEntries] = useState<{ date: string; value: number | string | null }[]>([])
   const [owDirty, setOwDirty] = useState(false)
   const [owInitialized, setOwInitialized] = useState<string | null>(null)
 
@@ -115,7 +115,7 @@ export default function FundDetail() {
   }
 
   const owSaveMutation = useMutation({
-    mutationFn: (entries: { date: string; value: number | null }[]) =>
+    mutationFn: (entries: { date: string; value: number | string | null }[]) =>
       saveFundOverwrite(fundIdentifier, { entries }),
     onSuccess: (res) => {
       message.success(res.message)
@@ -137,7 +137,7 @@ export default function FundDetail() {
   }
 
   const owAddRow = () => {
-    setOwEntries([...owEntries, { date: '', value: null }])
+    setOwEntries([...owEntries, { date: '', value: '' }])
     setOwDirty(true)
   }
 
@@ -353,7 +353,7 @@ export default function FundDetail() {
                 <div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12 }}>
                     <Typography.Text type="secondary">
-                      Override monthly returns for <strong>{fund.name}</strong>. Select a month, value as decimal (0.05 = 5%).
+                      Override monthly returns for <strong>{fund.name}</strong>. Value as decimal (0.05 = 5%). Leave empty to delete an existing datapoint.
                     </Typography.Text>
                     <Space>
                       <Button icon={<PlusOutlined />} size="small" onClick={owAddRow}>
@@ -406,14 +406,28 @@ export default function FundDetail() {
                         title: 'Return',
                         dataIndex: 'value',
                         width: 150,
-                        render: (val: number | null, _: unknown, i: number) => (
-                          <InputNumber
+                        render: (val: number | string | null, _: unknown, i: number) => (
+                          <Input
                             size="small"
-                            value={val}
-                            onChange={(v) => owUpdateEntry(i, 'value', v)}
-                            step={0.001}
+                            value={val === '' ? '' : val != null ? String(val) : ''}
+                            placeholder="empty = delete"
+                            onChange={(e) => {
+                              const raw = e.target.value.trim()
+                              if (raw === '') {
+                                owUpdateEntry(i, 'value', '')
+                              } else if (/^-?\d*\.?\d*$/.test(raw)) {
+                                // Keep as string while typing to preserve "0.", "-0.3", etc.
+                                owUpdateEntry(i, 'value', raw)
+                              }
+                            }}
+                            onBlur={(e) => {
+                              const raw = e.target.value.trim()
+                              if (raw !== '' && raw !== '-' && raw !== '.') {
+                                const parsed = Number(raw)
+                                if (!isNaN(parsed)) owUpdateEntry(i, 'value', parsed)
+                              }
+                            }}
                             style={{ width: '100%' }}
-                            controls={false}
                           />
                         ),
                       },

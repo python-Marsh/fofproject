@@ -690,9 +690,10 @@ class Fund:
         self.volatility_pa = volatility_pa
         self.min_ticket = min_ticket
         self.net_exposure = net_exposure
+        _valid_exposure = [v for v in (self.net_exposure or []) if v is not None]
         self.net_exposure_info = (
-            f"Net Exposure = {min(self.net_exposure) * 100}% to {max(self.net_exposure) * 100}%"
-            if self.net_exposure
+            f"Net Exposure = {min(_valid_exposure) * 100}% to {max(_valid_exposure) * 100}%"
+            if _valid_exposure
             else "No net exposure info"
         )
         self.net_return = net_return

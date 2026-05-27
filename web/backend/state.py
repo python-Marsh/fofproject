@@ -129,7 +129,8 @@ def get_fund_sources() -> dict[str, str]:
     bm_set = set(_index_names)
     csv_set = set(_rdgff_names)
     sources = {}
-    for name in funds:
+    for fund in funds.values():
+        name = fund.name
         parts = []
         if name in bm_set:
             parts.append("HF index comparison.xlsx")
@@ -137,7 +138,8 @@ def get_fund_sources() -> dict[str, str]:
             parts.append("RETURN DATA.csv")
         if name in _json_names:
             parts.append("JSON (Firm Folder)")
-        if name in _overwrite_names:
+        fund_ident = getattr(fund, "identifier", None)
+        if name in _overwrite_names or (fund_ident and fund_ident in _overwrite_names):
             parts.append("Manual Overwrite")
         sources[name] = " + ".join(parts) if parts else "Unknown"
     return sources

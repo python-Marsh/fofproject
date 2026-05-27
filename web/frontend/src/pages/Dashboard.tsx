@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useState, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Card, Table, Typography, Input, Tag, Space, Dropdown, Button, Checkbox } from 'antd'
-import { SettingOutlined } from '@ant-design/icons'
+import { SettingOutlined, DownloadOutlined, CheckSquareOutlined, CloseOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { useQuery } from '@tanstack/react-query'
 import { listFunds, type FundRow } from '../api/client'
@@ -15,6 +15,30 @@ const pct = (v: number | null | undefined) =>
 
 const num = (v: number | null | undefined, digits = 2) =>
   v != null ? v.toFixed(digits) : '—'
+
+function formatCellForCsv(value: unknown): string {
+  if (value == null) return ''
+  if (Array.isArray(value)) return value.join('; ')
+  const s = String(value)
+  if (s.includes(',') || s.includes('"') || s.includes('\n'))
+    return `"${s.replace(/"/g, '""')}"`
+  return s
+}
+
+function downloadCsv(rows: FundRow[], visibleCols: ColDef[]) {
+  const header = visibleCols.map((c) => c.title).join(',')
+  const lines = rows.map((row) =>
+    visibleCols.map((c) => formatCellForCsv(row[c.dataIndex])).join(',')
+  )
+  const csv = [header, ...lines].join('\n')
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `fund_dashboard_${new Date().toISOString().slice(0, 10)}.csv`
+  a.click()
+  URL.revokeObjectURL(url)
+}
 
 interface ColDef {
   key: string
@@ -269,6 +293,9 @@ export default function Dashboard() {
   const { isMobile } = useResponsive()
   const [search, setSearch] = useState('')
   const [visibleKeys, setVisibleKeys] = useState<Set<string>>(DEFAULT_VISIBLE)
+  const [selectMode, setSelectMode] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [viewFilter, setViewFilter] = useState<Set<string> | null>(null)
   const { data, isLoading } = useQuery({
     queryKey: ['funds'],
     queryFn: () => listFunds(),
@@ -277,19 +304,24 @@ export default function Dashboard() {
   const funds = data?.funds || []
 
   const filtered = useMemo(() => {
-    if (!search) return funds
+    let result = funds
+    if (viewFilter) {
+      result = result.filter((f) => viewFilter.has(f.Identifier as string))
+    }
+    if (!search) return result
     const q = search.toLowerCase()
-    return funds.filter(
+    return result.filter(
       (f) =>
         f.Name?.toLowerCase().includes(q) ||
         (typeof f.Identifier === 'string' && f.Identifier.toLowerCase().includes(q)) ||
         f['One Liner']?.toLowerCase().includes(q) ||
         (typeof f.Strategy === 'string' && f.Strategy.toLowerCase().includes(q))
     )
-  }, [funds, search])
+  }, [funds, search, viewFilter])
 
-  const columns: ColumnsType<FundRow> = ALL_COLUMNS
-    .filter((c) => visibleKeys.has(c.key))
+  const visibleCols = ALL_COLUMNS.filter((c) => visibleKeys.has(c.key))
+
+  const columns: ColumnsType<FundRow> = visibleCols
     .map((c) => ({
       title: c.title,
       dataIndex: c.dataIndex,
@@ -314,6 +346,29 @@ export default function Dashboard() {
     })
   }
 
+  const toggleSelectFund = useCallback((id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
+
+  const applyView = useCallback(() => {
+    if (selectedIds.size > 0) {
+      setViewFilter(new Set(selectedIds))
+    }
+    setSelectMode(false)
+    setSelectedIds(new Set())
+  }, [selectedIds])
+
+  const clearView = useCallback(() => {
+    setViewFilter(null)
+    setSelectMode(false)
+    setSelectedIds(new Set())
+  }, [])
+
   const columnMenu = {
     items: ALL_COLUMNS.map((c) => ({
       key: c.key,
@@ -329,17 +384,67 @@ export default function Dashboard() {
     })),
   }
 
+  const rowSelection = selectMode
+    ? {
+        selectedRowKeys: Array.from(selectedIds),
+        onChange: (keys: React.Key[]) => setSelectedIds(new Set(keys.map(String))),
+      }
+    : undefined
+
   return (
     <div>
       <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', justifyContent: 'space-between', alignItems: isMobile ? 'stretch' : 'center', gap: isMobile ? 8 : 0, marginBottom: 16 }}>
-        <Title level={3} style={{ margin: 0, color: '#2c2c2c' }}>Fund Dashboard</Title>
-        <Space style={{ width: isMobile ? '100%' : undefined }}>
+        <Space>
+          <Title level={3} style={{ margin: 0, color: '#2c2c2c' }}>Fund Dashboard</Title>
+          {viewFilter && (
+            <Tag
+              closable
+              onClose={clearView}
+              color="gold"
+              style={{ marginLeft: 8, fontSize: 13 }}
+            >
+              View: {viewFilter.size} funds
+            </Tag>
+          )}
+        </Space>
+        <Space wrap style={{ width: isMobile ? '100%' : undefined }}>
           <Search
             placeholder="Search funds..."
             allowClear
             onChange={(e) => setSearch(e.target.value)}
             style={{ width: isMobile ? '100%' : 300 }}
           />
+          {!selectMode ? (
+            <Button
+              icon={<CheckSquareOutlined />}
+              onClick={() => setSelectMode(true)}
+            >
+              Select View
+            </Button>
+          ) : (
+            <>
+              <Button
+                type="primary"
+                onClick={applyView}
+                disabled={selectedIds.size === 0}
+              >
+                Apply View ({selectedIds.size})
+              </Button>
+              <Button
+                icon={<CloseOutlined />}
+                onClick={() => { setSelectMode(false); setSelectedIds(new Set()) }}
+              >
+                Cancel
+              </Button>
+            </>
+          )}
+          <Button
+            icon={<DownloadOutlined />}
+            onClick={() => downloadCsv(filtered, visibleCols)}
+            disabled={filtered.length === 0}
+          >
+            Export CSV
+          </Button>
           <Dropdown menu={columnMenu} trigger={['click']} placement="bottomRight">
             <Button icon={<SettingOutlined />}>Columns</Button>
           </Dropdown>
@@ -355,8 +460,11 @@ export default function Dashboard() {
           scroll={{ x: 1200, y: 'calc(100vh - 300px)' }}
           sticky
           pagination={{ pageSize: 50, showSizeChanger: true }}
+          rowSelection={rowSelection}
           onRow={(record) => ({
-            onClick: () => navigate(`/fund/${encodeURIComponent(record.Identifier as string)}`),
+            onClick: selectMode
+              ? () => toggleSelectFund(record.Identifier as string)
+              : () => navigate(`/fund/${encodeURIComponent(record.Identifier as string)}`),
             style: { cursor: 'pointer' },
           })}
         />

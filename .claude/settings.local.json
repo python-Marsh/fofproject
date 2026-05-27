@@ -138,7 +138,17 @@
       "Bash(python -m pytest /tmp/test_orphan_merge.py -v --tb=long)",
       "Bash(find /workspaces/fofproject -type f -name *.html -o -name *.js -o -name *.jsx -o -name *.tsx -o -name *.css)",
       "Bash(head -30 /workspaces/fofproject/web/backend/routers/*.py)",
-      "Bash(git rm *)"
+      "Bash(git rm *)",
+      "Bash(node_modules/.bin/tsc --noEmit)",
+      "Bash(ls -la /workspaces/fofproject/*.py /workspaces/fofproject/src/fofproject/*.py)",
+      "Bash(kill %1)",
+      "Bash(python -c \"from web.backend.routers import birthday; print\\('Router imported successfully'\\)\")",
+      "Bash(lsof -i:8000 -P -n)",
+      "Bash(lsof -i:5173 -P -n)",
+      "Bash(kill 187335 263261)",
+      "Bash(ls /workspaces/fofproject/docker-compose*.yml /workspaces/fofproject/Dockerfile*)",
+      "Read(//home/devcontainers/projects/fofproject/**)",
+      "Bash(awk '{print toupper\\($0\\)}')"
     ],
     "additionalDirectories": [
       "/tmp",

@@ -1253,7 +1253,10 @@ def _read_overwrite_patches(csv_path: str) -> dict[str, list[dict]]:
         for d, v in zip(df["date"], df[col]):
             if pd.notna(v):
                 dt = datetime.strptime(str(d), "%d/%m/%Y")
-                entries.append({"date": datetime(dt.year, dt.month, 1), "value": v})
+                if str(v).strip() == "DELETE":
+                    entries.append({"date": datetime(dt.year, dt.month, 1), "value": "DELETE"})
+                else:
+                    entries.append({"date": datetime(dt.year, dt.month, 1), "value": v})
         if entries:
             patches[col] = entries
     return patches
@@ -1287,7 +1290,10 @@ def _apply_patches(patches: dict[str, list[dict]], base_funds: FundDict) -> Fund
         for entry in base_fund.monthly_returns:
             date_map[entry["month"]] = entry["value"]
         for entry in patch_entries:
-            date_map[entry["date"]] = entry["value"]
+            if entry["value"] == "DELETE":
+                date_map.pop(entry["date"], None)
+            else:
+                date_map[entry["date"]] = entry["value"]
 
         if not date_map:
             return None
@@ -1326,7 +1332,8 @@ def _apply_patches(patches: dict[str, list[dict]], base_funds: FundDict) -> Fund
     for col_key, patch_entries in patches.items():
         # Column name IS the identifier — match directly against the store
         raw = [{"date": e["date"].strftime("%d/%m/%Y"), "value": e["value"]}
-               for e in sorted(patch_entries, key=lambda x: x["date"])]
+               for e in sorted(patch_entries, key=lambda x: x["date"])
+               if e["value"] != "DELETE"]
 
         if col_key in merged._store:
             existing_fund = merged._store[col_key]

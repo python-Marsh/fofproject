@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from web.backend.state import reload_funds
-from web.backend.routers import system, funds, charts, tables, mvo, overwrite
+from web.backend.routers import system, funds, charts, tables, mvo, overwrite, birthday
 
 logger = logging.getLogger(__name__)
 
@@ -50,3 +50,4 @@ app.include_router(charts.router)
 app.include_router(tables.router)
 app.include_router(mvo.router)
 app.include_router(overwrite.router)
+app.include_router(birthday.router)

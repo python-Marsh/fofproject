@@ -180,7 +180,7 @@ export interface MvoResponse {
 }
 
 export interface FundOverwriteData {
-  entries: { date: string; value: number | null }[]
+  entries: { date: string; value: number | string | null }[]
 }
 
 // Request types

@@ -62,7 +62,11 @@ def read_fund_overwrite(identifier: str):
             date_str = parsed.strftime("%Y-%m")
         except ValueError:
             pass
-        entries.append({"date": date_str, "value": val})
+        # Return empty string for DELETE markers so frontend shows deletion
+        if str(val).strip() == "DELETE":
+            entries.append({"date": date_str, "value": ""})
+        else:
+            entries.append({"date": date_str, "value": val})
     return FundOverwriteData(entries=entries)
 
 
@@ -89,7 +93,20 @@ def write_fund_overwrite(identifier: str, data: FundOverwriteData):
         df[identifier] = None
 
     # Normalize all incoming dates to DD/MM/YYYY (month-end)
-    incoming = {_normalize_date(e["date"]): e["value"] for e in data.entries}
+    # Empty string value means "delete this datapoint from base data"
+    incoming = {}
+    DELETE_MARKER = "DELETE"
+    for e in data.entries:
+        date_key = _normalize_date(e["date"])
+        val = e["value"]
+        if val == "" or val is None:
+            incoming[date_key] = DELETE_MARKER
+        else:
+            # Coerce string numbers (e.g. "0.31") to float
+            try:
+                incoming[date_key] = float(val)
+            except (ValueError, TypeError):
+                incoming[date_key] = val
 
     # Normalize existing dates in the DataFrame for consistent comparison
     df["date"] = df["date"].astype(str).str.strip()
